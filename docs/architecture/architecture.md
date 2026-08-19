@@ -298,7 +298,7 @@ sequenceDiagram
   Orch->>State: save proposed plan + success criteria
   Orch-->>User: Propose plan (HITL confirm)
   User-->>Orch: Approve
-  Orch->>State: plan = Approved; schedule follow-ups
+  Orch->>State: plan = Approved, schedule follow-ups
 ```
 
 ### 7.2 Long-running tracking loop (pause / resume across sessions)
@@ -314,7 +314,7 @@ sequenceDiagram
   Orch->>State: load plan, progress, success criteria
   Orch->>Notif: "Send a photo of the new leaves"
   Notif->>User: WhatsApp reminder
-  Note over Orch: session ends; compute reclaimed
+  Note over Orch: session ends, compute reclaimed
   User->>Notif: replies with a photo
   Notif->>Orch: resume (interrupt response)
   Orch->>Orch: re-evaluate vs success criteria
