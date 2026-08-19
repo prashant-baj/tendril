@@ -1,0 +1,10 @@
+# Gitleaks config — extends the default ruleset.
+# Secret scanning is mandatory (pre-commit + CI). See docs/engineering-best-practices.md.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow placeholder values in the example env file only"
+paths = [
+  '''\.env\.example$''',
+]

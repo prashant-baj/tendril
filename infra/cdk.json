@@ -1,0 +1,11 @@
+{
+  "app": "python app.py",
+  "context": {
+    "env_name": "dev",
+    "model_id": "global.amazon.nova-2-lite-v1:0",
+    "github_org": "prashant-baj",
+    "github_repo": "tendril",
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true
+  }
+}

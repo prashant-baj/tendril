@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Angular
+node_modules/
+dist/
+.angular/
+npm-debug.log*
+coverage/
+
+# CDK
+cdk.out/
+*.cdk.staging/
+
+# Docker
+*.pid
+
+# Secrets & local config — NEVER commit real values
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+aws.json
+
+# IDE / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Build / tmp
+*.log
+tmp/
+.strands/
+
+# Local invoke test artifacts
+response.json
+payload.json
