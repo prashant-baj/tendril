@@ -76,7 +76,7 @@ tendril/
 - [`docs/architecture/architecture.md`](docs/architecture/architecture.md) — architecture, domain model, services, APIs, and diagrams
 - [`docs/architecture/ADRs/`](docs/architecture/ADRs/) — architecture decision records
 - [`docs/engineering-best-practices.md`](docs/engineering-best-practices.md) — engineering standards checklist
-- `docs/stories.md` — user stories / build backlog (planned)
+- [`docs/stories/`](docs/stories/) — user stories / build backlog
 
 ## License
 
