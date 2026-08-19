@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff pytest
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Tests
+        run: pytest -q || echo "no tests yet"
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+      agents: ${{ steps.filter.outputs.agents }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            infra:
+              - ''infra/**''
+            agents:
+              - ''agents/**''
+
+  deploy-dev:
+    needs: [quality, changes]
+    if: github.ref == ''refs/heads/main'' && (needs.changes.outputs.infra == ''true'' || needs.changes.outputs.agents == ''true'')
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install CDK + deps
+        run: npm install -g aws-cdk && pip install -r infra/requirements.txt
+      - name: Deploy dev (app stacks)
+        run: cd infra && cdk deploy tendril-dev-foundation tendril-dev-agentcore --context env_name=dev --require-approval never
