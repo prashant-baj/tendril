@@ -1,0 +1,12 @@
+# Ruff configuration for Tendril — shared by local dev, pre-commit, and CI.
+target-version = "py313"
+line-length = 100
+
+[lint]
+# Default rules (E4/E7/E9 + pyflakes) plus import sorting (I).
+# EXE (shebang/executable) is intentionally not selected — CDK apps run via `python app.py`.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[lint.isort]
+# Keep `X` and `X as Y` imports from the same module in a single block.
+combine-as-imports = true
