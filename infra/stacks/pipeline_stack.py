@@ -4,9 +4,10 @@ CI assumes this role via OIDC and then assumes the CDK bootstrap roles to
 deploy. Set `github_org` / `github_repo` via context (cdk.json) — do not
 hardcode. See docs/engineering-best-practices.md (GitOps).
 """
+
 from aws_cdk import (
-    Stack,
     CfnOutput,
+    Stack,
     aws_iam as iam,
 )
 from constructs import Construct

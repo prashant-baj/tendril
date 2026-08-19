@@ -4,12 +4,12 @@
 Environment is selected by the `env_name` context (dev|prod); account/region come
 from the CDK environment (CDK_DEFAULT_*). No account IDs are hardcoded.
 """
+
 import os
 
 import aws_cdk as cdk
-
-from stacks.foundation_stack import FoundationStack
 from stacks.agentcore_stack import AgentCoreStack
+from stacks.foundation_stack import FoundationStack
 from stacks.pipeline_stack import PipelineStack
 
 app = cdk.App()

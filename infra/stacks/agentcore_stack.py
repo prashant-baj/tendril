@@ -6,14 +6,15 @@ the container image is built from the agent folder (ARM64); pass context
 `agent_image_uri` to deploy a pre-built image instead (used by CI / to synth
 without a local Docker build).
 """
+
 from pathlib import Path
 
 from aws_cdk import (
-    Stack,
     CfnOutput,
-    aws_iam as iam,
-    aws_ecr_assets as ecr_assets,
+    Stack,
     aws_bedrockagentcore as agentcore,
+    aws_ecr_assets as ecr_assets,
+    aws_iam as iam,
 )
 from constructs import Construct
 

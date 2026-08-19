@@ -4,12 +4,13 @@ All resources are env-prefixed. Prod retains data; dev is destroyable.
 See docs/architecture/ADRs/0002-context-management-and-durable-state.md
 and 0004-backend-api-serverless-storage.md.
 """
+
 from aws_cdk import (
-    Stack,
-    RemovalPolicy,
     CfnOutput,
-    aws_s3 as s3,
+    RemovalPolicy,
+    Stack,
     aws_dynamodb as ddb,
+    aws_s3 as s3,
 )
 from constructs import Construct
 
