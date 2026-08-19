@@ -1,14 +1,11 @@
 name: CI
-
 on:
   pull_request:
   push:
     branches: [main]
-
 permissions:
   id-token: write
   contents: read
-
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -26,7 +23,6 @@ jobs:
         run: pytest -q || echo "no tests yet"
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2
-
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -39,13 +35,12 @@ jobs:
         with:
           filters: |
             infra:
-              - ''infra/**''
+              - 'infra/**'
             agents:
-              - ''agents/**''
-
+              - 'agents/**'
   deploy-dev:
     needs: [quality, changes]
-    if: github.ref == ''refs/heads/main'' && (needs.changes.outputs.infra == ''true'' || needs.changes.outputs.agents == ''true'')
+    if: github.ref == 'refs/heads/main' && (needs.changes.outputs.infra == 'true' || needs.changes.outputs.agents == 'true')
     runs-on: ubuntu-latest
     environment: dev
     steps:
