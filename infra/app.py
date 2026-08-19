@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tendril CDK app.
+"""Tendril CDK agentic app.
 
 Environment is selected by the `env_name` context (dev|prod); account/region come
 from the CDK environment (CDK_DEFAULT_*). No account IDs are hardcoded.
