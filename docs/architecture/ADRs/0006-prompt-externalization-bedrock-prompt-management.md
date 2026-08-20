@@ -59,6 +59,12 @@ the CFN "can't modify an exported value while it's imported" trap that a cross-s
 would create. Cost of resolution is one `ListPrompts` + one `GetPrompt` (cold-start today; a
 TTL or per-invoke refresh can be layered on for live updates).
 
+Prompt **text is authored as data**, not hardcoded: each prompt lives in `prompts/<logical-name>.md`
+(env-agnostic name; the entire file is the template), and `PromptsStack` reads the file at synth
+and provisions `tendril-<env>-<logical-name>`. This mirrors the guardrails policy-as-data split
+(`guardrails/*.json` ↔ `GuardrailsStack`), so domain experts edit a prompt by editing its file and
+deploying the prompts stack — no code change.
+
 ## Action Items
 
 1. [x] Provision the hello prompt as `CfnPrompt` + `CfnPromptVersion`; pass `PROMPT_ID`/`PROMPT_VERSION` to the runtime; grant `bedrock:GetPrompt`.

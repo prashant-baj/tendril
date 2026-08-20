@@ -28,6 +28,8 @@ jobs:
     outputs:
       infra: ${{ steps.filter.outputs.infra }}
       agents: ${{ steps.filter.outputs.agents }}
+      prompts: ${{ steps.filter.outputs.prompts }}
+      guardrails: ${{ steps.filter.outputs.guardrails }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -35,12 +37,21 @@ jobs:
         with:
           filters: |
             infra:
-              - 'infra/**'
+              - '"'"'infra/**'"'"'
             agents:
-              - 'agents/**'
+              - '"'"'agents/**'"'"'
+            prompts:
+              - '"'"'prompts/**'"'"'
+            guardrails:
+              - '"'"'guardrails/**'"'"'
   deploy-dev:
     needs: [quality, changes]
-    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && (needs.changes.outputs.infra == 'true' || needs.changes.outputs.agents == 'true')    
+    if: >-
+      (github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/dev'"'"') &&
+      (needs.changes.outputs.infra == '"'"'true'"'"' ||
+       needs.changes.outputs.agents == '"'"'true'"'"' ||
+       needs.changes.outputs.prompts == '"'"'true'"'"' ||
+       needs.changes.outputs.guardrails == '"'"'true'"'"')
     runs-on: ubuntu-latest
     environment: dev
     steps:
@@ -57,4 +68,10 @@ jobs:
       - name: Install CDK + deps
         run: npm install -g aws-cdk && pip install -r infra/requirements.txt
       - name: Deploy dev (app stacks)
-        run: cd infra && cdk deploy tendril-dev-foundation tendril-dev-agentcore --context env_name=dev --require-approval never
+        run: >-
+          cd infra && cdk deploy
+          tendril-dev-foundation
+          tendril-dev-prompts
+          tendril-dev-guardrails
+          tendril-dev-agentcore
+          --context env_name=dev --require-approval never
