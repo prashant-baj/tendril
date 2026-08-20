@@ -1,6 +1,6 @@
 {
   "name": "hello-guardrail",
-  "description": "MVP Bedrock Guardrail for Tendril's hello agent: content filters (incl. prompt-attack), off-domain/unsafe denied topics, and PII anonymization. Safety-critical config, provisioned as IaC and versioned like prompts (ADR-0006/0007/0008).",
+  "description": "MVP guardrail for Tendril's hello agent: content filters (incl. prompt-attack), off-domain/unsafe denied topics, and PII anonymization. Provisioned as IaC (ADR-0008).",
   "blockedInputMessaging": "I can't help with that. I'm Tendril, a gardening assistant — ask me about your flowers, vegetables, or plant care.",
   "blockedOutputsMessaging": "I can't share that response. I'm Tendril, a gardening assistant — let's keep to helping your garden safely.",
   "contentPolicy": {
