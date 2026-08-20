@@ -114,15 +114,47 @@ def build_model() -> BedrockModel:
     return BedrockModel(**kwargs)
 
 
+DEFAULT_USER_MESSAGE = "Say hello and confirm you are running."
+
 app = BedrockAgentCoreApp()
-_model = build_model()
-SYSTEM_PROMPT = load_system_prompt()  # fetched once per cold start
+_model: BedrockModel | None = None
+_system_prompt: str | None = None
+
+
+def _get_model() -> BedrockModel:
+    """Build the model once and reuse it (resolved on first request, not at import)."""
+    global _model
+    if _model is None:
+        _model = build_model()
+    return _model
+
+
+def _get_system_prompt() -> str:
+    """Resolve the system prompt once and reuse it (cached after first request)."""
+    global _system_prompt
+    if _system_prompt is None:
+        _system_prompt = load_system_prompt()
+    return _system_prompt
+
+
+def resolve_user_message(payload: dict) -> str:
+    """Deterministic input validation (ADR-0008 hardcoded floor).
+
+    Accepts only a dict payload; a missing, non-string, or blank ``prompt`` falls back
+    to a safe default rather than passing malformed input to the model.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object with an optional 'prompt' string")
+    prompt = payload.get("prompt", DEFAULT_USER_MESSAGE)
+    if not isinstance(prompt, str) or not prompt.strip():
+        return DEFAULT_USER_MESSAGE
+    return prompt
 
 
 @app.entrypoint
 def invoke(payload: dict) -> dict:
-    user_message = payload.get("prompt", "Say hello and confirm you are running.")
-    agent = Agent(model=_model, system_prompt=SYSTEM_PROMPT)
+    user_message = resolve_user_message(payload)
+    agent = Agent(model=_get_model(), system_prompt=_get_system_prompt())
     result = agent(user_message)
     return {"result": str(result)}
 

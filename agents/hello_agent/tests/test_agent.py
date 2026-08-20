@@ -1,0 +1,168 @@
+"""Unit tests for the hello agent (PG-05).
+
+These test the deterministic logic — prompt/guardrail resolution, fail-open fallback,
+and input validation — without any AWS calls (boto3 and the model are mocked). Skips
+cleanly if the agent's runtime deps aren't installed (e.g. a minimal CI lane).
+"""
+
+import importlib
+
+import pytest
+
+# The module imports strands / bedrock_agentcore at top level; skip if unavailable.
+pytest.importorskip("strands")
+pytest.importorskip("bedrock_agentcore")
+
+agent = importlib.import_module("agent")
+
+
+# --- input validation (deterministic floor) ---------------------------------
+
+
+def test_resolve_user_message_defaults_when_missing():
+    assert agent.resolve_user_message({}) == agent.DEFAULT_USER_MESSAGE
+
+
+def test_resolve_user_message_defaults_on_blank_or_nonstring():
+    assert agent.resolve_user_message({"prompt": "   "}) == agent.DEFAULT_USER_MESSAGE
+    assert agent.resolve_user_message({"prompt": 123}) == agent.DEFAULT_USER_MESSAGE
+
+
+def test_resolve_user_message_passes_through_real_prompt():
+    assert agent.resolve_user_message({"prompt": "why are my basil leaves yellow?"}) == (
+        "why are my basil leaves yellow?"
+    )
+
+
+def test_resolve_user_message_rejects_non_dict():
+    with pytest.raises(ValueError):
+        agent.resolve_user_message("not a dict")
+
+
+# --- prompt resolution (ADR-0006) -------------------------------------------
+
+
+def test_load_system_prompt_uses_default_when_no_name(monkeypatch):
+    monkeypatch.setattr(agent, "PROMPT_NAME", None)
+    assert agent.load_system_prompt() == agent.DEFAULT_SYSTEM_PROMPT
+
+
+def test_load_system_prompt_falls_back_on_error(monkeypatch):
+    monkeypatch.setattr(agent, "PROMPT_NAME", "tendril-dev-hello-system")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no AWS here")
+
+    monkeypatch.setattr(agent.boto3, "client", boom)
+    assert agent.load_system_prompt() == agent.DEFAULT_SYSTEM_PROMPT
+
+
+def test_load_system_prompt_returns_fetched_text(monkeypatch):
+    monkeypatch.setattr(agent, "PROMPT_NAME", "tendril-dev-hello-system")
+
+    class FakeClient:
+        def list_prompts(self, **_):
+            return {"promptSummaries": [{"name": "tendril-dev-hello-system", "id": "PID"}]}
+
+        def get_prompt(self, promptIdentifier=None):
+            assert promptIdentifier == "PID"
+            return {
+                "defaultVariant": "default",
+                "variants": [
+                    {
+                        "name": "default",
+                        "templateConfiguration": {"text": {"text": "FETCHED PROMPT"}},
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(agent.boto3, "client", lambda *a, **k: FakeClient())
+    assert agent.load_system_prompt() == "FETCHED PROMPT"
+
+
+def test_resolve_prompt_id_paginates(monkeypatch):
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        def list_prompts(self, **kwargs):
+            self.calls += 1
+            if "nextToken" not in kwargs:
+                return {"promptSummaries": [{"name": "other", "id": "X"}], "nextToken": "t2"}
+            return {"promptSummaries": [{"name": "wanted", "id": "GOOD"}]}
+
+    c = FakeClient()
+    assert agent._resolve_prompt_id(c, "wanted") == "GOOD"
+    assert c.calls == 2
+
+
+# --- guardrail resolution + model build (ADR-0008) --------------------------
+
+
+def test_resolve_guardrail_id_found_and_missing():
+    class FakeClient:
+        def list_guardrails(self, **_):
+            return {"guardrails": [{"name": "tendril-dev-hello-guardrail", "id": "GRID"}]}
+
+    c = FakeClient()
+    assert agent._resolve_guardrail_id(c, "tendril-dev-hello-guardrail") == "GRID"
+    assert agent._resolve_guardrail_id(c, "nope") is None
+
+
+def test_build_model_without_guardrail(monkeypatch):
+    monkeypatch.setattr(agent, "GUARDRAIL_NAME", None)
+    monkeypatch.setattr(agent, "MODEL_ID", "global.amazon.nova-2-lite-v1:0")
+    captured = {}
+    monkeypatch.setattr(agent, "BedrockModel", lambda **kw: captured.update(kw) or object())
+    agent.build_model()
+    assert captured == {"model_id": "global.amazon.nova-2-lite-v1:0"}
+
+
+def test_build_model_attaches_resolved_guardrail(monkeypatch):
+    monkeypatch.setattr(agent, "GUARDRAIL_NAME", "tendril-dev-hello-guardrail")
+    monkeypatch.setattr(agent, "MODEL_ID", "m")
+
+    class FakeClient:
+        def list_guardrails(self, **_):
+            return {"guardrails": [{"name": "tendril-dev-hello-guardrail", "id": "GRID"}]}
+
+    monkeypatch.setattr(agent.boto3, "client", lambda *a, **k: FakeClient())
+    captured = {}
+    monkeypatch.setattr(agent, "BedrockModel", lambda **kw: captured.update(kw) or object())
+    agent.build_model()
+    assert captured["guardrail_id"] == "GRID"
+    assert captured["guardrail_version"] == "DRAFT"
+
+
+def test_build_model_fail_open_when_guardrail_unresolvable(monkeypatch):
+    monkeypatch.setattr(agent, "GUARDRAIL_NAME", "tendril-dev-hello-guardrail")
+    monkeypatch.setattr(agent, "MODEL_ID", "m")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no AWS")
+
+    monkeypatch.setattr(agent.boto3, "client", boom)
+    captured = {}
+    monkeypatch.setattr(agent, "BedrockModel", lambda **kw: captured.update(kw) or object())
+    agent.build_model()
+    # fail-open: model still built, no guardrail attached
+    assert "guardrail_id" not in captured
+
+
+# --- entrypoint --------------------------------------------------------------
+
+
+def test_invoke_returns_typed_result(monkeypatch):
+    monkeypatch.setattr(agent, "_get_model", lambda: object())
+    monkeypatch.setattr(agent, "_get_system_prompt", lambda: "system")
+
+    class FakeAgent:
+        def __init__(self, **_):
+            pass
+
+        def __call__(self, message):
+            return f"echo: {message}"
+
+    monkeypatch.setattr(agent, "Agent", FakeAgent)
+    out = agent.invoke({"prompt": "hello there"})
+    assert out == {"result": "echo: hello there"}
