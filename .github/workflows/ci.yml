@@ -37,21 +37,21 @@ jobs:
         with:
           filters: |
             infra:
-              - '"'"'infra/**'"'"'
+              - 'infra/**'
             agents:
-              - '"'"'agents/**'"'"'
+              - 'agents/**'
             prompts:
-              - '"'"'prompts/**'"'"'
+              - 'prompts/**'
             guardrails:
-              - '"'"'guardrails/**'"'"'
+              - 'guardrails/**'
   deploy-dev:
     needs: [quality, changes]
     if: >-
-      (github.ref == '"'"'refs/heads/main'"'"' || github.ref == '"'"'refs/heads/dev'"'"') &&
-      (needs.changes.outputs.infra == '"'"'true'"'"' ||
-       needs.changes.outputs.agents == '"'"'true'"'"' ||
-       needs.changes.outputs.prompts == '"'"'true'"'"' ||
-       needs.changes.outputs.guardrails == '"'"'true'"'"')
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') &&
+      (needs.changes.outputs.infra == 'true' ||
+       needs.changes.outputs.agents == 'true' ||
+       needs.changes.outputs.prompts == 'true' ||
+       needs.changes.outputs.guardrails == 'true')
     runs-on: ubuntu-latest
     environment: dev
     steps:
@@ -75,3 +75,4 @@ jobs:
           tendril-dev-guardrails
           tendril-dev-agentcore
           --context env_name=dev --require-approval never
+# prod deploys are gated separately (tag/manual approval) - added in a later story.
