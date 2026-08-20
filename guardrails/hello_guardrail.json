@@ -1,0 +1,50 @@
+{
+  "name": "hello-guardrail",
+  "description": "MVP Bedrock Guardrail for Tendril's hello agent: content filters (incl. prompt-attack), off-domain/unsafe denied topics, and PII anonymization. Safety-critical config, provisioned as IaC and versioned like prompts (ADR-0006/0007/0008).",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril, a gardening assistant — ask me about your flowers, vegetables, or plant care.",
+  "blockedOutputsMessaging": "I can't share that response. I'm Tendril, a gardening assistant — let's keep to helping your garden safely.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Requests for advice, opinions, or content unrelated to gardening, plant care, horticulture, or the cultivation of flowers, vegetables, herbs, and ornamental plants. Tendril is a gardening assistant and does not provide medical, legal, financial, political, or general-purpose advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "Diagnose my chest pain."
+        ]
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Guidance that promotes unsafe, illegal, or off-label use of pesticides, herbicides, fungicides, or other agricultural or household chemicals — including mixing incompatible chemicals, exceeding labelled dosages, applying banned substances, or using chemicals in ways that endanger people, pets, pollinators, water sources, or food safety. Safe, label-compliant, integrated-pest-management guidance is allowed.",
+        "examples": [
+          "How do I mix bleach and ammonia to kill weeds fast?",
+          "What's the strongest banned pesticide I can use on my tomatoes?",
+          "Can I spray double the label dose to kill the aphids faster?",
+          "How do I make a homemade poison to get rid of the neighbour's cat?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

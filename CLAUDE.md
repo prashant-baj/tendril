@@ -1,13 +1,13 @@
 # Tendril — AI Assistant Rules (Build with AI)
 
-This file governs AI-assisted development on Tendril. Read it, the docs it links, and the ADRs **before generating any code**. Use the **Strands Agents MCP docs server** (configured in `.mcp.json`) for authoritative Strands APIs; fall back to `llms.txt` / `llms-full.txt`.
+This file governs AI-assisted development on Tendril. Read it, the docs it links, and the ADRs **before generating any code**. Use the **Strands Agents MCP docs server** (configured in `.mcp.json`) for authoritative Strands APIs; if it is unavailable, fall back to the repo's [`llms.txt`](./llms.txt), which links the canonical Strands docs indexes (`https://strandsagents.com/llms.txt` and `llms-full.txt`).
 
 ## Read first (context)
 - Concept & vision: `docs/project-context.md`
 - Architecture: `docs/architecture/architecture.md`
 - Decisions (binding): `docs/architecture/ADRs/`
 - Standards: `docs/engineering-best-practices.md`
-- Backlog: `docs/stories/`
+- Backlog (priority-ranked): `docs/backlog.md`; stories: `docs/stories/`
 
 ## Architectural guardrails (non-negotiable)
 - **ADRs are binding constraints.** All generated designs and code must conform to the accepted ADRs. Do **not** silently violate one.

@@ -1,0 +1,30 @@
+# Tendril — AI-assisted development context (Strands fallback)
+
+> Tendril is an AWS Strands multi-agent reference implementation: a domain-agnostic,
+> config-driven agent framework (tools-as-APIs, agents from a factory, model-driven
+> orchestration, externalized prompts + guardrails) with a garden-assistant application.
+> This file is the **fallback context** for AI coding assistants when the Strands Agents
+> MCP docs server (`.mcp.json`) is unavailable. Primary mechanism is the MCP server;
+> these links point at authoritative, always-current Strands docs in raw markdown.
+
+## Strands Agents (authoritative docs)
+
+- [Strands docs index (llms.txt)](https://strandsagents.com/llms.txt): index of all docs pages in raw markdown.
+- [Strands full docs (llms-full.txt)](https://strandsagents.com/llms-full.txt): complete documentation in one file (excludes API reference).
+- [Build with AI](https://strandsagents.com/docs/user-guide/build-with-ai/): how to ground AI assistants on Strands (MCP server + llms.txt).
+- [Python quickstart](https://strandsagents.com/docs/user-guide/quickstart/): minimal agent loop.
+- Tip: append `/index.md` to any docs page URL to get its raw markdown.
+
+## Read first (this repo)
+
+- [CLAUDE.md](./CLAUDE.md): binding AI-development rules; ADRs as guardrails; hard rules.
+- [Project concept & vision](./docs/project-context.md): the two-layer framework + application.
+- [Architecture](./docs/architecture/architecture.md).
+- [Decisions (ADRs)](./docs/architecture/ADRs/): binding architectural constraints (0001–0008).
+- [Engineering best practices](./docs/engineering-best-practices.md): standards + Definition of Done.
+- [Backlog](./docs/backlog.md) and [stories](./docs/stories/): what to build, in priority order.
+
+## Governance
+
+- ADRs are binding. Request an ADR before any architecturally significant change — never assume one.
+- No hardcoded secrets/account IDs; env + CDK context + SSM/Secrets Manager; IAM roles, not keys.
