@@ -4,13 +4,15 @@ on:
   push:
     branches: [main, dev]
 permissions:
-  id-token: write
+  id-token: write   # OIDC federation to AWS (no static keys)
   contents: read
 jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can diff the pushed commit range
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -67,6 +69,10 @@ jobs:
           python-version: "3.13"
       - name: Install CDK + deps
         run: npm install -g aws-cdk && pip install -r infra/requirements.txt
+      # Deploy the app stacks. Order matters on a cold environment: prompts and
+      # guardrails must exist before the agent runtime, which resolves them by name
+      # at cold start. CDK no-ops any stack whose template is unchanged, so listing
+      # all four is safe regardless of which folder triggered the run.
       - name: Deploy dev (app stacks)
         run: >-
           cd infra && cdk deploy
