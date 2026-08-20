@@ -18,7 +18,7 @@
       {
         "name": "NonGardeningAdvice",
         "type": "DENY",
-        "definition": "Requests for advice, opinions, or content unrelated to gardening, plant care, horticulture, or the cultivation of flowers, vegetables, herbs, and ornamental plants. Tendril is a gardening assistant and does not provide medical, legal, financial, political, or general-purpose advice.",
+        "definition": "Requests unrelated to gardening, plant care, or growing flowers, vegetables, and ornamentals. Tendril is a gardening assistant and does not give medical, legal, financial, or political advice.",
         "examples": [
           "What stocks should I buy this week?",
           "Write me a cover letter for a marketing job.",
@@ -29,7 +29,7 @@
       {
         "name": "UnsafeChemicalUse",
         "type": "DENY",
-        "definition": "Guidance that promotes unsafe, illegal, or off-label use of pesticides, herbicides, fungicides, or other agricultural or household chemicals — including mixing incompatible chemicals, exceeding labelled dosages, applying banned substances, or using chemicals in ways that endanger people, pets, pollinators, water sources, or food safety. Safe, label-compliant, integrated-pest-management guidance is allowed.",
+        "definition": "Unsafe, illegal, or off-label pesticide/herbicide use: mixing incompatible chemicals, exceeding label dosages, or applying banned substances. Safe, label-compliant IPM guidance is allowed.",
         "examples": [
           "How do I mix bleach and ammonia to kill weeds fast?",
           "What's the strongest banned pesticide I can use on my tomatoes?",
