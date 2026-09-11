@@ -4,10 +4,10 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-10 (re-synced against `origin/dev` + working tree)
+**Last updated:** 2026-09-12 (added the Walking Skeleton epic, WS-01..WS-05, and the Agent Factory epic, AF-01..AF-05)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
-**Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`)
+**Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
 
 ## Known drift / housekeeping (clear these first)
 
@@ -38,10 +38,20 @@ on the date below — re-verify before starting a story.
 | 13 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
 | 14 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
 | 15 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
+| 16 | WS | WS-01 | API: contract-first OpenAPI for photo upload + goal intake | ☐ | — | Defines `app/api/openapi.yaml` (media upload + goal intake ops) per ADR-0011. Design-first; nothing else in the epic can start without it. |
+| 17 | WS | WS-02 | Infra: Client API, EventBridge trigger, declarative agent registry | ☐ | WS-01 | `ClientApiStack` (`SpecRestApi`), EventBridge rule, `agents/registry/*.json` + `AgentCoreStack` refactor migrating `hello_agent`, per ADR-0011/ADR-0012. |
+| 18 | WS | WS-03 | Application: Client API Lambda handlers | ☐ | WS-01, WS-02 | Presigned media-upload handler + goal-intake handler (validate → persist → publish event). |
+| 19 | WS | WS-04 | Application: Orchestrator Lambda | ☐ | WS-02, WS-03 | Strands agent loop, EventBridge-triggered, calls the migrated `hello` agent via `InvokeAgentRuntime` as the first registered specialist. |
+| 20 | WS | WS-05 | Frontend: real photo capture + goal submission | ☐ | WS-01, WS-03 | Wires the Capture screen's camera/file input and goal text to the live API, replacing `MockGoalApi` for this flow. |
+| 21 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ☐ | WS-02 | Loops all three registry-driven stacks over their data folders; deploys a second real agent (Agronomy) with zero stack-code changes. |
+| 22 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | ☐ | AF-01 | Generalizes `hello_agent`'s code into the shared template every registry entry uses; proves two agents, one codebase. |
+| 23 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ☐ | AF-02 | Weather as the reference Lambda+API tool; tool-agnostic binding mechanism in the template agent. |
+| 24 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ☐ | AF-01 | Real agronomy-specific denied topics/PII policy, replacing AF-01's placeholder stub. |
+| 25 | AF | AF-05 | Memory & Context: per-user/per-garden memory for every specialist | ☐ | AF-02 | Strands Memory (Bedrock KB) + context management, scoped per tenant, opt-in per agent — fulfills ADR-0001 action items 6 & 8. |
 
 ## Carried forward (future epics — not yet storied)
 
-Walking skeleton (photo → orchestrator → response), agent factory + prompts, orchestrator & specialists, tools/APIs, tracker/outcome loop, frontend app, notifications, HITL action-gating, aggregated-data/learning layer. Add as feature stories when scoped, then insert into the table with a Rank.
+Full garden/plant CRUD, plan proposal & HITL approval, the remaining 7 specialist agents and 4 tools beyond Agronomy/Weather, the tracker/outcome loop, the WebSocket push channel + live result rendering, auth (Cognito), notifications, Cedar authorization + wider Interventions/HITL handlers, aggregated-data/learning layer. Add as feature stories when scoped, then insert into the table with a Rank.
 
 ## How to use this sheet
 

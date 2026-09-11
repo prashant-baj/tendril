@@ -110,6 +110,16 @@ inventing a new one.
   practice; whether the registry needs formal JSON-Schema validation wired into `ci.yml`
   (mirroring the guardrail/prompt policy-as-data validation already in place).
 
+> **Refinement (2026-09-12):** ADR-0001's factory principle — *"agents come from a factory: one
+> template, specialized purely by configuration"* — applies literally to the registry's `folder`
+> field above. It does **not** mean one Dockerfile/code folder per specialist; it means **one
+> shared agent template codebase** (`agents/template/`, generalizing today's `agents/hello_agent/`),
+> and every registry entry points at that same template. A specialist is *only* its config:
+> `model_id`, `prompt_name`, `guardrail_name`, `tools` (now concretely Lambda-backed Tool APIs —
+> see the Agent Factory stories, `docs/stories/agent-factory.md`), and memory/context settings.
+> `agents/registry/README.md` is updated accordingly. A registry entry may still override
+> `template` for a genuinely custom specialist later, but that is the exception, not the default.
+
 ## Action Items
 
 1. [ ] Define the registry JSON shape and migrate `hello_agent` into `agents/registry/hello.json`.
