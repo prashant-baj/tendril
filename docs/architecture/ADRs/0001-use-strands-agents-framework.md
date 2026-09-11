@@ -120,7 +120,7 @@ The secondary axis is **AWS-native deployment and observability**. Because the p
 2. [ ] Configure the Strands MCP docs server (Build with AI) for the coding assistant to offset ecosystem newness.
 3. [ ] Implement durable outcome-loop state on DynamoDB / AgentCore Memory (tracked in a separate ADR).
 4. [ ] Establish eval scenarios + OpenTelemetry tracing as the testing approach for model-driven behavior.
-5. [ ] Validate agents-as-tools vs. in-process Swarm/Graph for the orchestrator↔specialist topology (candidate for its own ADR).
+5. [x] Validate agents-as-tools vs. in-process Swarm/Graph for the orchestrator↔specialist topology (candidate for its own ADR) — **resolved by [ADR-0012](./0012-orchestrator-lambda-declarative-agent-registry.md)**: agents-as-tools over remote AgentCore `InvokeAgentRuntime`, driven by a declarative agent registry.
 6. [ ] Adopt Strands **Memory** (Bedrock Knowledge Bases backend) + **S3Storage**, with stores scoped per user/garden for multi-tenant isolation.
 7. [ ] Implement plan approval and confirm-before-action via the **HumanInTheLoop** intervention (interrupt/resume) with a **WhatsApp custom callback**.
 8. [ ] Configure **context management** (auto summarization + ContextOffloader; pin garden vision & success criteria) to bound context over multi-week histories.
