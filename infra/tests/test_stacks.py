@@ -13,6 +13,7 @@ from aws_cdk.assertions import Match, Template  # noqa: E402
 from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
 from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
+from stacks.pipeline_stack import PipelineStack  # noqa: E402
 from stacks.prompts_stack import PromptsStack  # noqa: E402
 
 ENV = Environment(account="123456789012", region="ap-south-1")
@@ -123,6 +124,46 @@ def test_agentcore_env_and_iam():
         "bedrock:InvokeModel",
     ]:
         assert needed in actions, f"missing IAM action: {needed}"
+
+
+# --- pipeline (GitHub OIDC deploy role) --------------------------------------
+
+
+def test_deploy_role_trust_policy_tolerates_github_immutable_id_sub_claim():
+    # Regression test: GitHub's OIDC `sub` claim embeds immutable numeric owner/repo
+    # IDs (`repo:org@123/repo@456:...`), not just `repo:org/repo:...` — confirmed via
+    # CloudTrail against an actual AssumeRoleWithWebIdentity AccessDenied. A trust
+    # policy without the `@*` wildcards silently never matches.
+    app = App(context={"github_org": "prashant-baj", "github_repo": "tendril"})
+    tpl = Template.from_stack(PipelineStack(app, "pl", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::IAM::Role",
+        Match.object_like(
+            {
+                "RoleName": "tendril-dev-gh-deploy",
+                "AssumeRolePolicyDocument": Match.object_like(
+                    {
+                        "Statement": Match.array_with(
+                            [
+                                Match.object_like(
+                                    {
+                                        "Action": "sts:AssumeRoleWithWebIdentity",
+                                        "Condition": Match.object_like(
+                                            {
+                                                "StringLike": {
+                                                    "token.actions.githubusercontent.com:sub": "repo:prashant-baj@*/tendril@*:*"
+                                                }
+                                            }
+                                        ),
+                                    }
+                                )
+                            ]
+                        )
+                    }
+                ),
+            }
+        ),
+    )
 
 
 # --- frontend (S3 static website hosting) -----------------------------------

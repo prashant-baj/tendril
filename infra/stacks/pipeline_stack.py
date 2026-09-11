@@ -46,7 +46,13 @@ class PipelineStack(Stack):
                         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                     },
                     "StringLike": {
-                        "token.actions.githubusercontent.com:sub": f"repo:{org}/{repo}:*"
+                        # GitHub's OIDC token now embeds immutable numeric owner/repo IDs
+                        # into `sub` (e.g. `repo:org@123/repo@456:environment:dev`), not
+                        # just `repo:org/repo:...` — the `@*` wildcards absorb those ID
+                        # segments. Confirmed against the actual denied claim via
+                        # CloudTrail (`aws cloudtrail lookup-events` for
+                        # AssumeRoleWithWebIdentity) rather than assumed.
+                        "token.actions.githubusercontent.com:sub": f"repo:{org}@*/{repo}@*:*"
                     },
                 },
             ),
