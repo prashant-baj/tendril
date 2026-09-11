@@ -29,7 +29,7 @@
       {
         "name": "UnsafeChemicalUse",
         "type": "DENY",
-        "definition": "Unsafe, illegal, or off-label pesticide/herbicide use: mixing incompatible chemicals, exceeding label dosages, or applying banned substances. Safe, label-compliant IPM guidance is allowed.",
+        "definition": "Advice enabling dangerous or illegal chemical use, such as mixing chemicals that create toxic gas, applying banned or restricted pesticides, or deliberately exceeding label dosages to boost potency.",
         "examples": [
           "How do I mix bleach and ammonia to kill weeds fast?",
           "What's the strongest banned pesticide I can use on my tomatoes?",
