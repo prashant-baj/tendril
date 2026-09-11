@@ -1,0 +1,70 @@
+@if (detail(); as d) {
+  <div class="screen">
+    <a routerLink="/home" class="back">
+      <td-icon name="arrow_back" size="18px" />Home
+    </a>
+
+    <section class="card header">
+      <td-chip tone="amber" shape="pill" icon="pending" [iconFilled]="true">Awaiting your approval</td-chip>
+      <h1>{{ d.goal.title }}</h1>
+      <p><strong>Done when:</strong> {{ d.goal.successCriteria }}</p>
+      <div class="stats">
+        @for (stat of d.stats; track stat.label) {
+          <div>
+            <div class="stat-value">{{ stat.value }}</div>
+            <div class="stat-label">{{ stat.label }}</div>
+          </div>
+        }
+      </div>
+    </section>
+
+    <!-- agent trace -->
+    <section class="card">
+      <button type="button" class="trace-toggle" (click)="toggleTrace()" [attr.aria-expanded]="traceOpen()">
+        <td-icon name="graph_3" size="20px" class="trace-icon" />
+        <span class="trace-toggle-body">
+          <span class="trace-toggle-title">How this was decided</span>
+          <span class="trace-toggle-sub">6 specialists · 11 s · resolved at runtime</span>
+        </span>
+        <td-icon name="expand_more" size="22px" class="chevron" [class.open]="traceOpen()" />
+      </button>
+      @if (traceOpen()) {
+        <div class="trace-body">
+          @for (entry of d.trace; track entry.agent; let last = $last) {
+            <td-trace-entry [entry]="entry" [last]="last" />
+          }
+          <div class="trace-note">
+            <td-icon name="info" size="17px" />
+            <span>No fixed sequence — the orchestrator picked these specialists from your garden’s context and what the photo showed.</span>
+          </div>
+        </div>
+      }
+    </section>
+
+    <!-- plan -->
+    <section>
+      <h2>The plan · {{ d.planTasks.length }} tasks over 18 days</h2>
+      <div class="plan-list">
+        @for (task of d.planTasks; track task.title) {
+          <td-plan-task-card [task]="task" />
+        }
+      </div>
+    </section>
+
+    <!-- follow-ups -->
+    <section class="card follow-ups">
+      <div class="follow-ups-head">
+        <td-icon name="event_repeat" size="20px" class="follow-ups-icon" />
+        <h2>Follow-up schedule</h2>
+      </div>
+      <p>Tendril checks in on WhatsApp, re-reads your photos, and adapts the plan if things aren’t moving.</p>
+      <div>
+        @for (followUp of d.followUps; track followUp.what) {
+          <td-follow-up-row [followUp]="followUp" />
+        }
+      </div>
+    </section>
+  </div>
+} @else {
+  <p class="not-found">This goal doesn’t have a plan yet.</p>
+}

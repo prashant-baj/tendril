@@ -1,0 +1,15 @@
+<nav class="bottom-nav">
+  @for (item of navItems; track item.id; let i = $index) {
+    <a [routerLink]="item.route" class="tab" [class.active]="activeId() === item.id">
+      <td-icon [name]="item.icon" [filled]="activeId() === item.id" size="23px" />
+      <span>{{ item.label }}</span>
+    </a>
+    @if (i === 1) {
+      <!-- Reserves room for the floating capture button, matching the mockup's layout. -->
+      <div class="spacer" aria-hidden="true"></div>
+    }
+  }
+  <a routerLink="/capture" class="capture-fab" aria-label="Check a plant">
+    <td-icon name="photo_camera" size="26px" />
+  </a>
+</nav>

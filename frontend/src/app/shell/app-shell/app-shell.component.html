@@ -1,0 +1,18 @@
+<div class="page-bg">
+  <div class="device" [class.wide]="layout.isWide()">
+    @if (layout.isWide()) {
+      <td-nav-rail />
+    }
+    <div class="app-column">
+      <td-top-bar />
+      <main class="scrollable content-area">
+        <div class="content-inner" [class.wide]="layout.isWide()">
+          <router-outlet />
+        </div>
+      </main>
+      @if (!layout.isWide()) {
+        <td-bottom-nav />
+      }
+    </div>
+  </div>
+</div>

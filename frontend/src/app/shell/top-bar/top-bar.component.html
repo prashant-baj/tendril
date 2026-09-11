@@ -1,0 +1,26 @@
+<header class="top-bar" [class.wide]="layout.isWide()">
+  <div class="left">
+    @if (!layout.isWide()) {
+      <span class="logo">
+        <td-icon name="eco" [filled]="true" size="18px" />
+      </span>
+    }
+    <div class="title-block">
+      <div class="title">{{ title() }}</div>
+      <button type="button" class="garden-switch">
+        Balcony Kitchen Garden
+        <td-icon name="expand_more" size="16px" />
+      </button>
+    </div>
+  </div>
+  <div class="right">
+    <span class="weather">
+      <td-icon name="sunny" size="16px" />
+      <span>34°C · dry</span>
+    </span>
+    <a class="bell" routerLink="/activity" aria-label="Activity and notifications">
+      <td-icon name="notifications" size="22px" />
+      <span class="dot" aria-hidden="true"></span>
+    </a>
+  </div>
+</header>

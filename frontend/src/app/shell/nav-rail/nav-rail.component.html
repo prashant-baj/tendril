@@ -1,0 +1,34 @@
+<aside class="rail">
+  <div class="brand">
+    <span class="logo">
+      <td-icon name="eco" [filled]="true" size="20px" />
+    </span>
+    <div>
+      <div class="name">Tendril</div>
+      <div class="tag">Garden agent</div>
+    </div>
+  </div>
+
+  @for (item of navItems; track item.id) {
+    <a
+      [routerLink]="item.route"
+      class="item"
+      [class.active]="activeId() === item.id"
+    >
+      <td-icon [name]="item.icon" [filled]="activeId() === item.id" size="22px" />
+      <span>{{ item.label }}</span>
+    </a>
+  }
+
+  <div class="spacer"></div>
+
+  <a routerLink="/capture" class="capture-cta">
+    <td-icon name="photo_camera" size="20px" />
+    Check a plant
+  </a>
+
+  <div class="user">
+    <span class="avatar">M</span>
+    <span class="name">Meera S.</span>
+  </div>
+</aside>

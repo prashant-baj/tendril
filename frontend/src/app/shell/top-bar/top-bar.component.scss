@@ -1,0 +1,110 @@
+.top-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--td-color-bg-app) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--td-color-line);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+
+  &.wide { padding: 18px 32px; }
+}
+
+.left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.logo {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: var(--td-radius-pill);
+  background: var(--td-color-primary);
+  color: var(--td-color-bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.title-block { min-width: 0; }
+
+.title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--td-color-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.garden-switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-top: 1px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--td-color-ink-secondary);
+  cursor: pointer;
+
+  .ms { color: var(--td-color-ink-tertiary); }
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.weather {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--td-radius-pill);
+  background: var(--td-color-amber-surface);
+  border: 1px solid var(--td-color-amber-border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--td-color-amber-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bell {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--td-radius-pill);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--td-color-ink-secondary);
+
+  &:hover { background: var(--td-color-bg-page); }
+}
+
+.dot {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--td-radius-pill);
+  background: var(--td-color-red-dot);
+  border: 2px solid var(--td-color-bg-app);
+}

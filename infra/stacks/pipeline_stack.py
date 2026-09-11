@@ -70,4 +70,18 @@ class PipelineStack(Stack):
             )
         )
 
+        # `aws s3 sync` of the built frontend runs directly (outside CDK) after
+        # FrontendStack provisions the bucket — grant CI just enough S3 access to sync
+        # into it. Scoped by the env-prefixed naming convention (no cross-stack import;
+        # same "resolve by stable name" posture as prompts/guardrails, see ADR-0008).
+        deploy_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+                resources=[
+                    "arn:aws:s3:::tendril-*-web",
+                    "arn:aws:s3:::tendril-*-web/*",
+                ],
+            )
+        )
+
         CfnOutput(self, "GithubDeployRoleArn", value=deploy_role.role_arn)

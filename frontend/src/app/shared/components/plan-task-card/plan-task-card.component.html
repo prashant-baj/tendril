@@ -1,0 +1,15 @@
+<div class="card">
+  <div class="when">
+    <span class="when-top">{{ task.whenTop }}</span>
+    <span class="when-big">{{ task.whenBig }}</span>
+  </div>
+  <div class="body">
+    <div class="title">{{ task.title }}</div>
+    <div class="detail">{{ task.detail }}</div>
+    <div class="chips">
+      <td-chip tone="neutral" shape="rect" [icon]="task.scopeIcon">{{ task.scope }}</td-chip>
+      <td-chip tone="green" shape="rect" icon="psychology">{{ task.source }}</td-chip>
+      <td-chip [tone]="gateTone" shape="rect" [icon]="task.gateIcon">{{ task.gate }}</td-chip>
+    </div>
+  </div>
+</div>

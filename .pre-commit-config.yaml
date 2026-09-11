@@ -21,7 +21,15 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
+        # tsconfig*.json and .vscode/*.json are JSONC (Angular CLI generates them with
+        # `//` comments) — valid TS/VS Code config, invalid strict JSON. Excluded rather
+        # than stripped of comments, which is the standard convention for these files.
+        exclude: '(^|/)tsconfig[^/]*\.json$|(^|/)\.vscode/.*\.json$'
       - id: check-added-large-files
+        # Lockfiles are expected to be large and must be committed in full for
+        # reproducible installs — don't block them; still guards against accidental
+        # large binaries everywhere else.
+        exclude: '(^|/)(package|npm)-.*lock\.json$|(^|/)poetry\.lock$'
       - id: check-merge-conflict
 
   - repo: https://github.com/gitleaks/gitleaks

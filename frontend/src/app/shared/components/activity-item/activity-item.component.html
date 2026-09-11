@@ -1,0 +1,16 @@
+<div class="item">
+  <div class="rail">
+    <span class="node" [class]="'tone-' + event.tone">
+      <td-icon [name]="event.icon" size="16px" />
+    </span>
+    <span class="line" [class.hidden]="last"></span>
+  </div>
+  <div class="body">
+    <div class="when">{{ event.when }}</div>
+    <div class="title">{{ event.title }}</div>
+    <div class="detail">{{ event.detail }}</div>
+    @if (event.quote) {
+      <div class="quote">{{ event.quote }}</div>
+    }
+  </div>
+</div>

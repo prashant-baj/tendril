@@ -1,0 +1,5 @@
+<div class="screen">
+  @for (event of activity(); track event.title; let last = $last) {
+    <td-activity-item [event]="event" [last]="last" />
+  }
+</div>

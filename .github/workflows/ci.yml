@@ -32,6 +32,7 @@ jobs:
       agents: ${{ steps.filter.outputs.agents }}
       prompts: ${{ steps.filter.outputs.prompts }}
       guardrails: ${{ steps.filter.outputs.guardrails }}
+      frontend: ${{ steps.filter.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -46,6 +47,8 @@ jobs:
               - 'prompts/**'
             guardrails:
               - 'guardrails/**'
+            frontend:
+              - 'frontend/**'
   deploy-dev:
     needs: [quality, changes]
     if: >-
@@ -53,7 +56,8 @@ jobs:
       (needs.changes.outputs.infra == 'true' ||
        needs.changes.outputs.agents == 'true' ||
        needs.changes.outputs.prompts == 'true' ||
-       needs.changes.outputs.guardrails == 'true')
+       needs.changes.outputs.guardrails == 'true' ||
+       needs.changes.outputs.frontend == 'true')
     runs-on: ubuntu-latest
     environment: dev
     steps:
@@ -71,8 +75,9 @@ jobs:
         run: npm install -g aws-cdk && pip install -r infra/requirements.txt
       # Deploy the app stacks. Order matters on a cold environment: prompts and
       # guardrails must exist before the agent runtime, which resolves them by name
-      # at cold start. CDK no-ops any stack whose template is unchanged, so listing
-      # all four is safe regardless of which folder triggered the run.
+      # at cold start; frontend must exist (bucket created) before the sync step below.
+      # CDK no-ops any stack whose template is unchanged, so listing all five is safe
+      # regardless of which folder triggered the run.
       - name: Deploy dev (app stacks)
         run: >-
           cd infra && cdk deploy
@@ -80,5 +85,17 @@ jobs:
           tendril-dev-prompts
           tendril-dev-guardrails
           tendril-dev-agentcore
+          tendril-dev-frontend
           --context env_name=dev --require-approval never
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.frontend == 'true'
+        with:
+          node-version: "22"
+      - name: Build frontend
+        if: needs.changes.outputs.frontend == 'true'
+        run: npm ci && npx ng build
+        working-directory: frontend
+      - name: Sync frontend to S3
+        if: needs.changes.outputs.frontend == 'true'
+        run: aws s3 sync frontend/dist/tendril-web/browser/ s3://tendril-dev-web --delete
 # prod deploys are gated separately (tag/manual approval) - added in a later story.

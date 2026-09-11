@@ -1,0 +1,76 @@
+<div class="screen">
+
+  <div class="viewfinder">
+    <div class="gradient"></div>
+    <td-icon name="photo_camera" size="72px" class="watermark" />
+    @if (capture.phase() === 'analyzing') {
+      <div class="sweep"></div>
+    }
+    <div class="location-pill">
+      <td-icon name="location_on" size="15px" />
+      <span>Pune · balcony, east</span>
+    </div>
+    <div class="frame-caption">
+      <div class="frame-title">Tomato #2 · lower leaves</div>
+      <div class="frame-detail">Photo 3 of this plant · last one 8 days ago</div>
+    </div>
+  </div>
+
+  @switch (capture.phase()) {
+    @case ('idle') {
+      <div class="idle">
+        <p>Take a photo of anything that worries you. Tendril reads it, asks the specialists it needs, and turns it into a goal with a plan — you only approve.</p>
+        <button type="button" class="btn-primary" (click)="runAnalysis()">Analyse this photo</button>
+      </div>
+    }
+    @case ('analyzing') {
+      <section class="card analyzing">
+        <div class="analyzing-head">
+          <td-icon name="graph_3" size="18px" class="pulse" />
+          <span>Working on it</span>
+        </div>
+        <div class="steps">
+          @for (step of capture.liveSteps(); track step.name) {
+            <div class="step" [class]="'state-' + step.state">
+              <td-icon [name]="step.icon" [filled]="step.state === 'done'" size="20px" />
+              <div>
+                <div class="step-name">{{ step.name }}</div>
+                <div class="step-note">{{ step.note }}</div>
+              </div>
+            </div>
+          }
+        </div>
+      </section>
+    }
+    @case ('found') {
+      <div class="found">
+        <section class="card">
+          <div class="findings-head">
+            <td-chip tone="amber" shape="pill" icon="troubleshoot" [iconFilled]="true">2 findings</td-chip>
+            <h1>Nitrogen imbalance for the fruiting stage, plus heat stress</h1>
+            <p>Flowers are healthy and there is no pest damage — the yellowing sits on the lower leaves only, which fits feeding, not disease.</p>
+          </div>
+          <div>
+            @for (finding of findings(); track finding.title) {
+              <td-finding-card [finding]="finding" />
+            }
+          </div>
+        </section>
+
+        <section class="goal-panel">
+          <div class="goal-panel-label">Goal created for you</div>
+          <div class="goal-panel-title">Get Tomato #2 setting fruit within 3 weeks</div>
+          <div class="goal-panel-detail">Done when at least 5 fruits have set and no new lower-leaf yellowing appears for 7 days.</div>
+          <div class="goal-facts">
+            @for (fact of goalFacts(); track fact.label) {
+              <td-chip tone="green" variant="outline" shape="rect" [icon]="fact.icon">{{ fact.label }}</td-chip>
+            }
+          </div>
+          <a class="btn-primary" [routerLink]="goalRoute">See the plan</a>
+        </section>
+
+        <button type="button" class="retake" (click)="retake()">Retake photo</button>
+      </div>
+    }
+  }
+</div>

@@ -1,0 +1,24 @@
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--td-color-line-soft);
+
+  .ms { color: var(--td-color-ink-tertiary); }
+  &:first-child { border-top: none; }
+}
+
+.what {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--td-color-ink);
+}
+
+.when {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--td-color-ink-tertiary);
+  font-variant-numeric: tabular-nums;
+}

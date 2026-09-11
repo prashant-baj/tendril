@@ -1,0 +1,29 @@
+.screen {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+h2 { font-size: 18px; font-weight: 600; margin: 0; color: var(--td-color-ink); }
+.count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--td-color-ink-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.card {
+  background: var(--td-color-bg-surface);
+  border: 1px solid var(--td-color-line);
+  border-radius: var(--td-radius-lg);
+  box-shadow: var(--td-shadow-card);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

@@ -1,0 +1,18 @@
+<a class="card" [routerLink]="detailRoute">
+  <span class="top">
+    <td-chip [tone]="statusTone" shape="pill" [icon]="goal.statusIcon" [iconFilled]="true">{{ goal.statusLabel }}</td-chip>
+    <span class="timing">{{ goal.timing }}</span>
+  </span>
+  <span class="title">{{ goal.title }}</span>
+  <span class="garden">
+    <td-icon name="yard" size="15px" />
+    <span>{{ goal.garden }}</span>
+  </span>
+  <span class="track">
+    <span class="bar" [class.muted]="barTone === 'muted'" [style.width.%]="goal.progressPct"></span>
+  </span>
+  <span class="bottom">
+    <span class="next">{{ goal.next }}</span>
+    <span class="pct">{{ goal.progressPct }}%</span>
+  </span>
+</a>

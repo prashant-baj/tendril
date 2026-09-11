@@ -1,0 +1,24 @@
+@if (garden(); as g) {
+  <div class="screen">
+    <section class="card intro">
+      <h2>{{ g.name }}</h2>
+      <p>“{{ g.vision }}” East-facing, roughly 5 hours of direct sun, all containers.</p>
+      <div class="facts">
+        @for (fact of gardenFacts(); track fact.label) {
+          <span class="fact">
+            <td-icon [name]="fact.icon" size="15px" />{{ fact.label }}
+          </span>
+        }
+      </div>
+    </section>
+
+    <section>
+      <h2>9 plants</h2>
+      <div class="card list">
+        @for (plant of plants(); track plant.plantId) {
+          <td-plant-row [plant]="plant" (activate)="openCapture()" />
+        }
+      </div>
+    </section>
+  </div>
+}

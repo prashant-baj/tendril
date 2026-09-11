@@ -1,0 +1,17 @@
+<button type="button" class="row" (click)="toggle.emit(task.taskId)" [attr.aria-pressed]="task.done">
+  <td-icon
+    [name]="task.done ? 'check_circle' : 'radio_button_unchecked'"
+    [filled]="task.done"
+    size="22px"
+    class="check"
+    [class.done]="task.done"
+  />
+  <span class="body">
+    <span class="label" [class.done]="task.done">{{ task.label }}</span>
+    <span class="meta">
+      <td-icon [name]="task.metaIcon" size="14px" />
+      <span>{{ task.meta }}</span>
+    </span>
+  </span>
+  <td-chip [tone]="chipTone" shape="rect">{{ task.chip }}</td-chip>
+</button>

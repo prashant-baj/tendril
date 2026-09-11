@@ -11,6 +11,7 @@ aws_cdk = pytest.importorskip("aws_cdk")
 from aws_cdk import App, Environment  # noqa: E402
 from aws_cdk.assertions import Match, Template  # noqa: E402
 from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
+from stacks.frontend_stack import FrontendStack  # noqa: E402
 from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
 from stacks.prompts_stack import PromptsStack  # noqa: E402
 
@@ -122,3 +123,43 @@ def test_agentcore_env_and_iam():
         "bedrock:InvokeModel",
     ]:
         assert needed in actions, f"missing IAM action: {needed}"
+
+
+# --- frontend (S3 static website hosting) -----------------------------------
+
+
+def test_frontend_bucket_is_a_public_static_website():
+    app = _app()
+    tpl = Template.from_stack(FrontendStack(app, "fe", env_name="dev", env=ENV))
+    tpl.resource_count_is("AWS::S3::Bucket", 1)
+    tpl.has_resource_properties(
+        "AWS::S3::Bucket",
+        Match.object_like(
+            {
+                "BucketName": "tendril-dev-web",
+                "WebsiteConfiguration": {
+                    "IndexDocument": "index.html",
+                    "ErrorDocument": "index.html",
+                },
+            }
+        ),
+    )
+    # Public read via bucket policy (not ACLs) — BLOCK_ACLS still blocks legacy ACL grants.
+    tpl.has_resource_properties(
+        "AWS::S3::BucketPolicy",
+        Match.object_like(
+            {
+                "PolicyDocument": Match.object_like(
+                    {
+                        "Statement": Match.array_with(
+                            [
+                                Match.object_like(
+                                    {"Action": "s3:GetObject", "Principal": Match.any_value()}
+                                )
+                            ]
+                        )
+                    }
+                )
+            }
+        ),
+    )

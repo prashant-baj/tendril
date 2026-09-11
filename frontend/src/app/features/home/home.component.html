@@ -1,0 +1,60 @@
+<div class="screen">
+
+  <!-- proposal banner -->
+  <section class="card banner">
+    <div class="banner-head">
+      <td-icon name="pending" [filled]="true" size="18px" />
+      <span>Waiting on you</span>
+    </div>
+    <div class="banner-body">
+      <span class="banner-thumb">
+        <td-icon name="potted_plant" size="28px" />
+      </span>
+      <div>
+        <div class="banner-title">A plan is ready for “Tomatoes flowering but not fruiting”</div>
+        <div class="banner-detail">6 specialists agreed on 4 tasks over 18 days. Nothing happens until you approve it.</div>
+      </div>
+    </div>
+    <div class="banner-actions">
+      <a class="btn-primary" [routerLink]="reviewPlanRoute">Review plan</a>
+      <button type="button" class="btn-secondary">Later</button>
+    </div>
+  </section>
+
+  <!-- today -->
+  <section>
+    <div class="section-head">
+      <h2>Today</h2>
+      <a routerLink="/tasks" class="link">All tasks</a>
+    </div>
+    <div class="card list">
+      @for (task of todayTasks(); track task.taskId) {
+        <td-task-row [task]="task" (toggle)="toggleTask($event)" />
+      }
+    </div>
+  </section>
+
+  <!-- goals -->
+  <section>
+    <h2 class="section-title">Goals in progress</h2>
+    <div class="goal-grid">
+      @for (goal of goals(); track goal.goalId) {
+        <td-goal-card [goal]="goal" />
+      }
+    </div>
+  </section>
+
+  <!-- plants strip -->
+  <section>
+    <div class="section-head">
+      <h2>Plants</h2>
+      <a routerLink="/garden" class="link">See all 9</a>
+    </div>
+    <div class="scrollable plant-strip">
+      @for (plant of plants(); track plant.plantId) {
+        <td-plant-card [plant]="plant" (activate)="goToGarden()" />
+      }
+    </div>
+  </section>
+
+</div>

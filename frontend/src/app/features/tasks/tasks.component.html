@@ -1,0 +1,15 @@
+<div class="screen">
+  @for (group of taskGroups(); track group.title) {
+    <section>
+      <div class="section-head">
+        <h2>{{ group.title }}</h2>
+        <span class="count">{{ group.items.length }}</span>
+      </div>
+      <div class="card">
+        @for (task of group.items; track task.taskId) {
+          <td-task-row [task]="task" (toggle)="toggleTask($event)" />
+        }
+      </div>
+    </section>
+  }
+</div>

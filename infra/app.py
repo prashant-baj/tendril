@@ -10,6 +10,7 @@ import os
 import aws_cdk as cdk
 from stacks.agentcore_stack import AgentCoreStack
 from stacks.foundation_stack import FoundationStack
+from stacks.frontend_stack import FrontendStack
 from stacks.guardrails_stack import GuardrailsStack
 from stacks.pipeline_stack import PipelineStack
 from stacks.prompts_stack import PromptsStack
@@ -26,6 +27,7 @@ FoundationStack(app, f"tendril-{env_name}-foundation", env_name=env_name, env=en
 PromptsStack(app, f"tendril-{env_name}-prompts", env_name=env_name, env=env)
 GuardrailsStack(app, f"tendril-{env_name}-guardrails", env_name=env_name, env=env)
 AgentCoreStack(app, f"tendril-{env_name}-agentcore", env_name=env_name, env=env)
+FrontendStack(app, f"tendril-{env_name}-frontend", env_name=env_name, env=env)
 PipelineStack(app, f"tendril-{env_name}-pipeline", env_name=env_name, env=env)
 
 cdk.Tags.of(app).add("project", "tendril")
