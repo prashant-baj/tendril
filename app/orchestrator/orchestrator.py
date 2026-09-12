@@ -198,8 +198,14 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},
     )
 
+    message = goal["description"]
+    if image_url:
+        # The model only sees this text — it has no other way of knowing a photo is actually
+        # attached, and won't reliably call a vision-capable specialist without being told.
+        message += "\n\n(A photo of the affected plant is attached to this goal.)"
+
     try:
-        result = agent(goal["description"])
+        result = agent(message)
         _update_goal(
             garden_id,
             goal_id,

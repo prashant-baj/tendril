@@ -268,6 +268,73 @@ def test_handle_goal_submitted_with_photo_passes_image_url_to_tools(monkeypatch)
     assert payload["imageFormat"] == "jpeg"
 
 
+def test_handle_goal_submitted_tells_agent_a_photo_is_attached(monkeypatch):
+    # Regression: the top-level agent only sees the message text it's called with — it has no
+    # other way of knowing a photo is attached, and won't reliably call vision without being
+    # told explicitly (observed live: it asked the user to share a photo that was already there).
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {
+                    "garden_id": "g1",
+                    "goal_id": "goal-1",
+                    "description": "leaves not healthy",
+                    "media_ids": ["media-1"],
+                }
+            },
+            "MEDIA#media-1": {
+                "Item": {"s3_key": "g1/media-1/tomato.jpg", "content_type": "image/jpeg"}
+            },
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+
+    captured = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, text):
+            captured["text"] = text
+            return "orchestrator summary"
+
+    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert "leaves not healthy" in captured["text"]
+    assert "photo" in captured["text"].lower()
+    assert "attached" in captured["text"].lower()
+
+
+def test_handle_goal_submitted_omits_photo_note_when_no_media(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+
+    captured = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, text):
+            captured["text"] = text
+            return "orchestrator summary"
+
+    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert captured["text"] == "help"
+
+
 def test_handle_goal_submitted_goal_not_found(monkeypatch):
     fake_table = FakeTable(get_item_response={})
     monkeypatch.setattr(handler, "_table", fake_table)
