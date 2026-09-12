@@ -98,6 +98,8 @@ class GuardrailsStack(Stack):
                     type=t["type"],
                     definition=t["definition"],
                     examples=t.get("examples"),
+                    input_action=t.get("inputAction"),
+                    output_action=t.get("outputAction"),
                 )
                 for t in topics
             ]

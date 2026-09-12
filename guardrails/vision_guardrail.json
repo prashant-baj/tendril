@@ -18,13 +18,14 @@
       {
         "name": "NonGardeningAdvice",
         "type": "DENY",
-        "definition": "Requests unrelated to gardening, plant care, or growing flowers, vegetables, and ornamentals. Tendril is a gardening assistant and does not give medical, legal, financial, or political advice.",
+        "definition": "Off-topic requests unrelated to gardening (finance, careers, politics). Diagnosing a PLANT's pests, disease, or care issues from a photo is this agent's job, not human medical advice.",
         "examples": [
           "What stocks should I buy this week?",
           "Write me a cover letter for a marketing job.",
           "Who should I vote for in the election?",
-          "Diagnose my chest pain."
-        ]
+          "What should I take for a headache?"
+        ],
+        "outputAction": "NONE"
       },
       {
         "name": "UnsafeChemicalUse",
