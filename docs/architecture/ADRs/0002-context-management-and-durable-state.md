@@ -92,9 +92,9 @@ For working context, Option A's use of Strands Context Management is clearly cor
 
 ## Action Items
 
-1. [ ] Configure **`S3Storage`** as the Strands Storage backend (offloading, session management, memory) — explicitly, not the default in-memory store.
-2. [ ] Set the conversation manager to **`auto`** with **pins** for garden vision and goal success criteria; apply `SlidingWindow` where history is predictable.
-3. [ ] Enable **Memory** (`MemoryManager`, Bedrock Knowledge Bases backend) with **stores scoped per user/garden**.
-4. [ ] Define the **DynamoDB schema** for Garden/Plant/Goal/Plan/Task/Tracking + a capture-first event log, and the query patterns the tracker/scheduler need (e.g., follow-ups due).
-5. [ ] Document and enforce the **ownership boundary** (what lives in Strands vs. DynamoDB) to prevent divergence.
-6. [ ] Apply **privacy-by-design** to all durable tiers — consent, PII minimization, per-tenant isolation, retention/TTL (see `../../engineering-best-practices.md`).
+1. [ ] Configure **`S3Storage`** as the Strands Storage backend (offloading, session management, memory) — explicitly, not the default in-memory store. **Design specified** in [`data-architecture.md`](../data-architecture.md) §3.1/§3.3 (`tendril-{env}-agent-state` bucket, `session_id = goal_id`); provisioning it is a follow-up (§9 there).
+2. [ ] Set the conversation manager to **`auto`** with **pins** for garden vision and goal success criteria; apply `SlidingWindow` where history is predictable. Pinning mechanism refined to **`ContextInjector`**, not the `agentic` mode's model-invoked `pin_context` — see [`strands-capability-mapping.md`](../strands-capability-mapping.md).
+3. [ ] Enable **Memory** (`MemoryManager`, Bedrock Knowledge Bases backend) with **stores scoped per user/garden**. **Design specified** in [`data-architecture.md`](../data-architecture.md) §3.2 — two Knowledge Bases (Garden Memory, scoped; Horticultural Reference, shared read-only), not one.
+4. [x] Define the **DynamoDB schema** for Garden/Plant/Goal/Plan/Task/Tracking + a capture-first event log, and the query patterns the tracker/scheduler need (e.g., follow-ups due) — **done in [`data-architecture.md`](../data-architecture.md) §2**, including the `TasksDueIndex` GSI for the due-follow-ups query.
+5. [ ] Document and enforce the **ownership boundary** (what lives in Strands vs. DynamoDB) to prevent divergence — the *data* ownership boundary is documented (`data-architecture.md` §§1-5); the **agent access boundary** (who may reach which store) is now its own decision: [ADR-0013](./0013-agent-data-access-boundary.md).
+6. [ ] Apply **privacy-by-design** to all durable tiers — consent, PII minimization, per-tenant isolation, retention/TTL (see `../../engineering-best-practices.md`). Tenant isolation is now concrete (`data-architecture.md` §8); retention/TTL policy per entity is still open.

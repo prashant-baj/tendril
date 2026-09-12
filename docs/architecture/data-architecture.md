@@ -1,0 +1,274 @@
+# Tendril — Data Architecture
+
+This document makes ADR-0002's three-tier state model concrete: the actual entity/key design,
+where sessions/context/memory live and how they're keyed, the agent data-access boundary
+(ADR-0013), and a full inventory of every Lambda, API, Agent, Event, and Data component in the
+system as currently designed. It fulfills ADR-0002's action item 4 ("define the DynamoDB
+schema... and the query patterns the tracker/scheduler need").
+
+Where this document adds new decisions beyond restating existing ones, they're called out
+explicitly with their own ADR (0013) rather than asserted here as if already accepted.
+
+---
+
+## 1. The three tiers, concretely
+
+Per [ADR-0002](./ADRs/0002-context-management-and-durable-state.md):
+
+| Tier | Mechanism | Keyed by | Lives in |
+|---|---|---|---|
+| Working context (in-model) | Strands `context_manager="auto"` (`SummarizingConversationManager` + `ContextOffloader`) + `ContextInjector` for pinning vision/success-criteria | the current agent invocation | in-memory during the invocation only |
+| Conversational durability | Strands `SnapshotSessionManager` + `S3Storage`; Strands `MemoryManager` + `BedrockKnowledgeBaseStore` | `session_id = goal_id`; memory `scope = "{user_id}:{garden_id}"` | new **`tendril-{env}-agent-state`** S3 bucket (sessions/offload); Bedrock Knowledge Base (memory) |
+| Structured domain state | DynamoDB | `pk`/`sk` per entity (§2) | existing **`tendril-{env}-app`** table (`FoundationStack`) |
+
+The orchestrator is the only component that touches all three tiers directly; specialists only
+ever see tier 1 (their own invocation) plus whatever tier-2/3 data the orchestrator hands them as
+input (§4).
+
+---
+
+## 2. Application entity data model (DynamoDB single-table design)
+
+`tendril-{env}-app` (existing `FoundationStack.app_table`, `pk`/`sk` strings, on-demand billing)
+holds every structured domain entity from `architecture.md` §2. Single-table, partitioned so
+that **almost every read is a single-partition query scoped to one tenant** (`GARDEN#{garden_id}`
+or `USER#{user_id}`) — a query can never accidentally span gardens without going through the one
+deliberate GSI below.
+
+| Entity | `pk` | `sk` | Key attributes | Notes |
+|---|---|---|---|---|
+| User | `USER#{user_id}` | `METADATA` | `channel`, `locale` | |
+| Garden ownership (index record) | `USER#{user_id}` | `GARDEN#{garden_id}` | denormalized `name` | Lets "list my gardens" be one query with no GSI |
+| Garden (canonical) | `GARDEN#{garden_id}` | `METADATA` | `name`, `vision`, `geolocation`, `climate_zone`, `owner_user_id` | |
+| Plant | `GARDEN#{garden_id}` | `PLANT#{plant_id}` | `species`, `variety`, `stage` | |
+| Goal | `GARDEN#{garden_id}` | `GOAL#{goal_id}` | `description`, `type`, `status`, `plant_id?` | `plant_id` present only if plant-scoped |
+| Plan | `GARDEN#{garden_id}` | `PLAN#{plan_id}` | `goal_id`, `success_criteria`, `status` | 1:1 with its goal (architecture.md §2) |
+| Task | `GARDEN#{garden_id}` | `TASK#{task_id}` | `plan_id`, `scope` (`plant`\|`garden`), `plant_id?`, `status`, `due_date`, **`gsi1pk`, `gsi1sk`** | see the `TasksDueIndex` GSI below |
+| Tracking | `GARDEN#{garden_id}` | `TRACKING#{tracking_id}` | `goal_id`, `plan_id?`, `task_id?`, `timestamp`, `observation`, `decision` | |
+| Event (capture-first log) | `GARDEN#{garden_id}` | `EVENT#{iso_timestamp}#{event_id}` | `type`, `payload` | `sk` is time-sortable — directly backs the frontend's Activity screen |
+| Media | `GARDEN#{garden_id}` | `MEDIA#{media_id}` | `s3_key`, `content_type`, `plant_id?`, `uploaded_at` | `s3_key` points into `MediaBucket` |
+| Notification | `USER#{user_id}` | `NOTIFICATION#{sent_at}#{notification_id}` | `channel`, `status`, `related_goal_id?`, `related_task_id?` | scoped by user, not garden — a user may have several gardens |
+
+### GSI: `TasksDueIndex` (on `AppTable`)
+
+The tracker/scheduler's defining query — "which tasks have a follow-up due right now?" — can't be
+answered by the table's own `pk`/`sk` (that would mean scanning every garden's partition). Add a
+**sparse GSI**: `gsi1pk = "TASK_STATUS#{status}"` (e.g. `TASK_STATUS#pending`), `gsi1sk = due_date`
+(ISO 8601). Only tasks actually awaiting a follow-up carry these two attributes — completed/
+abandoned tasks omit them, so the index stays small. The scheduler queries
+`gsi1pk = "TASK_STATUS#pending" AND gsi1sk <= now` on a schedule (EventBridge Scheduler) and emits
+one `followup.due` event per hit (§6.4).
+
+### `ConnectionsTable` (existing, `FoundationStack.connections_table`)
+
+`pk = connectionId`, TTL on `ttl`. Add a **GSI `UserConnectionsIndex`** on `userId` (an attribute
+already needed on connect) so the notifier can answer "which open sockets belong to this user?"
+when pushing a WebSocket update — the reverse lookup ADR-0004's design implies but didn't spell out.
+
+---
+
+## 3. Sessions, context, and memory — where they actually live
+
+### 3.1 Orchestrator session (cross-Lambda-invocation resume)
+
+The orchestrator is stateless Lambda, woken repeatedly by EventBridge for the *same* goal (a
+submission, a plan-approval response, a follow-up reply, days apart). Session identity is the
+mechanism that stitches these invocations back into one continuous agent:
+
+```python
+session_manager = SnapshotSessionManager(
+    session_id=goal_id,
+    storage=S3Storage(bucket=agent_state_bucket, prefix=f"orchestrator-sessions/{env_name}/"),
+)
+agent = Agent(session_manager=session_manager, ...)
+```
+
+Every EventBridge wake for this `goal_id` reconstitutes the same messages, agent state, and
+conversation-manager state. This is **new infrastructure** — a dedicated S3 bucket,
+`tendril-{env}-agent-state`, separate from `MediaBucket` (different IAM consumers: only the
+orchestrator touches this one; ingestion and the frontend's presigned-upload flow touch
+`MediaBucket`). Not yet in `FoundationStack` — tracked as a follow-up (§10).
+
+### 3.2 Memory — two knowledge bases, not one
+
+Strands `MemoryManager` (ADR-0001 Appendix A / AF-05) needs a `MemoryStore`. Tendril needs two,
+serving different purposes, both accessed via direct `bedrock:Retrieve`/
+`bedrock:IngestKnowledgeBaseDocuments` calls (the narrow exception in ADR-0013 — a Knowledge Base
+is already an API-fronted, per-resource-scoped managed service):
+
+| Store | Purpose | Scoping | Writable |
+|---|---|---|---|
+| **Garden Memory** | "Remember everything about *this* garden" — this user's past goals, what worked, seasonal patterns | `scope = "{user_id}:{garden_id}"` (Strands `scope` param, stamped on every write, applied as a retrieval filter) — this **is** the multi-tenant isolation mechanism, not a separate scheme | Yes (`data_source_type: CUSTOM`) |
+| **Horticultural Reference** | Curated, expert-authored horticultural knowledge — the "Knowledge search" tool every specialist can use (architecture.md §4.2) | None — shared, read-only across all tenants | No (read-only; content is authored/updated out of band by domain experts, per ADR-0006's externalized-expertise principle) |
+
+Both agents and the orchestrator may query **Garden Memory** (scoped to the current
+`user_id`/`garden_id` from the orchestrator's own invocation context). Only the orchestrator (and
+any specialist needing it) queries **Horticultural Reference** — read-only, no scoping needed.
+
+### 3.3 Context offloading
+
+`ContextOffloader` (part of `context_manager="auto"`) must be pointed at the **same**
+`tendril-{env}-agent-state` bucket, under a distinct prefix (`context-offload/{env}/`) — left at
+its default in-memory backend, offloaded content (large vision/weather tool results) would vanish
+between Lambda invocations, defeating the whole point of resuming a paused conversation.
+
+---
+
+## 4. Media handling — how a specialist "sees" a photo without S3 IAM
+
+Per [ADR-0013](./ADRs/0013-agent-data-access-boundary.md), specialists get no direct S3 access.
+The flow:
+
+1. Frontend requests a presigned **PUT** URL from the Client API (`POST /gardens/{id}/media`,
+   ADR-0004/WS-01/WS-03) and uploads directly to `MediaBucket`. A `Media` record is written to
+   `AppTable` (§2).
+2. When the orchestrator needs a specialist to analyze a photo, **the orchestrator** (which does
+   hold `MediaBucket` IAM) either (a) fetches the object and passes the bytes/base64 as part of
+   the `InvokeAgentRuntime` tool-call payload, or (b) generates a short-lived presigned **GET**
+   URL and passes that URL — in which case the specialist fetches it over plain HTTPS, exactly
+   like calling any other Tool API, **not** via an S3 IAM grant.
+3. Which of (a)/(b) is used is a size/latency trade-off (AgentCore invocation payload limits vs.
+   an extra HTTP round-trip) to decide when the Vision/Diagnosis specialist is actually built —
+   flagged as an open item (§10), not decided here.
+
+---
+
+## 5. Agent data-access boundary (summary of ADR-0013)
+
+| Component | `AppTable` / `ConnectionsTable` | `MediaBucket` | `AgentStateBucket` | Bedrock Knowledge Bases | Tool APIs |
+|---|---|---|---|---|---|
+| **Orchestrator** (Lambda) | Direct IAM, read/write | Direct IAM, read (+ presigned GET generation) | Direct IAM (its own session state) | Direct IAM (both KBs) | Calls them like any other agent-side capability when needed (e.g., its own HITL `ask` uses the Notification tool) |
+| **Specialist agents** (AgentCore) | **None.** Data arrives as tool-call input from the orchestrator | **None.** Photo content arrives as input or via a passed presigned URL fetched over HTTPS | **None** — specialists don't have their own cross-invocation session | Direct IAM, scoped to the specific KB(s) its registry entry needs | Only the tools its own `agents/registry/*.json` entry declares (AF-01) |
+| **Client API / Ingestion Lambdas** | Direct IAM, read/write | Direct IAM (presigned URL generation, S3 event handling) | — | — | — |
+| **Tracker/Scheduler Lambda** | Direct IAM, read (queries `TasksDueIndex`) | — | — | — | — |
+| **Notification Lambda** | Direct IAM, read/write (Notification entity) | — | — | — | — |
+| **Tool API Lambdas** | **None** (they're capabilities, not data owners — a tool that needs its own state gets its own narrowly-scoped resource, decided per tool, not a blanket grant) | — | — | — | — |
+
+---
+
+## 6. Full component inventory
+
+### 6.1 Lambda functions
+
+| Lambda | Home | Triggered by | Reads/writes | Status |
+|---|---|---|---|---|
+| Client API handlers (media-upload, goal-intake, garden/plant/task CRUD, plan-approve, status) | `app/api/` | API Gateway (`SpecRestApi`, ADR-0011) | `AppTable`, `MediaBucket` (presigned URLs) | WS-01/WS-03: media-upload + goal-intake in scope; the rest of ADR-0004's endpoint table is future work |
+| Ingestion | `app/ingestion/` | Client API calls; `media.uploaded` S3 event | `AppTable`, `MediaBucket` | Named in architecture.md §3; not yet scaffolded |
+| **Orchestrator** | `app/orchestrator/` | EventBridge (`goal.submitted`, `plan.approval.responded`, `followup.due`, `followup.reply.received`) | `AppTable`, `ConnectionsTable`, `MediaBucket`, `AgentStateBucket`, both Knowledge Bases; invokes specialists via `InvokeAgentRuntime` and tools via HTTP | WS-04 (walking-skeleton proof), ADR-0012 |
+| Tracker / Scheduler | `app/tracker/` | EventBridge Scheduler (time-based) | `AppTable` (`TasksDueIndex` GSI, read) | Named in architecture.md §3; not yet scaffolded |
+| Notification | `app/notifier/` | Tracker (direct); Orchestrator (as a Tool API / its HITL `ask` channel); inbound replies | `AppTable` (Notification entity), `ConnectionsTable` (WebSocket push) | In-app/WebSocket + web-push near-term; WhatsApp/email **deprioritized** (ADR-0001 refinement, 2026-09-12) |
+| WebSocket connect/disconnect/route handlers | `app/api/ws/` | API Gateway WebSocket lifecycle | `ConnectionsTable` | ADR-0004; not yet scaffolded |
+| Tool API: **Weather** | `tools/weather/` | API Gateway / Function URL | none of its own (stateless call-through to a weather provider) | AF-03 reference implementation |
+| Tool API: Plant-ID / Vision | `tools/plant-vision/` | API Gateway / Function URL | none | Future (AF follow-up) |
+| Tool API: Nursery / Market | `tools/nursery-market/` | API Gateway / Function URL | none | Future |
+
+`tools/` is a **new top-level monorepo folder** (sibling to `agents/`, `app/`, `infra/`), since
+each Tool API is its own self-contained deployable unit (CLAUDE.md's monorepo convention) — not
+previously named explicitly in AF-03.
+
+### 6.2 APIs
+
+| API | Type | Purpose |
+|---|---|---|
+| Client API | REST, API Gateway `SpecRestApi` from `app/api/openapi.yaml` | User-facing entry (ADR-0011) |
+| WebSocket API | API Gateway WebSocket | Real-time push to the frontend (ADR-0004); primary HITL delivery channel (2026-09-12 reprioritization) |
+| Tool APIs | One shared "Tools" API Gateway with one route per tool (`/tools/weather`, `/tools/plant-vision`, ...), or Lambda Function URLs per tool if a given tool's auth/scaling needs diverge | Agent-facing capabilities (architecture.md §4.2/§4.3) |
+
+### 6.3 Agents
+
+| Agent | Runtime | Registry entry | Status |
+|---|---|---|---|
+| Orchestrator | Lambda (Strands) | N/A — not a registered specialist | WS-04 |
+| `hello` | AgentCore (shared template) | `agents/registry/hello.json` | Walking-skeleton stand-in (WS-04) |
+| `agronomy` | AgentCore (shared template) | `agents/registry/agronomy.json` | Agent Factory proof specialist (AF-01/02/04) |
+| pest, disease, irrigation, fertilizer, pruning, weather-impact, beautification/landscaping | AgentCore (shared template) | not yet authored | Carried forward — each is a near-copy of `agronomy.json` + its own prompt + guardrail (`docs/stories/agent-factory.md`) |
+
+### 6.4 Events (EventBridge)
+
+| Event (`detail-type`) | Source | Target | Carries |
+|---|---|---|---|
+| `goal.submitted` | Client API / Ingestion | Orchestrator | `garden_id`, `goal_id` |
+| `plan.approval.responded` | Client API (`/plans/{id}/approve`) | Orchestrator | `garden_id`, `goal_id`, `plan_id`, decision (approve/revise) |
+| `followup.due` | Tracker/Scheduler | Orchestrator | `garden_id`, `goal_id`, `task_id` |
+| `followup.reply.received` | Notification | Orchestrator | `garden_id`, `goal_id`, reply content/media reference |
+| `media.uploaded` | S3 event notification on `MediaBucket` | Ingestion | `garden_id`, `media_id`, `s3_key` |
+
+Every orchestrator-bound event carries both `garden_id` and `goal_id` so the orchestrator's
+`AppTable` reads stay single-partition queries (§2) — never a lookup by `goal_id` alone.
+
+### 6.5 Data stores
+
+| Store | Kind | Owner(s) | Notes |
+|---|---|---|---|
+| `tendril-{env}-app` | DynamoDB (single-table + `TasksDueIndex` GSI) | Client API, Ingestion, Orchestrator, Tracker, Notification | Existing (`FoundationStack`); GSI is new (§2) |
+| `tendril-{env}-ws-connections` | DynamoDB (+ `UserConnectionsIndex` GSI) | WebSocket handlers, Notification | Existing (`FoundationStack`); GSI is new (§2) |
+| `tendril-{env}-media` | S3 | Client API (presigned URLs), Ingestion, Orchestrator (read) | Existing (`FoundationStack`) |
+| `tendril-{env}-agent-state` | S3 | Orchestrator only | **New** — session snapshots + context offload (§3.1/§3.3) |
+| Garden Memory (Bedrock KB) | Managed | Orchestrator, specialists (scoped) | **New** — per-tenant `scope` (§3.2) |
+| Horticultural Reference (Bedrock KB) | Managed | Orchestrator, specialists (read-only) | **New** — shared, curated (§3.2) |
+| Secrets Manager / SSM | Managed | Any Lambda needing a secret | Existing pattern (`app/common/config.py`, ADR-0008) |
+
+---
+
+## 7. Data flow: goal submission → orchestrator → specialist → HITL approval
+
+```
+User (UI) --POST /gardens/{id}/media--> Client API --presigned PUT--> MediaBucket
+User (UI) --POST /gardens/{id}/goals--> Client API
+    Client API: validate, write Goal (status=Intake) to AppTable, write Media record
+    Client API --EventBridge: goal.submitted (garden_id, goal_id)--> Orchestrator
+Orchestrator (new SnapshotSessionManager, session_id=goal_id):
+    read Goal + Media + Garden context from AppTable (direct IAM)
+    query Garden Memory (scoped) + Horticultural Reference for relevant history/knowledge
+    InvokeAgentRuntime -> agronomy specialist, passing only the relevant fields (not raw table access)
+    agronomy calls the Weather tool API directly (its own registry-declared tool)
+    Orchestrator writes Plan + Tasks (status=PlanProposed) to AppTable
+    Orchestrator pushes the proposed plan over the WebSocket (ConnectionsTable lookup by user_id)
+    Orchestrator's HumanInTheLoop `ask` returns "interrupt"; session snapshot persisted to AgentStateBucket
+User (UI) --POST /plans/{id}/approve--> Client API
+    Client API --EventBridge: plan.approval.responded--> Orchestrator
+Orchestrator: resumes the SAME session_id from AgentStateBucket, writes Plan status=Approved,
+    schedules follow-ups (Task.due_date + gsi1 attributes for TasksDueIndex)
+```
+
+---
+
+## 8. Multi-tenancy & privacy
+
+Every data-store access pattern in this document is scoped to one tenant by construction, not by
+convention alone:
+
+- DynamoDB: partition key is always `GARDEN#{garden_id}` or `USER#{user_id}` — a query can only
+  ever see one tenant's items (the one GSI, `TasksDueIndex`, is scoped by `status`+`due_date`,
+  never returns cross-tenant *content*, only which garden/goal/task to look up next — the
+  orchestrator's follow-up `AppTable` read is still single-partition).
+- Memory: the `scope` parameter *is* the isolation boundary (§3.2) — not a separate access-control
+  layer bolted on afterward.
+- Media: presigned URLs are per-object and short-lived; specialists never hold standing S3 access
+  (§4/§5).
+- This satisfies architecture.md §6.3's "memory/storage stores and DynamoDB keys scoped per
+  user/garden" and ADR-0002's privacy-by-design requirement without new mechanism — the natural
+  key design already enforces it.
+
+---
+
+## 9. Open items / follow-ups
+
+1. Provision `tendril-{env}-agent-state` (S3) — not yet in `FoundationStack`.
+2. Provision the two Bedrock Knowledge Bases (Garden Memory, Horticultural Reference) and their
+   IAM — not yet in any stack.
+3. Add `TasksDueIndex` (on `AppTable`) and `UserConnectionsIndex` (on `ConnectionsTable`) GSIs.
+4. Decide the media-to-specialist strategy (bytes-in-payload vs. presigned-URL-fetch, §4) when
+   the Vision/Diagnosis specialist is actually built.
+5. Decide `tools/` API Gateway topology (one shared Gateway vs. per-tool Function URLs) when the
+   second tool (beyond Weather) is built.
+6. CDK assertion tests enforcing ADR-0013 (no specialist role holds `dynamodb:`/`s3:` actions).
+
+## 10. Related documents
+
+- [ADR-0002 (context management & durable state)](./ADRs/0002-context-management-and-durable-state.md)
+- [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md)
+- [ADR-0004 (backend API, serverless & storage)](./ADRs/0004-backend-api-serverless-storage.md)
+- [ADR-0012 (orchestrator + declarative agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)
+- [Strands capability mapping](./strands-capability-mapping.md) (session/memory/context mechanics)
+- [`architecture.md`](./architecture.md) §2 (domain model), §4 (APIs)
