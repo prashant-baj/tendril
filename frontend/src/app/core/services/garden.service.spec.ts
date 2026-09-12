@@ -145,4 +145,21 @@ describe('HttpGardenApi', () => {
       done();
     });
   });
+
+  it('createGoal() POSTs to /gardens/{id}/goals', () => {
+    let result: { goalId: string; status: string } | undefined;
+    api
+      .createGoal('g-1', { description: 'leaves turning yellow', mediaIds: ['media-1'] })
+      .subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/goals`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({
+      description: 'leaves turning yellow',
+      mediaIds: ['media-1'],
+    });
+    req.flush({ goalId: 'goal-1', status: 'Intake' });
+
+    expect(result).toEqual({ goalId: 'goal-1', status: 'Intake' });
+  });
 });

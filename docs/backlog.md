@@ -4,9 +4,10 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-12 (OB-01/OB-02 implemented and verified end-to-end in dev; added OB-03,
-a deprioritized follow-up story to show real plant photos instead of a generic icon; WS-01/02/03
-implemented, WS-04 implemented pending only a deploy + smoke test; fixed a real CI gap —
+**Last updated:** 2026-09-12 (OB-01/OB-02/WS-01..05 all done and smoke-tested end-to-end in dev —
+the full photo/issue → orchestrator → `hello` specialist pipe is proven live, including finding
+and fixing a real IAM gap along the way (WS-04); added OB-03, a deprioritized follow-up story to
+show real plant photos instead of a generic icon; fixed a real CI gap —
 `pytest -q || echo "no tests yet"` had been silently masking every test suite failing to even
 collect, since `boto3`/`strands-agents`/etc. were never installed in the `quality` job)
 
@@ -37,8 +38,8 @@ immediate next thing.
 | 3 | WS | WS-01 | API: contract-first OpenAPI for photo upload + goal intake | ✅ | OB-02 | Added `createGoal` + `Goal` schemas. Caught + fixed a real gap: `gardenId` wasn't declared per-operation on the shared CORS block — moved to path-level params (correct OpenAPI idiom). Spec-lint (`openapi-spec-validator`) wired into `ci.yml`. |
 | 4 | WS | WS-02 | Infra: Client API, EventBridge trigger, declarative agent registry | ✅ | WS-01 | `agents/registry/hello.json` + `AgentCoreStack` registry loop (replacing the hardcoded call); orchestrator Lambda + EventBridge rule added to `AgentCoreStack` itself, not a separate stack (Runtime ARNs aren't cross-stack-name-predictable — confirmed with project owner). `cdk synth` verified with real Docker builds for both images. Not yet deployed. |
 | 5 | WS | WS-03 | Application: Client API Lambda handlers | ✅ | WS-01, WS-02 | `create_goal` in `garden_handler.py`: persists Goal (status Intake), publishes `goal.submitted`. Contract tests validate responses against `openapi.yaml`'s schemas directly (`jsonschema`). Known trade-off: DynamoDB write + EventBridge publish aren't atomic (documented, accepted for this epic). |
-| 6 | WS | WS-04 | Application: Orchestrator Lambda | ◐ | WS-02, WS-03 | `app/orchestrator/orchestrator.py`: Strands agent loop, agents-as-tools wrapping `InvokeAgentRuntime`, DynamoDB read/write-back, structured logging + `trace_attributes`. 8 unit tests (mocked AgentCore + mocked Agent/BedrockModel). **Blocked only on:** an actual `dev` deploy + the manual smoke-test invoke the story calls for. |
-| 7 | WS | WS-05 | Frontend: real photo capture + goal submission | ☐ | WS-01, WS-03 | Reuses OB-02's camera/file-picker component; wires the Capture screen's goal text to the live API, replacing `MockGoalApi` for this flow. `docs/roadmap.md` Phase 4. |
+| 6 | WS | WS-04 | Application: Orchestrator Lambda | ✅ | WS-02, WS-03 | `app/orchestrator/orchestrator.py`: Strands agent loop, agents-as-tools wrapping `InvokeAgentRuntime`, DynamoDB read/write-back, structured logging + `trace_attributes`. Smoke-tested end-to-end against dev: found + fixed a real IAM gap (AgentCore authorizes against the runtime-*endpoint* sub-resource, not the bare runtime ARN). |
+| 7 | WS | WS-05 | Frontend: real photo capture + goal submission | ✅ | WS-01, WS-03 | Reuses OB-02's `PhotoPickerComponent` (no separate `getUserMedia` build — same HTTP-only-deployment reasoning as OB-02). Wires the Capture screen to real `createGoal`/media-upload calls; deleted the scripted `CaptureService` timeline + fabricated findings UI it replaced (not repurposed). `docs/roadmap.md` Phase 4. |
 | 8 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ☐ | WS-02 | Loops all three registry-driven stacks over their data folders; deploys a second real agent (Agronomy) with zero stack-code changes. `docs/roadmap.md` Phase 7. |
 | 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | ☐ | AF-01 | Generalizes `hello_agent`'s code into the shared template every registry entry uses; proves two agents, one codebase. |
 | 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ☐ | AF-02 | Weather as the reference Lambda+API tool; tool-agnostic binding mechanism in the template agent. |

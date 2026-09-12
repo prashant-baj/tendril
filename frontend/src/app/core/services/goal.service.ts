@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { Observable, of } from 'rxjs';
-import { Goal, GoalFact, GoalStat } from '../models/goal.model';
-import { Finding, FollowUp, PlanTask } from '../models/plan-task.model';
+import { Goal, GoalStat } from '../models/goal.model';
+import { FollowUp, PlanTask } from '../models/plan-task.model';
 import { SpecialistTraceEntry } from '../models/trace.model';
 
 /** Full detail for a goal whose plan has been proposed/approved. */
@@ -25,8 +25,6 @@ export interface GoalDetail {
 export abstract class GoalApi {
   abstract getGoals(): Observable<Goal[]>;
   abstract getGoalDetail(goalId: string): Observable<GoalDetail | undefined>;
-  abstract getGoalFacts(): Observable<GoalFact[]>;
-  abstract getFindings(): Observable<Finding[]>;
   /** Human-in-the-loop plan approval (ADR-0004 `POST /plans/{id}/approve`). Mocked: no-op. */
   abstract approve(goalId: string): Observable<void>;
 }
@@ -74,18 +72,6 @@ export class MockGoalApi extends GoalApi {
     },
   ];
 
-  private readonly goalFacts: GoalFact[] = [
-    { icon: 'schedule', label: '3 weeks' },
-    { icon: 'task_alt', label: '4 tasks' },
-    { icon: 'groups', label: '6 specialists' },
-    { icon: 'event_repeat', label: '5 check-ins' },
-  ];
-
-  private readonly findings: Finding[] = [
-    { title: 'Nitrogen imbalance for the fruiting stage', detail: 'Lower-leaf yellowing with healthy flowers is the classic pattern. Agronomy recommends a high-potassium feed.', icon: 'science', confidence: '86%' },
-    { title: 'Heat stress is blocking fruit set', detail: 'Pollen goes sterile above about 33 °C. The forecast holds 34 °C through Thursday.', icon: 'thermostat', confidence: '74%' },
-  ];
-
   private readonly trace: SpecialistTraceEntry[] = [
     { agent: 'Vision & diagnosis', icon: 'photo_camera', says: 'Lower-leaf chlorosis; flowers intact, no pest damage.', ms: '1.4s' },
     { agent: 'Agronomy', icon: 'science', says: 'Nitrogen is high for a fruiting plant — move to a high-potassium feed.', ms: '2.1s' },
@@ -125,14 +111,6 @@ export class MockGoalApi extends GoalApi {
       return of(undefined);
     }
     return of({ goal, stats: this.stats, trace: this.trace, planTasks: this.planTasks, followUps: this.followUps });
-  }
-
-  getGoalFacts(): Observable<GoalFact[]> {
-    return of(this.goalFacts);
-  }
-
-  getFindings(): Observable<Finding[]> {
-    return of(this.findings);
   }
 
   approve(_goalId: string): Observable<void> {

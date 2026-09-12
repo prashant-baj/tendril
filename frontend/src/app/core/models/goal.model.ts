@@ -20,7 +20,9 @@ export interface GoalStat {
   label: string;
 }
 
-export interface GoalFact {
-  icon: string;
-  label: string;
+/** Client API request for `POST /gardens/{gardenId}/goals` (WS-03/WS-05). */
+export interface CreateGoalRequest {
+  description: string;
+  /** Ids from prior requestMediaUpload calls, once each upload has completed. */
+  mediaIds?: string[];
 }

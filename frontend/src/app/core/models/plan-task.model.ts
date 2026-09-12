@@ -19,11 +19,3 @@ export interface FollowUp {
   what: string;
   when: string;
 }
-
-/** A diagnosis surfaced on the capture/diagnose screen once analysis completes. */
-export interface Finding {
-  title: string;
-  detail: string;
-  icon: string;
-  confidence: string;
-}

@@ -4,6 +4,7 @@ import { BehaviorSubject, Observable, combineLatest, of } from 'rxjs';
 import { map, tap } from 'rxjs/operators';
 import { CLIENT_API_BASE_URL } from '../config/client-api.config';
 import { CreateGardenRequest, Garden, GardenFact } from '../models/garden.model';
+import { CreateGoalRequest } from '../models/goal.model';
 import { CreatePlantRequest, Plant } from '../models/plant.model';
 import { MediaUploadRequest, MediaUploadResponse } from '../models/media.model';
 
@@ -35,6 +36,11 @@ export abstract class GardenApi {
     gardenId: string,
     request: CreatePlantRequest,
   ): Observable<{ plantId: string }>;
+  /** WS-03/WS-05: `POST /gardens/{gardenId}/goals` — 202, async orchestration (ADR-0012). */
+  abstract createGoal(
+    gardenId: string,
+    request: CreateGoalRequest,
+  ): Observable<{ goalId: string; status: string }>;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -136,6 +142,13 @@ export class MockGardenApi extends GardenApi {
     this.plants.unshift(plant);
     this.plantsSummary.unshift(plant);
     return of({ plantId });
+  }
+
+  createGoal(
+    _gardenId: string,
+    _request: CreateGoalRequest,
+  ): Observable<{ goalId: string; status: string }> {
+    return of({ goalId: `mock-goal-${Math.random().toString(36).slice(2, 10)}`, status: 'Intake' });
   }
 }
 
@@ -239,5 +252,15 @@ export class HttpGardenApi extends GardenApi {
           this.addedPlants.next([plant, ...this.addedPlants.value]);
         }),
       );
+  }
+
+  createGoal(
+    gardenId: string,
+    request: CreateGoalRequest,
+  ): Observable<{ goalId: string; status: string }> {
+    return this.http.post<{ goalId: string; status: string }>(
+      `${this.baseUrl}/gardens/${gardenId}/goals`,
+      request,
+    );
   }
 }
