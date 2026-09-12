@@ -54,7 +54,11 @@ def _get_client():
 def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
+        # Lambda proxy integration responses aren't auto-decorated with CORS headers by API
+        # Gateway (only the openapi.yaml OPTIONS mock integration is) — the function's actual
+        # response has to set Access-Control-Allow-Origin itself, or the browser blocks the
+        # frontend (a different origin, ADR-0010) from reading it even on a 2xx response.
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
         "body": json.dumps(body),
     }
 
