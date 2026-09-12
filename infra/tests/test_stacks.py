@@ -23,13 +23,14 @@ IMAGE = "123456789012.dkr.ecr.ap-south-1.amazonaws.com/tendril:latest"
 
 
 def _app() -> App:
-    # agent_image_uri / garden_handler_image_repo avoid a Docker build during synth (ADR-0005,
-    # ADR-0014).
+    # agent_image_uri / garden_handler_image_repo / orchestrator_image_repo avoid a Docker
+    # build during synth (ADR-0005, ADR-0014).
     return App(
         context={
             "agent_image_uri": IMAGE,
             "model_id": "global.amazon.nova-2-lite-v1:0",
             "garden_handler_image_repo": "tendril-dev-garden-handler",
+            "orchestrator_image_repo": "tendril-dev-orchestrator",
         }
     )
 
@@ -135,6 +136,89 @@ def test_agentcore_env_and_iam():
         assert needed in actions, f"missing IAM action: {needed}"
 
 
+# --- registry-driven runtimes + orchestrator (WS-02, ADR-0012) ---------------
+
+
+def test_one_runtime_provisioned_per_registry_file():
+    import json
+    from pathlib import Path
+
+    registry_dir = Path(__file__).resolve().parents[2] / "agents" / "registry"
+    expected_count = len(list(registry_dir.glob("*.json")))
+    assert expected_count >= 1  # sanity: hello.json must exist
+
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac2", env_name="dev", env=ENV))
+    tpl.resource_count_is("AWS::BedrockAgentCore::Runtime", expected_count)
+
+    # Adding a fixture file changes the count without touching stack code.
+    fixture = registry_dir / "_test_fixture_agent.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "name": "fixtureagent",
+                "template": "hello_agent",
+                "model_id": "",
+                "prompt_name": "hello-system",
+                "guardrail_name": "hello-guardrail",
+                "description": "test fixture",
+                "tools": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        app2 = _app()
+        tpl2 = Template.from_stack(AgentCoreStack(app2, "ac3", env_name="dev", env=ENV))
+        tpl2.resource_count_is("AWS::BedrockAgentCore::Runtime", expected_count + 1)
+    finally:
+        fixture.unlink()
+
+
+def test_orchestrator_invoke_agent_runtime_is_scoped_not_wildcard():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac4", env_name="dev", env=ENV))
+
+    found = False
+    for res in tpl.find_resources("AWS::IAM::Policy").values():
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions = act if isinstance(act, list) else [act]
+            if "bedrock-agentcore:InvokeAgentRuntime" in actions:
+                found = True
+                assert stmt["Resource"] != "*"
+    assert found, "no policy statement grants bedrock-agentcore:InvokeAgentRuntime"
+
+
+def test_goal_submitted_eventbridge_rule_targets_orchestrator():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac5", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": {
+                    "source": ["tendril.client-api"],
+                    "detail-type": ["goal.submitted"],
+                }
+            }
+        ),
+    )
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {
+                "FunctionName": "tendril-dev-orchestrator",
+                "PackageType": "Image",
+                "Environment": Match.object_like(
+                    {"Variables": Match.object_like({"APP_TABLE_NAME": "tendril-dev-app"})}
+                ),
+            }
+        ),
+    )
+
+
 # --- pipeline (GitHub OIDC deploy role) --------------------------------------
 
 
@@ -219,6 +303,8 @@ def test_client_api_stack_synthesizes_garden_operations():
     assert "dynamodb:TransactWriteItems" in actions
     # OB-02: createMediaUpload signs a presigned PUT URL — the signing role needs s3:PutObject.
     assert "s3:PutObject" in actions
+    # WS-03: createGoal publishes goal.submitted via events:PutEvents.
+    assert "events:PutEvents" in actions
 
     # API Gateway is granted permission to invoke the garden handler.
     tpl.has_resource_properties(
@@ -229,7 +315,7 @@ def test_client_api_stack_synthesizes_garden_operations():
     )
 
 
-def test_client_api_stack_openapi_spec_covers_ob02_operations():
+def test_client_api_stack_openapi_spec_covers_ob02_and_ws01_operations():
     app = _app()
     tpl = Template.from_stack(ClientApiStack(app, "capi2", env_name="dev", env=ENV))
     rest_apis = tpl.find_resources("AWS::ApiGateway::RestApi")
@@ -237,6 +323,7 @@ def test_client_api_stack_openapi_spec_covers_ob02_operations():
     body = rest_api["Properties"]["Body"]
     assert "/gardens/{gardenId}/media" in body["paths"]
     assert "/gardens/{gardenId}/plants" in body["paths"]
+    assert "/gardens/{gardenId}/goals" in body["paths"]
 
 
 # --- foundation (media bucket CORS for OB-02's direct-to-S3 upload) ---------

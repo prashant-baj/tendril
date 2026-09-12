@@ -19,9 +19,9 @@ It doesn't replace the story files — it sequences them.
 | Phase | Feature | New or existing story | UI | API operation(s) | Lambda | Data touched | Orchestrator/Agents involved? |
 |---|---|---|---|---|---|---|---|
 | **0** | Frontend shell + all 6 screens (mocked), architecture/ADRs, story epics | — | ✅ done | — | — | — | No |
-| **1** | **Setup My Garden** | **OB-01** (new) | New `/garden-setup` screen | `POST /gardens`, `GET /gardens/{id}` | First `ClientApiStack` + garden handler | `AppTable`: Garden (canonical + ownership index) | No |
-| **2** | **Add a Plant (with a photo)** | **OB-02** (new) | Garden screen gains "Add plant"; new camera/file-picker component | `POST /gardens/{id}/media`, `POST /gardens/{id}/plants` | Presigned-upload + plant-create handlers | `AppTable`: Plant, Media; `MediaBucket` | No |
-| **3** | **Capture an issue → orchestrator triggered** | **WS-01..WS-04** (existing, resequenced — see §3) | Capture screen reuses OB-02's camera/file-picker component; submits goal text | `POST /gardens/{id}/goals` (media op already exists from Phase 2) | Goal-intake handler; **Orchestrator** Lambda | `AppTable`: Goal; EventBridge `goal.submitted`; `agents/registry/hello.json` | **Yes** — first orchestrator invocation, calling the `hello` stand-in specialist |
+| **1** | **Setup My Garden** | **OB-01** — ✅ done, verified end-to-end in dev | New `/garden-setup` screen | `POST /gardens`, `GET /gardens/{id}` | First `ClientApiStack` + garden handler | `AppTable`: Garden (canonical + ownership index) | No |
+| **2** | **Add a Plant (with a photo)** | **OB-02** — ✅ done, verified end-to-end in dev (real photo landed in S3, Plant+Media linked) | Garden screen gains "Add plant"; new camera/file-picker component | `POST /gardens/{id}/media`, `POST /gardens/{id}/plants` | Presigned-upload + plant-create handlers | `AppTable`: Plant, Media; `MediaBucket` | No |
+| **3** | **Capture an issue → orchestrator triggered** | **WS-01..WS-04** — ◐ implemented + unit-tested (WS-01/02/03 ✅ done; WS-04 ✅ done pending only a live dev smoke test); not yet deployed | Capture screen reuses OB-02's camera/file-picker component; submits goal text — **not built yet, that's WS-05** | `POST /gardens/{id}/goals` (media op already existed from Phase 2) | Goal-intake handler; **Orchestrator** Lambda (lives in `AgentCoreStack`, not a separate stack — see WS-02's implementation note) | `AppTable`: Goal; EventBridge `goal.submitted`; `agents/registry/hello.json` | **Yes** — first orchestrator invocation, calling the `hello` stand-in specialist |
 | **4** | **Wire Capture's result + Goal Detail to real data** | **WS-05** (existing) | Capture screen shows a real pending state (not the simulated timer); Goal Detail reads a real goal/plan if the orchestrator produced one | `GET /gardens/{id}/status` (or a lighter goal-read op) | — | reads `AppTable` | Indirectly (displays orchestrator output) |
 | **5** | **Plan approval via UI (HITL)** | *not yet storied* (new epic to write when we get here) | Goal Detail's existing "Review plan" / approve button, made real | `POST /plans/{id}/approve` | Approve handler; resumes the **Orchestrator** via `plan.approval.responded` | `AppTable`: Plan status; orchestrator session resume (`SnapshotSessionManager`, keyed by `goal_id`, data-architecture.md §3.1) | Yes — first HITL interrupt/resume round-trip |
 | **6** | **Tasks & Activity on real data** | *not yet storied* | Tasks/Activity screens replace `MockTaskApi`/`MockActivityApi` | `GET /gardens/{id}/tasks`, event-log read | Read handlers | `AppTable`: Task, Event | No |
@@ -31,9 +31,9 @@ It doesn't replace the story files — it sequences them.
 ```mermaid
 flowchart TD
   P0["Phase 0 — Frontend shell (mocked)<br/>✅ done"] --> P1
-  P1["Phase 1 — OB-01<br/>Setup My Garden"] --> P2
-  P2["Phase 2 — OB-02<br/>Add a Plant (+ photo)"] --> P3
-  P3["Phase 3 — WS-01..04<br/>Capture issue → Orchestrator → hello"] --> P4
+  P1["Phase 1 — OB-01<br/>Setup My Garden<br/>✅ done"] --> P2
+  P2["Phase 2 — OB-02<br/>Add a Plant (+ photo)<br/>✅ done"] --> P3
+  P3["Phase 3 — WS-01..04<br/>Capture issue → Orchestrator → hello<br/>◐ implemented, not deployed"] --> P4
   P4["Phase 4 — WS-05<br/>Wire Capture + Goal Detail to real data"] --> P5
   P5["Phase 5 — (new epic)<br/>Plan approval via UI (HITL resume)"] --> P6
   P6["Phase 6 — (new epic)<br/>Tasks + Activity on real data"] --> P7
@@ -74,10 +74,12 @@ flowchart TD
 
 ## 4. What to build right now
 
-**Phase 1 (OB-01 — Setup My Garden)**, per `docs/stories/garden-onboarding.md`. It's the smallest
-possible complete slice: one new screen, two API operations, one Lambda, one transactional
-DynamoDB write, zero AI/orchestrator involvement — the fastest path to "the whole pipe works,
-end to end, for real" before any agent complexity is added on top.
+**(2026-09-12 update)** Phases 1-2 (OB-01/02) are done and verified end-to-end in `dev`. Phase 3
+(WS-01..04) is implemented and unit-tested but **not yet deployed** — deploying it and running
+WS-04's manual smoke test (a real `goal.submitted` event reaching the orchestrator, which calls
+`hello` via `InvokeAgentRuntime` and writes a result back onto the goal) is the immediate next
+step, before picking up **Phase 4 (WS-05 — wire the Capture screen to the real goal-intake API)**,
+the last piece of this phase's frontend.
 
 ## 5. Related documents
 

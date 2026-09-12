@@ -6,9 +6,10 @@ info:
     Tendril's user-facing Client API. Contract-first per ADR-0011: this file is the actual
     deploy artifact — infra/stacks/client_api_stack.py imports it directly via
     apigateway.SpecRestApi, patching each operation's x-amazon-apigateway-integration.uri
-    with the real Lambda ARN at synth time. Covers OB-01 (Setup My Garden) and OB-02 (Add a
-    Plant, with a photo); the rest of ADR-0004's endpoint table is added incrementally as later
-    stories land (docs/roadmap.md).
+    with the real Lambda ARN at synth time. Covers OB-01 (Setup My Garden), OB-02 (Add a Plant,
+    with a photo), and WS-01's goal-intake operation (the media op WS-01 originally scoped is
+    already covered by OB-02, per docs/roadmap.md's resequencing note); the rest of ADR-0004's
+    endpoint table is added incrementally as later stories land.
 
 paths:
   /gardens:
@@ -67,16 +68,13 @@ paths:
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id'"
 
   /gardens/{gardenId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
     get:
       operationId: getGarden
       summary: Read a garden by id
       parameters:
         - $ref: "#/components/parameters/UserId"
-        - name: gardenId
-          in: path
-          required: true
-          schema:
-            type: string
       responses:
         "200":
           description: The garden
@@ -98,16 +96,13 @@ paths:
     options: *cors-preflight
 
   /gardens/{gardenId}/media:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
     post:
       operationId: createMediaUpload
       summary: Get a presigned URL to upload a photo directly to S3
       parameters:
         - $ref: "#/components/parameters/UserId"
-        - name: gardenId
-          in: path
-          required: true
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -135,16 +130,13 @@ paths:
     options: *cors-preflight
 
   /gardens/{gardenId}/plants:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
     post:
       operationId: createPlant
       summary: Add a plant to a garden
       parameters:
         - $ref: "#/components/parameters/UserId"
-        - name: gardenId
-          in: path
-          required: true
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -171,8 +163,52 @@ paths:
         passthroughBehavior: when_no_match
     options: *cors-preflight
 
+  /gardens/{gardenId}/goals:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: createGoal
+      summary: Submit an issue/goal for a garden — triggers the orchestrator asynchronously
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalCreateRequest"
+      responses:
+        "202":
+          description: >
+            Goal accepted — persisted and handed off for async orchestration (ADR-0004/
+            ADR-0012). Not a synchronous result; nothing about the goal's eventual plan is
+            known yet at this point.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoalCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
 components:
   parameters:
+    GardenId:
+      name: gardenId
+      in: path
+      required: true
+      schema:
+        type: string
+
     UserId:
       name: X-User-Id
       in: header
@@ -274,3 +310,47 @@ components:
       properties:
         plantId:
           type: string
+
+    GoalCreateRequest:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+          minLength: 1
+          description: The issue/prompt text in plain language (e.g. "leaves turning yellow").
+        mediaIds:
+          type: array
+          items:
+            type: string
+          description: Ids from prior createMediaUpload calls, referencing attached photos.
+
+    GoalCreateResponse:
+      type: object
+      required: [goalId, status]
+      properties:
+        goalId:
+          type: string
+        status:
+          type: string
+          description: Always "Intake" at creation — architecture.md §7.3's Goal lifecycle.
+
+    Goal:
+      type: object
+      required: [goalId, description, type, status]
+      properties:
+        goalId:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          description: >
+            Goal classification (e.g. "diagnosis", "planning") — reserved for the orchestrator
+            to set once it understands the goal; always a generic default at Intake time.
+        status:
+          type: string
+        mediaIds:
+          type: array
+          items:
+            type: string

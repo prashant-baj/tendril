@@ -1,0 +1,9 @@
+{
+  "name": "hello",
+  "template": "hello_agent",
+  "model_id": "",
+  "prompt_name": "hello-system",
+  "guardrail_name": "hello-guardrail",
+  "description": "Stand-in specialist used to prove the orchestrator pipe (WS-04) end-to-end before real domain specialists exist.",
+  "tools": []
+}

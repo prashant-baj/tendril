@@ -4,7 +4,11 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-12 (added the Garden Onboarding epic OB-01/OB-02 and resequenced the whole table into the UI-first incremental plan in `docs/roadmap.md`; deprioritized WhatsApp, prioritized UI-based HITL)
+**Last updated:** 2026-09-12 (OB-01/OB-02 implemented and verified end-to-end in dev; added OB-03,
+a deprioritized follow-up story to show real plant photos instead of a generic icon; WS-01/02/03
+implemented, WS-04 implemented pending only a deploy + smoke test; fixed a real CI gap —
+`pytest -q || echo "no tests yet"` had been silently masking every test suite failing to even
+collect, since `boto3`/`strands-agents`/etc. were never installed in the `quality` job)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
@@ -28,12 +32,12 @@ immediate next thing.
 
 | Rank | Epic | ID | Story | Status | Depends on | Notes / gaps |
 |-----:|------|----|-------|:------:|------------|--------------|
-| 1 | OB | OB-01 | Setup My Garden | ☐ | — | New screen + `POST /gardens`/`GET /gardens/{id}` + first `ClientApiStack` + transactional Garden write. Smallest possible complete UI→API→Lambda→data slice; zero AI/orchestrator involvement. Do this first (`docs/roadmap.md` Phase 1). |
-| 2 | OB | OB-02 | Add a Plant (with a photo) | ☐ | OB-01 | `POST /gardens/{id}/media` (presigned upload, reused by every later photo flow) + `POST /gardens/{id}/plants`; builds the camera/file-picker component WS-05 later reuses. `docs/roadmap.md` Phase 2. |
-| 3 | WS | WS-01 | API: contract-first OpenAPI for photo upload + goal intake | ☐ | OB-02 | Media op now lives in OB-02 — this story only adds the goal-intake operation by the time it's picked up (see the epic's 2026-09-12 resequencing note). `docs/roadmap.md` Phase 3. |
-| 4 | WS | WS-02 | Infra: Client API, EventBridge trigger, declarative agent registry | ☐ | WS-01 | Adds to the `ClientApiStack` OB-01 already stood up (not a new stack). EventBridge rule, `agents/registry/*.json` + `AgentCoreStack` refactor migrating `hello_agent`, per ADR-0011/ADR-0012. |
-| 5 | WS | WS-03 | Application: Client API Lambda handlers | ☐ | WS-01, WS-02 | Goal-intake handler (validate → persist → publish event). |
-| 6 | WS | WS-04 | Application: Orchestrator Lambda | ☐ | WS-02, WS-03 | Strands agent loop, EventBridge-triggered, calls the migrated `hello` agent via `InvokeAgentRuntime` as the first registered specialist. |
+| 1 | OB | OB-01 | Setup My Garden | ✅ | — | New screen + `POST /gardens`/`GET /gardens/{id}` + first `ClientApiStack` + transactional Garden write. Implemented, unit/CDK/component-tested, verified end-to-end against real API Gateway/Lambda/DynamoDB in dev. Not yet re-deployed after the latest fixes (CORS, OpenAPI 3.0.x, container packaging) — those are already committed. |
+| 2 | OB | OB-02 | Add a Plant (with a photo) | ✅ | OB-01 | `POST /gardens/{id}/media` (presigned upload) + `POST /gardens/{id}/plants`; camera/file-picker component built (plain `<input capture>`, not `getUserMedia` — HTTP-only deployment, ADR-0010). Verified end-to-end in dev: real photo landed in S3, Plant+Media records linked correctly. |
+| 3 | WS | WS-01 | API: contract-first OpenAPI for photo upload + goal intake | ✅ | OB-02 | Added `createGoal` + `Goal` schemas. Caught + fixed a real gap: `gardenId` wasn't declared per-operation on the shared CORS block — moved to path-level params (correct OpenAPI idiom). Spec-lint (`openapi-spec-validator`) wired into `ci.yml`. |
+| 4 | WS | WS-02 | Infra: Client API, EventBridge trigger, declarative agent registry | ✅ | WS-01 | `agents/registry/hello.json` + `AgentCoreStack` registry loop (replacing the hardcoded call); orchestrator Lambda + EventBridge rule added to `AgentCoreStack` itself, not a separate stack (Runtime ARNs aren't cross-stack-name-predictable — confirmed with project owner). `cdk synth` verified with real Docker builds for both images. Not yet deployed. |
+| 5 | WS | WS-03 | Application: Client API Lambda handlers | ✅ | WS-01, WS-02 | `create_goal` in `garden_handler.py`: persists Goal (status Intake), publishes `goal.submitted`. Contract tests validate responses against `openapi.yaml`'s schemas directly (`jsonschema`). Known trade-off: DynamoDB write + EventBridge publish aren't atomic (documented, accepted for this epic). |
+| 6 | WS | WS-04 | Application: Orchestrator Lambda | ◐ | WS-02, WS-03 | `app/orchestrator/orchestrator.py`: Strands agent loop, agents-as-tools wrapping `InvokeAgentRuntime`, DynamoDB read/write-back, structured logging + `trace_attributes`. 8 unit tests (mocked AgentCore + mocked Agent/BedrockModel). **Blocked only on:** an actual `dev` deploy + the manual smoke-test invoke the story calls for. |
 | 7 | WS | WS-05 | Frontend: real photo capture + goal submission | ☐ | WS-01, WS-03 | Reuses OB-02's camera/file-picker component; wires the Capture screen's goal text to the live API, replacing `MockGoalApi` for this flow. `docs/roadmap.md` Phase 4. |
 | 8 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ☐ | WS-02 | Loops all three registry-driven stacks over their data folders; deploys a second real agent (Agronomy) with zero stack-code changes. `docs/roadmap.md` Phase 7. |
 | 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | ☐ | AF-01 | Generalizes `hello_agent`'s code into the shared template every registry entry uses; proves two agents, one codebase. |
@@ -57,6 +61,7 @@ immediate next thing.
 | 27 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
 | 28 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
 | 29 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
+| 30 | OB | OB-03 | Show the real plant photo (not a generic icon) | ☐ | OB-02 | Explicitly deprioritized ("will do later") — not blocking Phase 3. Presigned **GET** URL (never a public bucket — that was considered and rejected, see the story's Context) returned from `createPlant` immediately, plus a real `GET /gardens/{id}/plants` list operation so photos survive a page reload. |
 
 ## Carried forward (future epics — not yet storied)
 

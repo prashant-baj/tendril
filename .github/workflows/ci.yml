@@ -16,13 +16,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install ruff pytest
+      # Every testpaths dir (pytest.ini) imports its own deployable unit's real dependencies
+      # (boto3, strands-agents, aws-cdk-lib, ...) — installing each folder's own
+      # requirements.txt keeps this in sync automatically instead of a second, driftable list
+      # hardcoded here. jsonschema is test-only (WS-03's OpenAPI contract tests).
+      - run: >-
+          pip install ruff pytest openapi-spec-validator jsonschema
+          -r infra/requirements.txt
+          -r agents/hello_agent/requirements.txt
+          -r app/api/requirements.txt
+          -r app/orchestrator/requirements.txt
       - name: Lint
         run: ruff check .
       - name: Format check
         run: ruff format --check .
+      - name: Lint OpenAPI spec (WS-01)
+        run: python -m openapi_spec_validator app/api/openapi.yaml
       - name: Tests
-        run: pytest -q || echo "no tests yet"
+        # No `|| echo` fallback: that was masking a real bug (pytest was failing to even
+        # *collect* app/api/tests — ModuleNotFoundError: boto3 — silently, every run, since
+        # boto3 was never installed here) rather than reporting a genuine "no tests" state.
+        # Real tests exist across every testpaths dir now; a failure here must fail CI.
+        run: pytest -q
       - name: Secret scan (gitleaks)
         # Plain CLI, not gitleaks/gitleaks-action@v2: that action now requires a
         # GITLEAKS_LICENSE for org-owned repos (gitleaks.io signup). The CLI itself is

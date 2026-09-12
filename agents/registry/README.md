@@ -42,6 +42,13 @@ deployed:
 - The orchestrator (`app/orchestrator/`) builds its invocation manifest (agent name → runtime
   ARN + description) from the same files at deploy time.
 
-Not yet populated (`hello_agent` still deploys via the old hardcoded path in
-`agentcore_stack.py`) — this is a placeholder anchoring the convention ahead of the migration
-tracked in ADR-0012's action items and `docs/stories/agent-factory.md`.
+**Current state (WS-02, 2026-09-12):** `hello.json` is the first real entry — `AgentCoreStack`
+now loops over this directory instead of a single hardcoded `_agent_runtime()` call. Its
+`template` value is `"hello_agent"` (today's actual, only agent folder), **not**
+`"template_agent"` — that shared-codebase generalization is AF-02's job, done once a second
+specialist (Agronomy, AF-01) actually exists to prove "one codebase, many configs" against.
+Renaming `hello_agent/` → `template_agent/` and repointing this file's `template` value is the
+*only* change AF-02 needs here — the schema doesn't change. `model_id` is left `""` for now,
+meaning "use the `--context model_id=...` CDK override" (unchanged deploy-time behavior); a
+non-empty value here will take precedence once a specialist genuinely needs a different model
+than the deploy-time default. `memory` isn't set on this entry yet — that field lands with AF-05.

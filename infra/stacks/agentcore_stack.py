@@ -1,4 +1,5 @@
-"""AgentCore stack: IAM roles + AgentCore Runtimes, deployed via CDK.
+"""AgentCore stack: IAM roles + registry-driven AgentCore Runtimes + the orchestrator Lambda
+that invokes them, deployed via CDK.
 
 Per ADR-0005, agent runtimes use the CDK L2 `aws_bedrockagentcore.Runtime` construct
 (no imperative CLI deploy). By default the container image is built from the agent
@@ -8,20 +9,46 @@ folder (ARM64); pass context `agent_image_uri` to deploy a pre-built image inste
 Per ADR-0006, prompts live in a separate `PromptsStack` and are referenced here only
 by a **stable name** (no CloudFormation cross-stack import), so prompt changes deploy
 independently. The runtime receives `PROMPT_NAME` and resolves the prompt at runtime.
+
+Per ADR-0012, runtimes are now **registry-driven**: one `aws_bedrockagentcore.Runtime` per
+`agents/registry/*.json` entry, replacing the single hardcoded `_agent_runtime()` call —
+adding/removing a specialist is a registry-file change, not a stack-code change.
+
+WS-02: the orchestrator Lambda (`app/orchestrator/`) and its EventBridge trigger live in
+**this same stack**, not a separate one. AgentCore Runtime ARNs (unlike table/bucket names)
+include an AWS-generated id and aren't predictable by naming convention, so they can't be
+resolved cross-stack the "stable name" way ADR-0008 established for prompts/guardrails/tables.
+Keeping the orchestrator here lets its environment reference `runtime.agent_runtime_arn`
+directly as an in-memory CDK token — never crossing a stack boundary, so there's no need for a
+CFN cross-stack export/import (exactly the "exported-value-in-use" trap ADR-0008 rejected).
 """
 
+import json
 from pathlib import Path
 
 from aws_cdk import (
     CfnOutput,
+    Duration,
     Stack,
     aws_bedrockagentcore as agentcore,
+    aws_dynamodb as ddb,
+    aws_ecr as ecr,
     aws_ecr_assets as ecr_assets,
+    aws_events as events,
+    aws_events_targets as targets,
     aws_iam as iam,
+    aws_lambda as lambda_,
 )
 from constructs import Construct
 
 AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
+REGISTRY_DIR = AGENTS_DIR / "registry"
+ORCHESTRATOR_DIR = Path(__file__).resolve().parents[2] / "app" / "orchestrator"
+
+# The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
+# source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
+GOAL_EVENT_SOURCE = "tendril.client-api"
+GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
 
 
 class AgentCoreStack(Stack):
@@ -88,22 +115,106 @@ class AgentCoreStack(Stack):
             )
         )
 
-        # --- AgentCore runtimes (CDK-managed) ---
-        model_id = self.node.try_get_context("model_id") or ""
+        # --- AgentCore runtimes: one per agents/registry/*.json entry (ADR-0012) ---
+        context_model_id = self.node.try_get_context("model_id") or ""
         image_uri = self.node.try_get_context("agent_image_uri")  # optional pre-built image
 
-        self.hello_runtime = self._agent_runtime(
-            name="hello",
-            folder="hello_agent",
-            env_name=env_name,
-            model_id=model_id,
-            image_uri=image_uri,
-            prompt_name=f"{prefix}-hello-system",  # stable name; owned by PromptsStack
-            guardrail_name=f"{prefix}-hello-guardrail",  # stable name; owned by GuardrailsStack
-        )
+        # Keyed by each entry's own declared "name" (not the filename) — a registry file's name
+        # on disk is not required to match its "name" field, so looking this up by filename
+        # stem elsewhere would silently break the moment the two diverge.
+        registry_entries = {
+            entry["name"]: entry
+            for entry in (
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in sorted(REGISTRY_DIR.glob("*.json"))
+            )
+        }
+        self.runtimes: dict[str, agentcore.Runtime] = {}
+        for entry in registry_entries.values():
+            name = entry["name"]
+            self.runtimes[name] = self._agent_runtime(
+                name=name,
+                folder=entry["template"],
+                env_name=env_name,
+                model_id=entry.get("model_id") or context_model_id,
+                image_uri=image_uri,
+                prompt_name=f"{prefix}-{entry['prompt_name']}",  # stable name; owned by PromptsStack
+                guardrail_name=f"{prefix}-{entry['guardrail_name']}",  # owned by GuardrailsStack
+            )
+        self.hello_runtime = self.runtimes["hello"]
 
         CfnOutput(self, "AgentExecRoleArn", value=self.exec_role.role_arn)
         CfnOutput(self, "HelloRuntimeArn", value=self.hello_runtime.agent_runtime_arn)
+
+        # --- Orchestrator Lambda (WS-02 infra + WS-04 application: Strands agent loop) ---
+        app_table = ddb.Table.from_table_name(self, "AppTable", f"{prefix}-app")
+
+        orchestrator_image_repo = self.node.try_get_context("orchestrator_image_repo")
+        if orchestrator_image_repo:
+            repo = ecr.Repository.from_repository_name(
+                self, "OrchestratorRepo", orchestrator_image_repo
+            )
+            orchestrator_image_tag = self.node.try_get_context("orchestrator_image_tag") or "latest"
+            orchestrator_code = lambda_.DockerImageCode.from_ecr(repo, tag=orchestrator_image_tag)
+        else:
+            orchestrator_code = lambda_.DockerImageCode.from_image_asset(
+                str(ORCHESTRATOR_DIR), platform=ecr_assets.Platform.LINUX_ARM64
+            )
+
+        # agent name -> {arn, description}, built from the SAME registry + the runtimes just
+        # provisioned above (in-memory CDK tokens — never a cross-stack reference).
+        agent_manifest = {
+            name: {
+                "arn": runtime.agent_runtime_arn,
+                "description": registry_entries[name]["description"],
+            }
+            for name, runtime in self.runtimes.items()
+        }
+
+        self.orchestrator = lambda_.DockerImageFunction(
+            self,
+            "Orchestrator",
+            function_name=f"{prefix}-orchestrator",
+            code=orchestrator_code,
+            architecture=lambda_.Architecture.ARM_64,
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            environment={
+                "APP_TABLE_NAME": app_table.table_name,
+                "MODEL_ID": context_model_id,
+                "LOG_LEVEL": "INFO",
+                "AGENT_MANIFEST": self.to_json_string(agent_manifest),
+            },
+        )
+        app_table.grant_read_write_data(self.orchestrator)
+        self.orchestrator.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            )
+        )
+        # Scoped to the runtimes this deploy actually registered — never a wildcard (ADR-0012).
+        self.orchestrator.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[runtime.agent_runtime_arn for runtime in self.runtimes.values()],
+            )
+        )
+
+        # EventBridge: goal.submitted -> orchestrator, asynchronous (ADR-0004/ADR-0012). The
+        # Client API Lambda (WS-03) is never invoked synchronously by this rule; it only
+        # publishes the event via events:PutEvents (granted in ClientApiStack).
+        goal_submitted_rule = events.Rule(
+            self,
+            "GoalSubmittedRule",
+            rule_name=f"{prefix}-goal-submitted",
+            event_pattern=events.EventPattern(
+                source=[GOAL_EVENT_SOURCE], detail_type=[GOAL_SUBMITTED_DETAIL_TYPE]
+            ),
+        )
+        goal_submitted_rule.add_target(targets.LambdaFunction(self.orchestrator))
+
+        CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 
     def _agent_runtime(
         self,

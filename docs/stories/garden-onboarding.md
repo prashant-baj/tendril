@@ -118,6 +118,55 @@ dev — deploy is a separate, explicit step per this repo's practice of asking b
 
 ---
 
+## OB-03 — Show the real plant photo (not a generic icon)
+
+**As a** gardener, **I want** to actually see the photo I uploaded for a plant, **so that** I
+can visually recognize it instead of a generic icon standing in for every plant.
+
+**Context:** OB-02 uploads the photo and links it to the plant (`Media.plant_id`), but nothing
+ever reads it back — `MediaBucket` is private (`BLOCK_ALL`, ADR-0004/ADR-0013) and only a
+presigned **upload** (PUT) URL exists; there's no presigned **download** (GET) URL and no
+list-plants read endpoint at all yet, so today's plant rows always show `Plant.icon` (a generic
+Material icon), never the real photo. **Explicitly rejected during design:** copying photos into
+the public frontend/website bucket to sidestep this — that would make every uploaded photo
+permanently, unauthenticated-ly public with no way to un-share it, reversing the private-media
+posture ADR-0004/ADR-0013 already established on purpose. Photos stay in the private bucket;
+only short-lived presigned GET URLs are handed out, same pattern as the existing upload flow.
+
+**Acceptance Criteria**
+- [ ] `createPlant`'s response includes a `photoUrl` (short-lived presigned GET URL) when the
+  plant has a linked Media record — enough for the plant just added in the current session to
+  show its real photo immediately (no new read endpoint needed for this part).
+- [ ] A real `GET /gardens/{gardenId}/plants` list operation exists, returning each plant with a
+  freshly-generated `photoUrl` per read (presigned URLs expire, so a stored URL is never reused
+  across requests) — this is what makes photos still visible after a page reload, not just
+  right after upload. Replaces `HttpGardenApi`'s current client-side "prepend the newly created
+  plant onto a mocked list" workaround (OB-02's scope note) with a real read.
+- [ ] Plants with no attached photo keep showing the existing generic icon — `photoUrl` is
+  always optional, never a hard requirement.
+- [ ] An expired/broken `photoUrl` (e.g. the frontend held onto it too long) falls back to the
+  generic icon rather than a broken-image glyph.
+- [ ] Unit tests: presigned GET URL generation, the list-plants handler (with and without a
+  linked photo).
+- [ ] Component tests: a plant with `photoUrl` renders the image instead of the icon; an image
+  load error (`(error)` on `<img>`) falls back to the icon.
+
+**Tasks**
+- [ ] Add `photoUrl` (optional) to `PlantCreateResponse` and a new `Plant`-list schema in
+  `openapi.yaml`; add the `GET /gardens/{gardenId}/plants` operation + CORS preflight.
+- [ ] `garden_handler.py`: generate the presigned GET URL (reuse `_get_s3()`) wherever a plant's
+  linked Media record is known; implement the list-plants handler.
+- [ ] Frontend: add `photoUrl?: string` to the `Plant` model; `PlantRowComponent`/
+  `PlantCardComponent` render an `<img [src]>` when present (with an `(error)` handler falling
+  back to the icon), otherwise the existing icon; `HttpGardenApi.getPlants()`/
+  `getPlantsSummary()` call the real list endpoint instead of merging a client-side-only array
+  onto the mock.
+
+**Dependencies:** OB-02 (needs the upload + Media↔Plant link it already built).
+**Status:** ☐ to do.
+
+---
+
 ### Definition of Done (applies to every story)
 
 Per [`../engineering-best-practices.md`](../engineering-best-practices.md): CI green (lint +

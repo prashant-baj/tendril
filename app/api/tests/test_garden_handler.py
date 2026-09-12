@@ -1,4 +1,4 @@
-"""Unit tests for the garden Client API handler (OB-01, OB-02).
+"""Unit tests for the garden Client API handler (OB-01, OB-02, WS-03).
 
 No AWS calls — DynamoDB access is monkeypatched via fake table/client objects, following the
 same mocked-boto3-client convention as agents/hello_agent/tests/test_agent.py.
@@ -15,6 +15,7 @@ invocation against real DynamoDB.
 """
 
 import json
+from pathlib import Path
 
 import garden_handler as handler
 
@@ -60,6 +61,17 @@ class FakeS3:
             {"operation": operation, "Params": Params, "ExpiresIn": ExpiresIn}
         )
         return f"https://example-bucket.s3.amazonaws.com/{Params['Key']}?presigned=1"
+
+
+class FakeEvents:
+    def __init__(self, raise_on_put: Exception | None = None):
+        self.raise_on_put = raise_on_put
+        self.put_calls: list[list[dict]] = []
+
+    def put_events(self, Entries):
+        if self.raise_on_put:
+            raise self.raise_on_put
+        self.put_calls.append(Entries)
 
 
 def _event(method, resource, *, body=None, headers=None, path_params=None):
@@ -419,6 +431,192 @@ def test_create_plant_media_link_failure_returns_500(monkeypatch):
     assert resp["statusCode"] == 500
 
 
+# --- create_goal (WS-03) --------------------------------------------------------
+
+
+def test_create_goal_happy_path_without_media(monkeypatch):
+    fake_table = FakeTable()
+    fake_events = FakeEvents()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_events", fake_events)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "leaves turning yellow"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+
+    assert resp["statusCode"] == 202
+    body = json.loads(resp["body"])
+    assert "goalId" in body and body["goalId"]
+    assert body["status"] == "Intake"
+
+    assert len(fake_table.put_calls) == 1
+    goal_item = fake_table.put_calls[0]
+    assert goal_item["pk"] == "GARDEN#g1"
+    assert goal_item["sk"] == f"GOAL#{body['goalId']}"
+    assert goal_item["description"] == "leaves turning yellow"
+    assert goal_item["status"] == "Intake"
+    assert "media_ids" not in goal_item
+
+    # persisted before the event is published (order matters — see module docstring)
+    assert len(fake_events.put_calls) == 1
+    entries = fake_events.put_calls[0]
+    assert len(entries) == 1
+    assert entries[0]["Source"] == "tendril.client-api"
+    assert entries[0]["DetailType"] == "goal.submitted"
+    assert json.loads(entries[0]["Detail"]) == {"gardenId": "g1", "goalId": body["goalId"]}
+
+
+def test_create_goal_happy_path_with_media_ids(monkeypatch):
+    fake_table = FakeTable()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help", "mediaIds": ["media-1", "media-2"]},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+
+    assert resp["statusCode"] == 202
+    assert fake_table.put_calls[0]["media_ids"] == ["media-1", "media-2"]
+
+
+def test_create_goal_missing_description(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 400
+
+
+def test_create_goal_invalid_media_ids_type(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help", "mediaIds": "not-a-list"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 400
+
+
+def test_create_goal_missing_user_id_header(monkeypatch):
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 400
+
+
+def test_create_goal_missing_garden_id(monkeypatch):
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={"X-User-Id": "u"},
+        path_params=None,
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 400
+
+
+def test_create_goal_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_put=RuntimeError("boom")))
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 500
+
+
+def test_create_goal_eventbridge_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents(raise_on_put=RuntimeError("boom")))
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 500
+
+
+# --- contract test: responses conform to openapi.yaml's JSON Schema (WS-03) ----
+
+
+def test_create_goal_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 202
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = spec["components"]["schemas"]["GoalCreateResponse"]
+    validate(instance=body, schema=schema)
+
+
+def test_create_garden_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    event = _event(
+        "POST",
+        "/gardens",
+        body={"name": "G", "geolocation": "Pune"},
+        headers={"X-User-Id": "u"},
+    )
+    resp = handler.create_garden(event)
+    assert resp["statusCode"] == 201
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = spec["components"]["schemas"]["GardenCreateResponse"]
+    validate(instance=body, schema=schema)
+
+
 # --- handler() routing ---------------------------------------------------------
 
 
@@ -477,6 +675,20 @@ def test_handler_routes_post_plants(monkeypatch):
     )
     resp = handler.handler(event, None)
     assert resp["statusCode"] == 201
+
+
+def test_handler_routes_post_goals(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 202
 
 
 def test_handler_unknown_route_returns_404():

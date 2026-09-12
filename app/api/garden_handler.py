@@ -1,4 +1,4 @@
-"""Garden Client API handler (OB-01, OB-02) — gardens, media upload URLs, and plants.
+"""Garden Client API handler (OB-01, OB-02, WS-03) — gardens, media, plants, and goal intake.
 
 Implements every operation in app/api/openapi.yaml, invoked by API Gateway's Lambda proxy
 integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API for now (ADR-0011's
@@ -14,6 +14,14 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
   `mediaId` from a prior `createMediaUpload` call is given, atomically links that Media record
   to this plant (`plant_id` set via the same transaction) — so a Plant is never left pointing at
   a Media record that doesn't actually exist.
+- `createGoal` (WS-03): persists a `Goal` record (status `Intake`) and publishes a
+  `goal.submitted` EventBridge event — `AgentCoreStack`'s rule routes it to the orchestrator
+  Lambda asynchronously (ADR-0004/ADR-0012). **Known trade-off:** the DynamoDB write and the
+  EventBridge publish aren't atomic (no cross-service transaction exists for this); if the
+  write succeeds but the publish fails, the Goal record persists with no event ever fired. This
+  epic is explicitly scoped to "prove the pipe" (walking-skeleton.md), not production-hardened
+  exactly-once delivery — an outbox/saga pattern is future work if this gap ever matters in
+  practice.
 
 No auth yet (ADR-0004's seam is still open): `X-User-Id` is a per-browser anonymous identifier
 the frontend generates and persists (garden-onboarding.md's stories), not a verified identity.
@@ -37,9 +45,15 @@ logger = logging.getLogger("tendril.api.garden_handler")
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by ClientApiStack; never hardcoded
 MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by ClientApiStack; never hardcoded
 
+# Must match infra/stacks/agentcore_stack.py's GOAL_EVENT_SOURCE/GOAL_SUBMITTED_DETAIL_TYPE —
+# that's the source/detail-type its EventBridge rule pattern-matches on.
+GOAL_EVENT_SOURCE = "tendril.client-api"
+GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
+
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
 _s3 = None
+_events = None
 
 
 def _get_table():
@@ -67,6 +81,13 @@ def _get_s3():
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
+
+
+def _get_events():
+    global _events
+    if _events is None:
+        _events = boto3.client("events")
+    return _events
 
 
 def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -285,6 +306,64 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
     return _response(201, {"plantId": plant_id})
 
 
+def create_goal(event: dict[str, Any]) -> dict[str, Any]:
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    description = payload.get("description")
+    media_ids = payload.get("mediaIds")
+    if not isinstance(description, str) or not description.strip():
+        return _error(400, "description is required")
+    if media_ids is not None and (
+        not isinstance(media_ids, list) or not all(isinstance(m, str) for m in media_ids)
+    ):
+        return _error(400, "mediaIds must be an array of strings if provided")
+
+    goal_id = str(uuid.uuid4())
+    goal_item: dict[str, Any] = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"GOAL#{goal_id}",
+        "goal_id": goal_id,
+        "garden_id": garden_id,
+        "description": description,
+        # Generic default — the orchestrator sets this once it actually understands the goal
+        # (openapi.yaml's Goal.type description).
+        "type": "diagnosis",
+        "status": "Intake",
+    }
+    if media_ids:
+        goal_item["media_ids"] = media_ids
+
+    try:
+        _get_table().put_item(Item=goal_item)
+        _get_events().put_events(
+            Entries=[
+                {
+                    "Source": GOAL_EVENT_SOURCE,
+                    "DetailType": GOAL_SUBMITTED_DETAIL_TYPE,
+                    "Detail": json.dumps({"gardenId": garden_id, "goalId": goal_id}),
+                }
+            ]
+        )
+    except Exception:
+        logger.exception("Failed to submit goal for garden %s", garden_id)
+        return _error(500, "could not submit goal")
+
+    return _response(202, {"goalId": goal_id, "status": "Intake"})
+
+
 def get_garden(event: dict[str, Any]) -> dict[str, Any]:
     garden_id = (event.get("pathParameters") or {}).get("gardenId")
     if not garden_id:
@@ -335,6 +414,8 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return create_media_upload(event)
         if method == "POST" and resource == "/gardens/{gardenId}/plants":
             return create_plant(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/goals":
+            return create_goal(event)
         return _error(404, f"no route for {method} {resource}")
     except Exception:
         logger.exception("Unhandled error for %s %s", method, resource)

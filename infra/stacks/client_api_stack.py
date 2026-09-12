@@ -86,6 +86,15 @@ class ClientApiStack(Stack):
         # OB-02: createMediaUpload signs a presigned PUT URL — the signing identity (this
         # Lambda's role) must actually be authorized for the action, or the URL 403s when used.
         media_bucket.grant_put(garden_handler)
+        # WS-03: createGoal publishes goal.submitted to the default event bus — AgentCoreStack's
+        # rule (matching on source/detail-type, not this Lambda directly) routes it to the
+        # orchestrator asynchronously (ADR-0004/ADR-0012).
+        garden_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["events:PutEvents"],
+                resources=[f"arn:aws:events:{self.region}:{self.account}:event-bus/default"],
+            )
+        )
 
         # --- Load + patch the OpenAPI spec, one Lambda for both operations for now ---
         with open(OPENAPI_PATH, encoding="utf-8") as f:
@@ -95,8 +104,13 @@ class ClientApiStack(Stack):
             f"arn:aws:apigateway:{self.region}:lambda:path/2015-03-31/functions/"
             f"{garden_handler.function_arn}/invocations"
         )
+        # Path items may carry a path-level `parameters` list (WS-01: gardenId is now declared
+        # once per path, not per-operation) alongside HTTP-method keys — skip anything that
+        # isn't an operation object, since it won't have `.get("x-amazon-apigateway-integration")`.
         for methods in spec.get("paths", {}).values():
             for operation in methods.values():
+                if not isinstance(operation, dict):
+                    continue
                 integration = operation.get("x-amazon-apigateway-integration")
                 if integration and integration.get("uri") == LAMBDA_URI_PLACEHOLDER:
                     integration["uri"] = integration_uri
