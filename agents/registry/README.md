@@ -42,8 +42,8 @@ deployed:
 - The orchestrator (`app/orchestrator/`) builds its invocation manifest (agent name → runtime
   ARN + description) from the same files at deploy time.
 
-**Current state (2026-09-12):** `vision.json` (plant-photo identification, `google.gemma-3-27b-it`)
-is the only live entry — it's a real specialist the orchestrator can call, not a stand-in.
+**Current state (2026-09-12):** `vision.json` (plant-photo identification, `qwen.qwen3-vl-235b-a22b`
+— switched from the originally-proven `google.gemma-3-27b-it` for answer quality) is the only live entry — it's a real specialist the orchestrator can call, not a stand-in.
 `AgentCoreStack` loops over this directory instead of a single hardcoded `_agent_runtime()` call.
 Its `template` value is `"hello_agent"` (today's actual, only agent folder) — that folder is
 **pure shared-template code now**: nothing deploys it under the name "hello" anymore (the

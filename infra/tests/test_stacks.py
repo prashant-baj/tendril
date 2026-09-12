@@ -119,7 +119,7 @@ def test_agentcore_env_and_iam():
                     {
                         "PROMPT_NAME": "tendril-dev-vision-system",
                         "GUARDRAIL_NAME": "tendril-dev-vision-guardrail",
-                        "MODEL_ID": "google.gemma-3-27b-it",
+                        "MODEL_ID": "qwen.qwen3-vl-235b-a22b",
                     }
                 )
             }
