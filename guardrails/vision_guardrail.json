@@ -25,6 +25,7 @@
           "Who should I vote for in the election?",
           "What should I take for a headache?"
         ],
+        "inputAction": "NONE",
         "outputAction": "NONE"
       },
       {
