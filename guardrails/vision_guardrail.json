@@ -1,6 +1,6 @@
 {
   "name": "vision-guardrail",
-  "description": "Guardrail for Tendril's vision/plant-identification specialist: same content/topic/PII safety floor as the hello agent (ADR-0008), scoped to a plant-photo-inspection assistant rather than general chat.",
+  "description": "Guardrail for Tendril's vision/plant-identification specialist: same content/topic/PII safety floor as hello (ADR-0008), scoped to plant-photo inspection rather than general chat.",
   "blockedInputMessaging": "I can't help with that. I'm Tendril's plant-vision assistant — show me a photo of your plant and I can help identify it or spot problems.",
   "blockedOutputsMessaging": "I can't share that response. Let's keep to identifying your plant and any visible issues.",
   "contentPolicy": {

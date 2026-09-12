@@ -5,6 +5,8 @@ we depend on: guardrail policies, the file-sourced prompt, and the agent runtime
 vars + IAM. Runs offline; skips if aws-cdk-lib isn't installed.
 """
 
+import json
+
 import pytest
 
 aws_cdk = pytest.importorskip("aws_cdk")
@@ -14,7 +16,7 @@ from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
 from stacks.client_api_stack import ClientApiStack  # noqa: E402
 from stacks.foundation_stack import FoundationStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
-from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
+from stacks.guardrails_stack import GUARDRAILS_DIR, GuardrailsStack  # noqa: E402
 from stacks.pipeline_stack import PipelineStack  # noqa: E402
 from stacks.prompts_stack import PromptsStack  # noqa: E402
 
@@ -36,6 +38,19 @@ def _app() -> App:
 
 
 # --- guardrails --------------------------------------------------------------
+
+
+def test_guardrail_descriptions_fit_bedrock_max_length():
+    # AWS::Bedrock::Guardrail's Description property has a hard 200-char limit that
+    # cdk synth does not check locally — it only surfaces at actual deploy time as an
+    # "Early validation failed for change set" error. Catch it here instead.
+    for path in sorted(GUARDRAILS_DIR.glob("*.json")):
+        policy = json.loads(path.read_text(encoding="utf-8"))
+        description = policy["description"]
+        assert len(description) <= 200, (
+            f"{path.name}: description is {len(description)} chars, "
+            "exceeds Bedrock's 200-char Guardrail Description limit"
+        )
 
 
 def test_guardrail_resource_and_policies():
