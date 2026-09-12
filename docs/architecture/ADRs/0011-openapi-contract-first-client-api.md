@@ -78,6 +78,17 @@ needed.
   Client API is actually implemented; Cognito JWT authorizer wiring (ADR-0004's auth seam) as an
   `x-amazon-apigateway-authorizer` extension once auth lands.
 
+> **Refinement (2026-09-12):** "OpenAPI 3.1 (latest 3.x)" as originally decided above turned out
+> not to be deployable: API Gateway's REST API (v1) `SpecRestApi`/OpenAPI import only validates
+> against **Swagger 2.0 or OpenAPI 3.0.x** — 3.1 is rejected outright. This was discovered via a
+> real `cdk deploy` failure on OB-01's first Client API stack (`AWS::ApiGateway::RestApi`
+> resource creation: `"Invalid OpenAPI input"`, 400/`InvalidRequest`), not a docs lookup done up
+> front. `app/api/openapi.yaml`'s `openapi:` field is corrected to **`3.0.1`**; nothing else in
+> this ADR changes — `SpecRestApi`, the synth-time ARN-patch mechanism, and the contract-first
+> approach all stand as decided. Any spec content that happens to rely on 3.1-only JSON Schema
+> semantics (e.g. `type` as an array including `"null"`) must be written the 3.0.x-compatible way
+> instead (`nullable: true`) — none of OB-01's schemas currently do.
+
 ## Action Items
 
 1. [ ] Scaffold `app/api/openapi.yaml` (info, servers, `components.schemas` for the domain

@@ -47,7 +47,8 @@ photo" and "submit a goal" operations defined in OpenAPI 3.x before either side 
 **so that** both layers build against one agreed shape from day one (ADR-0011).
 
 **Acceptance Criteria**
-- [ ] `app/api/openapi.yaml` (OpenAPI 3.1) exists with `info`/`servers` populated per environment.
+- [ ] `app/api/openapi.yaml` (OpenAPI 3.0.x — API Gateway's `SpecRestApi` import rejects 3.1,
+  ADR-0011's 2026-09-12 refinement) exists with `info`/`servers` populated per environment.
 - [ ] `POST /gardens/{gardenId}/media` — request `{contentType, fileName}` → response
   `{uploadUrl, mediaId}` (a presigned S3 **PUT** URL, per ADR-0004's direct-to-S3 upload flow).
 - [ ] `POST /gardens/{gardenId}/goals` — request `{description, mediaIds?: string[]}` (the
