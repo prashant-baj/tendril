@@ -1,6 +1,9 @@
-import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Injectable, inject } from '@angular/core';
 import { Observable, of } from 'rxjs';
-import { Garden, GardenFact } from '../models/garden.model';
+import { map } from 'rxjs/operators';
+import { CLIENT_API_BASE_URL } from '../config/client-api.config';
+import { CreateGardenRequest, Garden, GardenFact } from '../models/garden.model';
 import { Plant } from '../models/plant.model';
 
 /**
@@ -15,6 +18,10 @@ export abstract class GardenApi {
   abstract getPlantsSummary(): Observable<Plant[]>;
   /** Full list for the Garden screen. */
   abstract getPlants(): Observable<Plant[]>;
+  /** OB-01: `POST /gardens`. */
+  abstract createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }>;
+  /** OB-01: `GET /gardens/{gardenId}`. */
+  abstract getGardenById(gardenId: string): Observable<Garden>;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -65,5 +72,80 @@ export class MockGardenApi extends GardenApi {
 
   getPlants(): Observable<Plant[]> {
     return of(this.plants);
+  }
+
+  // Keyed store so a garden created via createGarden() can be read back via getGardenById(),
+  // seeded with the mock single-garden fixture above.
+  private readonly createdGardens = new Map<string, Garden>([[this.garden.gardenId, this.garden]]);
+
+  createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }> {
+    const gardenId = `mock-${Math.random().toString(36).slice(2, 10)}`;
+    this.createdGardens.set(gardenId, {
+      gardenId,
+      name: request.name,
+      vision: request.vision ?? '',
+      geolocation: request.geolocation,
+      climateZone: '',
+    });
+    return of({ gardenId });
+  }
+
+  getGardenById(gardenId: string): Observable<Garden> {
+    return of(this.createdGardens.get(gardenId) ?? this.garden);
+  }
+}
+
+interface GardenDto {
+  gardenId: string;
+  name: string;
+  geolocation: string;
+  vision?: string;
+  ownerUserId: string;
+  createdAt: string;
+}
+
+/**
+ * Real Client API implementation of `createGarden`/`getGardenById` (OB-01). Every other method
+ * still has no backend yet, so it delegates to an internal `MockGardenApi` — swapping the
+ * `app.config.ts` binding to this class doesn't regress the still-mocked screens.
+ */
+@Injectable({ providedIn: 'root' })
+export class HttpGardenApi extends GardenApi {
+  private readonly http = inject(HttpClient);
+  private readonly baseUrl = inject(CLIENT_API_BASE_URL);
+  private readonly mock = new MockGardenApi();
+
+  getGarden(): Observable<Garden> {
+    return this.mock.getGarden();
+  }
+
+  getGardenFacts(): Observable<GardenFact[]> {
+    return this.mock.getGardenFacts();
+  }
+
+  getPlantsSummary(): Observable<Plant[]> {
+    return this.mock.getPlantsSummary();
+  }
+
+  getPlants(): Observable<Plant[]> {
+    return this.mock.getPlants();
+  }
+
+  createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }> {
+    return this.http.post<{ gardenId: string }>(`${this.baseUrl}/gardens`, request);
+  }
+
+  getGardenById(gardenId: string): Observable<Garden> {
+    return this.http
+      .get<GardenDto>(`${this.baseUrl}/gardens/${gardenId}`)
+      .pipe(
+        map((dto) => ({
+          gardenId: dto.gardenId,
+          name: dto.name,
+          geolocation: dto.geolocation,
+          vision: dto.vision ?? '',
+          climateZone: '',
+        })),
+      );
   }
 }

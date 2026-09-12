@@ -1,0 +1,133 @@
+openapi: 3.1.0
+info:
+  title: Tendril Client API
+  version: "0.1.0"
+  description: >
+    Tendril's user-facing Client API. Contract-first per ADR-0011: this file is the actual
+    deploy artifact — infra/stacks/client_api_stack.py imports it directly via
+    apigateway.SpecRestApi, patching each operation's x-amazon-apigateway-integration.uri
+    with the real Lambda ARN at synth time. Scoped to OB-01's two operations only; the rest
+    of ADR-0004's endpoint table is added incrementally as later stories land (docs/roadmap.md).
+
+paths:
+  /gardens:
+    post:
+      operationId: createGarden
+      summary: Create a named garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GardenCreateRequest"
+      responses:
+        "201":
+          description: Garden created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+
+  /gardens/{gardenId}:
+    get:
+      operationId: getGarden
+      summary: Read a garden by id
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: gardenId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Garden"
+        "404":
+          description: No such garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+
+components:
+  parameters:
+    UserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: >
+        Per-browser anonymous identifier (crypto.randomUUID(), persisted client-side) until
+        Cognito auth lands (ADR-0004's auth seam). Not validated as an identity here — only
+        required to be present, so every Garden record has a stable owner key.
+      schema:
+        type: string
+
+  schemas:
+    GardenCreateRequest:
+      type: object
+      required: [name, geolocation]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        geolocation:
+          type: string
+          minLength: 1
+          description: Free-text location for now (e.g. "Pune"); structured lat/lon is future work.
+        vision:
+          type: string
+          description: Optional short description of what this garden is for.
+
+    GardenCreateResponse:
+      type: object
+      required: [gardenId]
+      properties:
+        gardenId:
+          type: string
+
+    Garden:
+      type: object
+      required: [gardenId, name, geolocation, ownerUserId, createdAt]
+      properties:
+        gardenId:
+          type: string
+        name:
+          type: string
+        geolocation:
+          type: string
+        vision:
+          type: string
+        ownerUserId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string

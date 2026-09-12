@@ -11,6 +11,7 @@ aws_cdk = pytest.importorskip("aws_cdk")
 from aws_cdk import App, Environment  # noqa: E402
 from aws_cdk.assertions import Match, Template  # noqa: E402
 from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
+from stacks.client_api_stack import ClientApiStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
 from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
 from stacks.pipeline_stack import PipelineStack  # noqa: E402
@@ -21,8 +22,15 @@ IMAGE = "123456789012.dkr.ecr.ap-south-1.amazonaws.com/tendril:latest"
 
 
 def _app() -> App:
-    # agent_image_uri avoids a Docker build during synth.
-    return App(context={"agent_image_uri": IMAGE, "model_id": "global.amazon.nova-2-lite-v1:0"})
+    # agent_image_uri / garden_handler_image_repo avoid a Docker build during synth (ADR-0005,
+    # ADR-0014).
+    return App(
+        context={
+            "agent_image_uri": IMAGE,
+            "model_id": "global.amazon.nova-2-lite-v1:0",
+            "garden_handler_image_repo": "tendril-dev-garden-handler",
+        }
+    )
 
 
 # --- guardrails --------------------------------------------------------------
@@ -162,6 +170,51 @@ def test_deploy_role_trust_policy_tolerates_github_immutable_id_sub_claim():
                     }
                 ),
             }
+        ),
+    )
+
+
+# --- client API (OpenAPI contract-first, OB-01) ------------------------------
+
+
+def test_client_api_stack_synthesizes_garden_operations():
+    app = _app()
+    tpl = Template.from_stack(ClientApiStack(app, "capi", env_name="dev", env=ENV))
+
+    tpl.resource_count_is("AWS::ApiGateway::RestApi", 1)
+    tpl.has_resource_properties(
+        "AWS::ApiGateway::RestApi", Match.object_like({"Name": "tendril-dev-client-api"})
+    )
+
+    # Container image (ADR-0014) — no Handler/Runtime property, PackageType: Image instead.
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {
+                "FunctionName": "tendril-dev-garden-handler",
+                "PackageType": "Image",
+                "Architectures": ["arm64"],
+                "Environment": Match.object_like(
+                    {"Variables": Match.object_like({"APP_TABLE_NAME": "tendril-dev-app"})}
+                ),
+            }
+        ),
+    )
+
+    # TransactWriteItems isn't part of grant_read_write_data's action set; createGarden's
+    # double-write needs it added explicitly (data-architecture.md §2).
+    actions = set()
+    for res in tpl.find_resources("AWS::IAM::Policy").values():
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions.update(act if isinstance(act, list) else [act])
+    assert "dynamodb:TransactWriteItems" in actions
+
+    # API Gateway is granted permission to invoke the garden handler.
+    tpl.has_resource_properties(
+        "AWS::Lambda::Permission",
+        Match.object_like(
+            {"Action": "lambda:InvokeFunction", "Principal": "apigateway.amazonaws.com"}
         ),
     )
 

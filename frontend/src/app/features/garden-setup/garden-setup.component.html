@@ -1,0 +1,56 @@
+<div class="screen">
+  <section class="card">
+    <div class="intro">
+      <h2>Setup My Garden</h2>
+      <p>Tell us a little about your garden so we can tailor advice to it.</p>
+    </div>
+
+    <form [formGroup]="form" (ngSubmit)="submit()" class="form">
+      <label class="field">
+        <span class="field-label">Garden name</span>
+        <input
+          type="text"
+          formControlName="name"
+          placeholder="e.g. Balcony Kitchen Garden"
+          autocomplete="off"
+        />
+        @if (form.controls.name.invalid && form.controls.name.touched) {
+          <span class="field-error">Give your garden a name.</span>
+        }
+      </label>
+
+      <label class="field">
+        <span class="field-label">Location</span>
+        <input
+          type="text"
+          formControlName="geolocation"
+          placeholder="e.g. Pune, India"
+          autocomplete="off"
+        />
+        @if (form.controls.geolocation.invalid && form.controls.geolocation.touched) {
+          <span class="field-error">Location helps us tailor advice to your climate.</span>
+        }
+      </label>
+
+      <label class="field">
+        <span class="field-label">What are you hoping to grow? (optional)</span>
+        <textarea
+          formControlName="vision"
+          rows="3"
+          placeholder="e.g. Fresh organic veggies from my balcony"
+        ></textarea>
+      </label>
+
+      @if (errorMessage()) {
+        <div class="form-error">
+          <td-icon name="error" size="18px" />
+          <span>{{ errorMessage() }}</span>
+        </div>
+      }
+
+      <button type="submit" class="btn-primary" [disabled]="submitting()">
+        {{ submitting() ? 'Saving…' : 'Create my garden' }}
+      </button>
+    </form>
+  </section>
+</div>

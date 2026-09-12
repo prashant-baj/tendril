@@ -30,6 +30,7 @@ jobs:
     outputs:
       infra: ${{ steps.filter.outputs.infra }}
       agents: ${{ steps.filter.outputs.agents }}
+      app: ${{ steps.filter.outputs.app }}
       prompts: ${{ steps.filter.outputs.prompts }}
       guardrails: ${{ steps.filter.outputs.guardrails }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -43,6 +44,8 @@ jobs:
               - 'infra/**'
             agents:
               - 'agents/**'
+            app:
+              - 'app/**'
             prompts:
               - 'prompts/**'
             guardrails:
@@ -55,6 +58,7 @@ jobs:
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') &&
       (needs.changes.outputs.infra == 'true' ||
        needs.changes.outputs.agents == 'true' ||
+       needs.changes.outputs.app == 'true' ||
        needs.changes.outputs.prompts == 'true' ||
        needs.changes.outputs.guardrails == 'true' ||
        needs.changes.outputs.frontend == 'true')
@@ -73,15 +77,17 @@ jobs:
           python-version: "3.13"
       - name: Install CDK + deps
         run: npm install -g aws-cdk && pip install -r infra/requirements.txt
-      # Deploy the app stacks. Order matters on a cold environment: prompts and
-      # guardrails must exist before the agent runtime, which resolves them by name
-      # at cold start; frontend must exist (bucket created) before the sync step below.
-      # CDK no-ops any stack whose template is unchanged, so listing all five is safe
-      # regardless of which folder triggered the run.
+      # Deploy the app stacks. Order matters on a cold environment: foundation (the DynamoDB
+      # table) must exist before client-api, which resolves it by stable name; prompts and
+      # guardrails must exist before the agent runtime, which resolves them by name at cold
+      # start; frontend must exist (bucket created) before the sync step below. CDK no-ops any
+      # stack whose template is unchanged, so listing all six is safe regardless of which
+      # folder triggered the run.
       - name: Deploy dev (app stacks)
         run: >-
           cd infra && cdk deploy
           tendril-dev-foundation
+          tendril-dev-client-api
           tendril-dev-prompts
           tendril-dev-guardrails
           tendril-dev-agentcore

@@ -12,3 +12,10 @@ export interface GardenFact {
   icon: string;
   label: string;
 }
+
+/** Client API request body for `POST /gardens` (OB-01, app/api/openapi.yaml). */
+export interface CreateGardenRequest {
+  name: string;
+  geolocation: string;
+  vision?: string;
+}

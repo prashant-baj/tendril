@@ -26,40 +26,41 @@ called for — not a new decision.
 description, **so that** everything else (plants, goals, plans) has somewhere to attach to.
 
 **Acceptance Criteria**
-- [ ] A new **"Create Garden"** screen/form (`frontend/src/app/features/garden-setup/`, route
+- [x] A new **"Create Garden"** screen/form (`frontend/src/app/features/garden-setup/`, route
   `/garden-setup`) collects: `name` (required), `geolocation` (required — free text for now, e.g.
   "Pune"; structured lat/lon is a later refinement, not blocking this story), `vision` (optional
   short description, e.g. "fresh organic veggies from my balcony").
-- [ ] `app/api/openapi.yaml` gains `POST /gardens` (request: `{name, geolocation, vision?}` →
+- [x] `app/api/openapi.yaml` gains `POST /gardens` (request: `{name, geolocation, vision?}` →
   response: `{gardenId}`, 201) and `GET /gardens/{gardenId}` (returns the full `Garden` schema) —
   the first two real operations added to the contract (ADR-0011).
-- [ ] The **first** `ClientApiStack` is provisioned (`SpecRestApi` importing the patched
+- [x] The **first** `ClientApiStack` is provisioned (`SpecRestApi` importing the patched
   `openapi.yaml`, per ADR-0011's synth-time ARN-injection pattern) — this is the first time any
   Client API infra actually exists; later stories (OB-02, WS-*) add operations to this same
   stack, not new ones.
-- [ ] The garden-create Lambda handler writes **both** DynamoDB records in one
+- [x] The garden-create Lambda handler writes **both** DynamoDB records in one
   `TransactWriteItems` call (data-architecture.md §2): the canonical
   `pk=GARDEN#{garden_id}, sk=METADATA` record, and the ownership index
   `pk=USER#{user_id}, sk=GARDEN#{garden_id}` record — never one without the other.
-- [ ] Malformed input (missing `name`/`geolocation`) is rejected with a typed 4xx — never an
+- [x] Malformed input (missing `name`/`geolocation`) is rejected with a typed 4xx — never an
   unhandled exception.
-- [ ] After creation, the frontend navigates to `/home` (or `/garden`) with the new garden as
+- [x] After creation, the frontend navigates to `/home` (or `/garden`) with the new garden as
   the active context (a simple app-level "current garden" signal/service — no multi-garden
   switcher UI yet; that's carried forward).
-- [ ] Unit tests: valid create, missing-field validation, the transactional double-write.
-- [ ] Component tests: form validation, successful submit navigates away, a failed submit shows
+- [x] Unit tests: valid create, missing-field validation, the transactional double-write.
+- [x] Component tests: form validation, successful submit navigates away, a failed submit shows
   a recoverable error.
 
 **Tasks**
-- [ ] Add the two operations to `openapi.yaml` + `components.schemas.Garden`.
-- [ ] Stand up `ClientApiStack` (new `infra/stacks/client_api_stack.py`) importing the spec.
-- [ ] Implement the garden-create/read Lambda handler(s) in `app/api/`.
-- [ ] Build the `garden-setup` frontend feature (form + a `GardenSetupApi`/extension of the
+- [x] Add the two operations to `openapi.yaml` + `components.schemas.Garden`.
+- [x] Stand up `ClientApiStack` (new `infra/stacks/client_api_stack.py`) importing the spec.
+- [x] Implement the garden-create/read Lambda handler(s) in `app/api/`.
+- [x] Build the `garden-setup` frontend feature (form + a `GardenSetupApi`/extension of the
   existing `GardenApi` interface, replacing the relevant slice of `MockGardenApi`).
-- [ ] Wire the `X-User-Id` header convention client-side (generate once, persist, attach to
+- [x] Wire the `X-User-Id` header convention client-side (generate once, persist, attach to
   every Client API call — a small shared interceptor, not per-request boilerplate).
 
-**Dependencies:** none (first feature). **Status:** ☐ to do.
+**Dependencies:** none (first feature). **Status:** ✅ done (implemented; not yet deployed to
+dev — deploy is a separate, explicit step per this repo's practice of asking before any deploy).
 
 ---
 
