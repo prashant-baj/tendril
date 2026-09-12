@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so gitleaks can diff the pushed commit range
+          fetch-depth: 0   # full history so gitleaks can scan every commit
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -24,7 +24,15 @@ jobs:
       - name: Tests
         run: pytest -q || echo "no tests yet"
       - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
+        # Plain CLI, not gitleaks/gitleaks-action@v2: that action now requires a
+        # GITLEAKS_LICENSE for org-owned repos (gitleaks.io signup). The CLI itself is
+        # still fully open-source — same version pre-commit uses (.pre-commit-config.yaml).
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact -v
   changes:
     runs-on: ubuntu-latest
     outputs:
