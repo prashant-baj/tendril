@@ -109,8 +109,17 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
                 {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(ownership_item)}},
             ]
         )
-    except Exception:
-        logger.exception("Failed to write garden %s for user %s", garden_id, user_id)
+    except Exception as e:
+        # ClientError.response includes CancellationReasons (with a Code + Message per
+        # TransactItem) that logger.exception's plain traceback doesn't surface — critical
+        # for diagnosing *which* item/attribute DynamoDB rejected and why.
+        logger.error(
+            "Failed to write garden %s for user %s: %s | response=%s",
+            garden_id,
+            user_id,
+            e,
+            getattr(e, "response", None),
+        )
         return _error(500, "could not create garden")
 
     return _response(201, {"gardenId": garden_id})
