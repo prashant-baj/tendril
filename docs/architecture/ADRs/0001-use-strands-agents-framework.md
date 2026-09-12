@@ -122,9 +122,17 @@ The secondary axis is **AWS-native deployment and observability**. Because the p
 4. [ ] Establish eval scenarios + OpenTelemetry tracing as the testing approach for model-driven behavior.
 5. [x] Validate agents-as-tools vs. in-process Swarm/Graph for the orchestrator↔specialist topology (candidate for its own ADR) — **resolved by [ADR-0012](./0012-orchestrator-lambda-declarative-agent-registry.md)**: agents-as-tools over remote AgentCore `InvokeAgentRuntime`, driven by a declarative agent registry.
 6. [ ] Adopt Strands **Memory** (Bedrock Knowledge Bases backend) + **S3Storage**, with stores scoped per user/garden for multi-tenant isolation.
-7. [ ] Implement plan approval and confirm-before-action via the **HumanInTheLoop** intervention (interrupt/resume) with a **WhatsApp custom callback**.
+7. [ ] Implement plan approval and confirm-before-action via the **HumanInTheLoop** intervention (interrupt/resume), with the `ask` callback targeting **the web UI first** (REST `/plans/{id}/approve` + WebSocket push, ADR-0004) — a WhatsApp callback is a later, additive channel, not the initial implementation.
 8. [ ] Configure **context management** (auto summarization + ContextOffloader; pin garden vision & success criteria) to bound context over multi-week histories.
 9. [ ] Apply production settings: explicit tool lists, explicit model params (temperature/max_tokens/top_p), **Bedrock Guardrails** on outputs, `stream_async` streaming, and CloudWatch metrics.
+
+> **Reprioritization (2026-09-12):** WhatsApp remains in scope long-term (project-context.md's
+> vision), but is **deprioritized to a future backlog item**. HITL (plan approval,
+> confirm-before-action) must work via the **web UI first** — the frontend already has the
+> approve-plan screen (`frontend/src/app/features/goal-detail/`); the `HumanInTheLoop` `ask`
+> callback should call into the Client API / WebSocket channel ADR-0004 already decided, not a
+> WhatsApp integration that doesn't exist yet. See `docs/backlog.md`'s "Carried forward" list for
+> the deprioritized WhatsApp item.
 
 ---
 

@@ -4,7 +4,7 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-12 (added the Walking Skeleton epic, WS-01..WS-05, and the Agent Factory epic, AF-01..AF-05)
+**Last updated:** 2026-09-12 (added the Walking Skeleton epic WS-01..WS-05 and the Agent Factory epic AF-01..AF-05; deprioritized WhatsApp, prioritized UI-based HITL)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
@@ -51,7 +51,16 @@ on the date below — re-verify before starting a story.
 
 ## Carried forward (future epics — not yet storied)
 
-Full garden/plant CRUD, plan proposal & HITL approval, the remaining 7 specialist agents and 4 tools beyond Agronomy/Weather, the tracker/outcome loop, the WebSocket push channel + live result rendering, auth (Cognito), notifications, Cedar authorization + wider Interventions/HITL handlers, aggregated-data/learning layer. Add as feature stories when scoped, then insert into the table with a Rank.
+Full garden/plant CRUD, plan proposal & HITL approval **via the web UI** (WebSocket push +
+`/plans/{id}/approve`, ADR-0004 — prioritize this over any other channel when it's storied), the
+remaining 7 specialist agents and 4 tools beyond Agronomy/Weather, the tracker/outcome loop, the
+WebSocket push channel + live result rendering, auth (Cognito), Cedar authorization + wider
+Interventions/HITL handlers, aggregated-data/learning layer. Add as feature stories when scoped,
+then insert into the table with a Rank.
+
+**Explicitly deprioritized:** the **WhatsApp (and email) notification/reply channel** — in scope
+per `project-context.md`'s vision, but pushed behind UI-based HITL and notifications (ADR-0001
+refinement, 2026-09-12). Don't pick this up before the UI channel is built and working.
 
 ## How to use this sheet
 

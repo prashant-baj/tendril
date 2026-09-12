@@ -90,12 +90,21 @@ def strip_trailing_tool_use(messages):
 
 ## HITL / plan approval
 
+**Target the web UI first.** WhatsApp is in scope long-term but deprioritized to a future
+backlog item (ADR-0001 refinement, 2026-09-12) — don't build a WhatsApp `ask` callback before
+the UI one exists. The frontend's approve-plan screen
+(`frontend/src/app/features/goal-detail/`) already has the button; the callback just needs to
+resolve once that approval arrives.
+
 ```python
 from strands import Agent
 from strands.interventions import HumanInTheLoop
 
 async def ask(prompt: str) -> str:
-    return await send_whatsapp_and_await_reply(prompt)  # your notification channel
+    # Push `prompt` over the WebSocket channel (ADR-0004) so the UI can render it, then wait for
+    # the reply to land via POST /plans/{id}/approve. A WhatsApp callback is an *additional*
+    # channel to add later, not a replacement for this one.
+    return await await_ui_approval(prompt)
 
 agent = Agent(
     tools=[propose_plan],

@@ -62,7 +62,7 @@ At runtime there is **no fixed execution order**. The orchestrator (Strands) dec
 
 ```mermaid
 flowchart LR
-  U["User<br/>(WhatsApp / App)"] --> API["Client API<br/>(API Gateway + Lambda,<br/>OpenAPI contract-first)"]
+  U["User<br/>(Web app; WhatsApp deprioritized)"] --> API["Client API<br/>(API Gateway + Lambda,<br/>OpenAPI contract-first)"]
   API --> ING["Garden / Ingestion Service"]
   ING --> S3[("S3<br/>media + storage")]
   ING --> DDB[("DynamoDB<br/>domain state + events")]
@@ -173,7 +173,7 @@ erDiagram
 | **Orchestrator** | Model-driven decomposition & composition of specialists/tools; async, event-triggered ([ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)) | Strands | **Lambda** |
 | **Specialist Agents** | Domain expertise (agronomy, pest, disease, irrigation, fertilizer, pruning, weather, beautification, landscaping); declared in `agents/registry/*.json` | Strands (factory) | AgentCore |
 | **Tracker / Scheduler** | Drive the outcome loop: due follow-ups, reminders, re-evaluation | EventBridge + Lambda | Lambda |
-| **Notification** | Outbound reminders & inbound replies (WhatsApp / email) | Lambda + provider | Lambda |
+| **Notification** | Outbound reminders & inbound replies — in-app/WebSocket + web-push first; WhatsApp/email are in scope but **deprioritized** to a future backlog item (ADR-0001 refinement, 2026-09-12) | Lambda + provider | Lambda |
 | **Media / Vision** | Plant-ID and photo diagnosis (specialized model or API tool) | Bedrock / external model | Tool API |
 | **Memory / Knowledge** | Semantic garden history & horticultural knowledge | Bedrock Knowledge Bases | Managed |
 | **Persistence** | Structured domain state + event log | DynamoDB | Managed |
@@ -257,7 +257,7 @@ flowchart TB
   subgraph Edge
     APIGW["API Gateway<br/>(OpenAPI contract-first)"]
     WSAPI["API Gateway WebSocket"]
-    WA["WhatsApp / Email Gateway"]
+    WA["WhatsApp / Email Gateway<br/>(deprioritized — future)"]
   end
   subgraph Compute
     L["Lambda:<br/>ingestion · orchestrator · tracker · notifier"]
@@ -370,9 +370,9 @@ sequenceDiagram
   EB->>Orch: invoke (async)
   Orch->>State: load plan, progress, success criteria
   Orch->>Notif: "Send a photo of the new leaves"
-  Notif->>User: WhatsApp reminder
+  Notif->>User: In-app / web-push reminder (WhatsApp: deprioritized, future channel)
   Note over Orch: invocation ends — Lambda is stateless;<br/>next invoke reloads context from DynamoDB
-  User->>Notif: replies with a photo
+  User->>Notif: replies with a photo (via the app)
   Notif->>EB: reply.received event
   EB->>Orch: invoke (async, resume context from DynamoDB)
   Orch->>Orch: re-evaluate vs success criteria
