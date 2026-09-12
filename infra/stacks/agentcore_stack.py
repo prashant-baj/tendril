@@ -194,10 +194,23 @@ class AgentCoreStack(Stack):
             )
         )
         # Scoped to the runtimes this deploy actually registered — never a wildcard (ADR-0012).
+        # AgentCore authorizes InvokeAgentRuntime against the runtime-ENDPOINT sub-resource, not
+        # the bare runtime ARN — confirmed via a live AccessDeniedException naming
+        # ".../runtime/<id>/runtime-endpoint/DEFAULT" as the checked resource, not the runtime
+        # ARN alone. Granting only the bare ARN (as originally written) 403s every real call;
+        # both forms are included since only the endpoint suffix was actually verified as the
+        # real requirement — the bare ARN can't hurt and covers any other API that does check it.
         self.orchestrator.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
-                resources=[runtime.agent_runtime_arn for runtime in self.runtimes.values()],
+                resources=[
+                    resource
+                    for runtime in self.runtimes.values()
+                    for resource in (
+                        runtime.agent_runtime_arn,
+                        f"{runtime.agent_runtime_arn}/runtime-endpoint/*",
+                    )
+                ],
             )
         )
 

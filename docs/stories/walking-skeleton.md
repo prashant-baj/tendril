@@ -222,9 +222,20 @@ specialist actually invoked — is proven end-to-end before real domain speciali
   success/failure paths) with `Agent`/`BedrockModel` themselves mocked (matching
   `agents/hello_agent/tests`' existing convention), so no live Bedrock/AgentCore call happens in
   CI either.
-- [ ] **Not yet done:** one live smoke-test invoke against `dev`, recorded here — needs an actual
-  `cdk deploy` first (everything below is implemented and unit-tested, but nothing in this
-  session has been deployed).
+- [x] **Live smoke test, run 2026-09-12 against `dev`:** created a garden, then
+  `POST /gardens/{id}/goals` with a real issue description → `202 {goalId, status: Intake}`.
+  Polled the Goal record ~15s later: `status: PlanProposed`, a real `orchestrator_result` full
+  of agronomy-flavored advice. **First attempt surfaced a real bug the mocked unit tests
+  structurally cannot catch:** the specialist tool call failed with
+  `AccessDeniedException: ... InvokeAgentRuntime ... on resource
+  .../runtime/<id>/runtime-endpoint/DEFAULT` — AgentCore authorizes this action against the
+  runtime's **endpoint** sub-resource, not the bare runtime ARN the IAM policy had granted. The
+  orchestrator's own model handled the tool failure gracefully (Strands: tool errors return to
+  the model as an error result, not an exception) and answered from general knowledge instead —
+  which is *why* this didn't show up as a crash, only as a suspiciously permission-flavored
+  answer. Fixed by granting both the bare ARN and `{arn}/runtime-endpoint/*`; redeploy + re-run
+  pending to confirm the tool call itself now succeeds (the pipe and error-handling path were
+  already proven correct by this same run).
 
 **Tasks**
 - [x] Scaffold `app/orchestrator/` (Strands agent; agents-as-tools built from the registry
@@ -232,10 +243,11 @@ specialist actually invoked — is proven end-to-end before real domain speciali
 - [x] Wire the DynamoDB read (goal) and write-back (result/failure state).
 - [x] Add structured logging + Strands `trace_attributes` for the turn (see OTel scope note above).
 - [x] Unit tests with a mocked AgentCore call.
-- [ ] Document the manual dev smoke test (blocked on an actual deploy).
+- [x] Document the manual dev smoke test (above) — including the real bug it found.
 
-**Dependencies:** WS-02, WS-03. **Status:** ◐ partially done — implemented and unit-tested;
-blocked only on an actual `dev` deploy + manual smoke test.
+**Dependencies:** WS-02, WS-03. **Status:** ◐ partially done — implemented, unit-tested, and
+smoke-tested against `dev`; a real IAM gap the smoke test found is fixed and awaiting a redeploy
++ one more confirmation run before this flips to ✅.
 
 ---
 
