@@ -29,6 +29,15 @@ not the full result round-trip back to the user in real time.
 
 **Status legend:** ✅ done · ◐ partially done · ☐ to do.
 
+> **Resequencing note (2026-09-12):** per [`docs/roadmap.md`](../roadmap.md), this epic is now
+> picked up **after** the new Garden Onboarding epic (`docs/stories/garden-onboarding.md`,
+> OB-01/OB-02), not immediately after PG-*. Two scope adjustments follow: the presigned
+> media-upload operation (`POST /gardens/{id}/media`) and the camera/file-picker UI component are
+> now built in **OB-02**, reused here rather than re-specified — WS-01 only needs to add the
+> goal-intake operation by the time it's picked up. `ClientApiStack` is stood up in **OB-01**, so
+> WS-02 adds to an existing stack rather than creating one. The acceptance criteria below are
+> otherwise unchanged and still the right detail to build from.
+
 ---
 
 ## WS-01 — API: contract-first OpenAPI for photo upload + goal intake
