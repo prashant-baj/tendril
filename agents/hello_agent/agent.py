@@ -159,7 +159,9 @@ def resolve_user_message(payload: dict) -> str:
 
 ALLOWED_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}  # strands.types.media.ImageContent
 IMAGE_FETCH_TIMEOUT_SECONDS = 10
-MAX_IMAGE_BYTES = 15 * 1024 * 1024  # comfortably above a phone photo; bounds a bad/huge URL
+MAX_IMAGE_BYTES = (
+    5 * 1024 * 1024
+)  # a real 2.79MB photo already 400'd Bedrock; true limit is lower than this
 
 
 def fetch_image_bytes(url: str) -> bytes:
