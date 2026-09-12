@@ -143,6 +143,14 @@ The following native Strands capabilities were reviewed for fit. Several materia
 
 > **Reconciliation with the trade-off analysis:** the "no native checkpointing / pause-resume" con noted against LangGraph is **narrower than first stated**. Strands' **interrupt/resume** (Interventions + Human-in-the-Loop) provides pause-and-resume, and **Storage + Session Management + Memory** provide cross-session durability with S3 / Bedrock Knowledge Bases backends. Tendril still externalizes the *structured* outcome-loop state (plan, success criteria, progress) to **DynamoDB** for queryability and the future data flywheel — but Strands covers more of the conversational durability and human-gating than the raw comparison implied, further strengthening this decision.
 
+> **Superseded by a docs-verified review (2026-09-12):** this Appendix was written by reasoning
+> about Strands' likely capabilities before fetching the live docs. It held up well, but
+> [`docs/architecture/strands-capability-mapping.md`](../strands-capability-mapping.md) is now
+> the authoritative version — verified against the actual API (`SnapshotSessionManager` +
+> interrupt/resume for cross-Lambda-invocation HITL, `ContextInjector` for deterministic vision
+> pinning, memory `scope` for tenant isolation, `strands-evals` for PG-07-style testing, and
+> more). Prefer that document; this table is kept for history.
+
 ## Appendix B: Non-Functional Requirements & Production Operations
 
 Notes distilled from [Operating Agents in Production](https://strandsagents.com/docs/user-guide/deploy/operating-agents-in-production/), mapped to Tendril. These NFRs are enforced via [`../../engineering-best-practices.md`](../../engineering-best-practices.md) and will be detailed in `docs/architecture.md`.
