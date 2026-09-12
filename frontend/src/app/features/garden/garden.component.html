@@ -2,7 +2,9 @@
   <div class="screen">
     <section class="card intro">
       <h2>{{ g.name }}</h2>
-      <p>“{{ g.vision }}” East-facing, roughly 5 hours of direct sun, all containers.</p>
+      @if (g.vision) {
+        <p>&ldquo;{{ g.vision }}&rdquo;</p>
+      }
       <div class="facts">
         @for (fact of gardenFacts(); track fact.label) {
           <span class="fact">
@@ -13,7 +15,10 @@
     </section>
 
     <section>
-      <h2>9 plants</h2>
+      <div class="section-head">
+        <h2>{{ plants().length }} plants</h2>
+        <button type="button" class="link" (click)="openAddPlant()">Add plant</button>
+      </div>
       <div class="card list">
         @for (plant of plants(); track plant.plantId) {
           <td-plant-row [plant]="plant" (activate)="openCapture()" />

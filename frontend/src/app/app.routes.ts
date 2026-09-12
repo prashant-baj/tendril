@@ -34,6 +34,12 @@ export const routes: Routes = [
     loadComponent: () => import('./features/garden/garden.component').then((m) => m.GardenComponent),
   },
   {
+    path: 'add-plant',
+    data: { title: 'Add a plant' },
+    loadComponent: () =>
+      import('./features/add-plant/add-plant.component').then((m) => m.AddPlantComponent),
+  },
+  {
     path: 'activity',
     data: { title: 'Activity' },
     loadComponent: () => import('./features/activity/activity.component').then((m) => m.ActivityComponent),

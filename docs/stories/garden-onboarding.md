@@ -70,39 +70,51 @@ dev — deploy is a separate, explicit step per this repo's practice of asking b
 **so that** I have something concrete for later goals/diagnoses to reference.
 
 **Acceptance Criteria**
-- [ ] The Garden screen (`frontend/src/app/features/garden/`) gains an "Add plant" action opening
+- [x] The Garden screen (`frontend/src/app/features/garden/`) gains an "Add plant" action opening
   a form: `species` (required), `variety` (optional), a **photo** (camera capture or local file
   picker — same capture UI pattern originally scoped for WS-05, built here first since it's
   needed now).
-- [ ] `openapi.yaml` gains **`POST /gardens/{gardenId}/media`** (request `{contentType,
+- [x] `openapi.yaml` gains **`POST /gardens/{gardenId}/media`** (request `{contentType,
   fileName}` → response `{uploadUrl, mediaId}`, a presigned S3 **PUT** URL against
   `FoundationStack`'s existing media bucket) and **`POST /gardens/{gardenId}/plants`** (request
   `{species, variety?, mediaId?}` → response `{plantId}`). **This is the shared media-upload
   primitive every later photo-involving story reuses** (WS-01's capture flow no longer needs to
   define it — see `docs/roadmap.md`'s resequencing note).
-- [ ] The plant-create Lambda writes the `Plant` record (`pk=GARDEN#{garden_id},
+- [x] The plant-create Lambda writes the `Plant` record (`pk=GARDEN#{garden_id},
   sk=PLANT#{plant_id}`) and, if a photo was attached, the `Media` record
-  (`sk=MEDIA#{media_id}`) — per data-architecture.md §2.
-- [ ] The frontend uploads the photo **directly to S3** using the presigned URL — never through
+  (`sk=MEDIA#{media_id}`) — per data-architecture.md §2. **Implementation note:** the `Media`
+  record is actually written by `createMediaUpload` (the only step that has `s3_key`/
+  `content_type`); `createPlant` atomically links `plant_id` onto that same record via
+  `TransactWriteItems` when a `mediaId` is given, rather than creating a second Media record —
+  satisfies the same requirement (a Plant is never linked to a Media record that doesn't exist)
+  given what's actually available at each step.
+- [x] The frontend uploads the photo **directly to S3** using the presigned URL — never through
   the Lambda.
-- [ ] The Garden screen's plant list reflects real data immediately after adding one (replacing
-  `MockGardenApi.getPlants()`/`getPlantsSummary()` for this garden).
-- [ ] Camera-permission-denied and S3-upload-failure both show a recoverable error, not a silent
-  failure (same bar as originally set for WS-05).
-- [ ] Unit tests: presigned-URL handler, plant-create handler (with and without `mediaId`).
-- [ ] Component tests: file-picker fallback, successful add-plant happy path (mocked
+- [x] The Garden screen's plant list reflects real data immediately after adding one. **Scope
+  note:** there's no `GET`-list-plants operation in this story (only create), so this is done by
+  prepending each created plant onto the still-mocked base list client-side
+  (`HttpGardenApi.createPlant`), not by re-fetching from a real list endpoint — a real list read
+  is separate, later work once something actually needs it.
+- [x] Camera-permission-denied and S3-upload-failure both show a recoverable error, not a silent
+  failure (same bar as originally set for WS-05). **Implementation note:** the photo picker is a
+  plain `<input type="file" capture>`, not `getUserMedia` — this app is deployed over plain HTTP
+  (ADR-0010) where `getUserMedia` doesn't exist at all (same class of bug already found and
+  fixed for `crypto.randomUUID()`), so there's no separate JS-catchable "permission denied" path
+  to handle; the OS/native camera chooser handles that itself. S3-upload-failure is handled.
+- [x] Unit tests: presigned-URL handler, plant-create handler (with and without `mediaId`).
+- [x] Component tests: file-picker fallback, successful add-plant happy path (mocked
   `HttpClient`), one failure path.
 
 **Tasks**
-- [ ] Add `Media`/`Plant` schemas and the two operations to `openapi.yaml`; extend
+- [x] Add `Media`/`Plant` schemas and the two operations to `openapi.yaml`; extend
   `ClientApiStack` (no new stack — OB-01 already stood it up).
-- [ ] Implement the presigned-upload and plant-create Lambda handlers.
-- [ ] Build the camera-capture-or-file-picker UI component (shared — WS-05's Capture screen will
+- [x] Implement the presigned-upload and plant-create Lambda handlers.
+- [x] Build the camera-capture-or-file-picker UI component (shared — WS-05's Capture screen will
   reuse this exact component, not reimplement it).
-- [ ] Wire the Garden screen's "Add plant" flow end-to-end.
+- [x] Wire the Garden screen's "Add plant" flow end-to-end.
 
 **Dependencies:** OB-01 (needs a garden to add a plant to; reuses its `ClientApiStack`).
-**Status:** ☐ to do.
+**Status:** ✅ done (implemented; not yet deployed to dev).
 
 ---
 

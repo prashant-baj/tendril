@@ -33,6 +33,18 @@ class FoundationStack(Stack):
             enforce_ssl=True,
             removal_policy=removal,
             auto_delete_objects=not retain,
+            # OB-02: the frontend PUTs directly to a presigned URL (never through the Lambda),
+            # a genuine cross-origin request from the frontend's own origin (ADR-0010) — the
+            # bucket needs to allow it. `*` matches this Client API's own dev-stage CORS
+            # posture (no auth yet, ADR-0004's seam still open); narrow to the real origin(s)
+            # once one is fixed (e.g. a custom domain/CloudFront, ADR-0010's follow-up).
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.PUT],
+                    allowed_origins=["*"],
+                    allowed_headers=["*"],
+                )
+            ],
         )
 
         # Structured domain state + capture-first event log (single-table design).

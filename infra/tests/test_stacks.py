@@ -12,6 +12,7 @@ from aws_cdk import App, Environment  # noqa: E402
 from aws_cdk.assertions import Match, Template  # noqa: E402
 from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
 from stacks.client_api_stack import ClientApiStack  # noqa: E402
+from stacks.foundation_stack import FoundationStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
 from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
 from stacks.pipeline_stack import PipelineStack  # noqa: E402
@@ -174,7 +175,7 @@ def test_deploy_role_trust_policy_tolerates_github_immutable_id_sub_claim():
     )
 
 
-# --- client API (OpenAPI contract-first, OB-01) ------------------------------
+# --- client API (OpenAPI contract-first, OB-01/OB-02) ------------------------
 
 
 def test_client_api_stack_synthesizes_garden_operations():
@@ -195,26 +196,66 @@ def test_client_api_stack_synthesizes_garden_operations():
                 "PackageType": "Image",
                 "Architectures": ["arm64"],
                 "Environment": Match.object_like(
-                    {"Variables": Match.object_like({"APP_TABLE_NAME": "tendril-dev-app"})}
+                    {
+                        "Variables": Match.object_like(
+                            {
+                                "APP_TABLE_NAME": "tendril-dev-app",
+                                "MEDIA_BUCKET_NAME": "tendril-dev-media",
+                            }
+                        )
+                    }
                 ),
             }
         ),
     )
 
-    # TransactWriteItems isn't part of grant_read_write_data's action set; createGarden's
-    # double-write needs it added explicitly (data-architecture.md §2).
+    # TransactWriteItems isn't part of grant_read_write_data's action set; createGarden's/
+    # createPlant's double-writes need it added explicitly (data-architecture.md §2).
     actions = set()
     for res in tpl.find_resources("AWS::IAM::Policy").values():
         for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
             act = stmt["Action"]
             actions.update(act if isinstance(act, list) else [act])
     assert "dynamodb:TransactWriteItems" in actions
+    # OB-02: createMediaUpload signs a presigned PUT URL — the signing role needs s3:PutObject.
+    assert "s3:PutObject" in actions
 
     # API Gateway is granted permission to invoke the garden handler.
     tpl.has_resource_properties(
         "AWS::Lambda::Permission",
         Match.object_like(
             {"Action": "lambda:InvokeFunction", "Principal": "apigateway.amazonaws.com"}
+        ),
+    )
+
+
+def test_client_api_stack_openapi_spec_covers_ob02_operations():
+    app = _app()
+    tpl = Template.from_stack(ClientApiStack(app, "capi2", env_name="dev", env=ENV))
+    rest_apis = tpl.find_resources("AWS::ApiGateway::RestApi")
+    (rest_api,) = rest_apis.values()
+    body = rest_api["Properties"]["Body"]
+    assert "/gardens/{gardenId}/media" in body["paths"]
+    assert "/gardens/{gardenId}/plants" in body["paths"]
+
+
+# --- foundation (media bucket CORS for OB-02's direct-to-S3 upload) ---------
+
+
+def test_media_bucket_allows_cross_origin_put():
+    app = _app()
+    tpl = Template.from_stack(FoundationStack(app, "fnd", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::S3::Bucket",
+        Match.object_like(
+            {
+                "BucketName": "tendril-dev-media",
+                "CorsConfiguration": {
+                    "CorsRules": Match.array_with(
+                        [Match.object_like({"AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]})]
+                    )
+                },
+            }
         ),
     )
 

@@ -8,7 +8,7 @@
     <div class="title-block">
       <div class="title">{{ title() }}</div>
       <button type="button" class="garden-switch">
-        Balcony Kitchen Garden
+        {{ garden()?.name ?? 'My Garden' }}
         <td-icon name="expand_more" size="16px" />
       </button>
     </div>

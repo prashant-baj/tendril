@@ -4,6 +4,7 @@ import { ActivatedRoute, NavigationEnd, Router, RouterLink } from '@angular/rout
 import { filter, map, startWith } from 'rxjs';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { LayoutService } from '../../core/services/layout.service';
+import { CurrentGardenService } from '../../core/services/current-garden.service';
 
 /**
  * Sticky top bar — screen title (from the active route's `data.title`), garden switcher,
@@ -21,6 +22,9 @@ export class TopBarComponent {
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
   readonly layout = inject(LayoutService);
+  private readonly currentGarden = inject(CurrentGardenService);
+
+  readonly garden = toSignal(this.currentGarden.garden$, { initialValue: undefined });
 
   readonly title = toSignal(
     this.router.events.pipe(

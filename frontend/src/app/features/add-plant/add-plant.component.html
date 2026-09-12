@@ -1,0 +1,46 @@
+<div class="screen">
+  <section class="card">
+    <div class="intro">
+      <h2>Add a plant</h2>
+      <p>Tell us what it is, and a photo if you have one.</p>
+    </div>
+
+    <form [formGroup]="form" (ngSubmit)="submit()" class="form">
+      <td-photo-picker (fileSelected)="onFileSelected($event)" />
+
+      <label class="field">
+        <span class="field-label">Species</span>
+        <input
+          type="text"
+          formControlName="species"
+          placeholder="e.g. Tomato"
+          autocomplete="off"
+        />
+        @if (form.controls.species.invalid && form.controls.species.touched) {
+          <span class="field-error">Species is required.</span>
+        }
+      </label>
+
+      <label class="field">
+        <span class="field-label">Variety (optional)</span>
+        <input
+          type="text"
+          formControlName="variety"
+          placeholder="e.g. Pusa Ruby"
+          autocomplete="off"
+        />
+      </label>
+
+      @if (errorMessage()) {
+        <div class="form-error">
+          <td-icon name="error" size="18px" />
+          <span>{{ errorMessage() }}</span>
+        </div>
+      }
+
+      <button type="submit" class="btn-primary" [disabled]="submitting()">
+        {{ submitting() ? 'Saving…' : 'Add plant' }}
+      </button>
+    </form>
+  </section>
+</div>

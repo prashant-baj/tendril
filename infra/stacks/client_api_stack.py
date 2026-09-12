@@ -31,6 +31,7 @@ from aws_cdk import (
     aws_ecr_assets as ecr_assets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_s3 as s3,
 )
 from constructs import Construct
 
@@ -44,10 +45,11 @@ class ClientApiStack(Stack):
         super().__init__(scope, cid, **kwargs)
         prefix = f"tendril-{env_name}"
 
-        # Resolve AppTable by stable name (no CloudFormation cross-stack import).
+        # Resolve AppTable/MediaBucket by stable name (no CloudFormation cross-stack import).
         app_table = ddb.Table.from_table_name(self, "AppTable", f"{prefix}-app")
+        media_bucket = s3.Bucket.from_bucket_name(self, "MediaBucket", f"{prefix}-media")
 
-        # --- Garden handler (OB-01: createGarden, getGarden) ---
+        # --- Garden handler (OB-01: createGarden, getGarden; OB-02: createMediaUpload, createPlant) ---
         image_repo = self.node.try_get_context("garden_handler_image_repo")
         if image_repo:
             repo = ecr.Repository.from_repository_name(self, "GardenHandlerRepo", image_repo)
@@ -65,18 +67,25 @@ class ClientApiStack(Stack):
             code=code,
             architecture=lambda_.Architecture.ARM_64,
             timeout=Duration.seconds(10),
-            environment={"APP_TABLE_NAME": app_table.table_name},
+            environment={
+                "APP_TABLE_NAME": app_table.table_name,
+                "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
+            },
         )
         app_table.grant_read_write_data(garden_handler)
-        # grant_read_write_data doesn't include Transact*; createGarden needs it explicitly
-        # (data-architecture.md §2: the canonical + ownership-index records are written
-        # together in one TransactWriteItems call).
+        # grant_read_write_data doesn't include Transact*; createGarden/createPlant need it
+        # explicitly (data-architecture.md §2: Garden's canonical + ownership-index records,
+        # and a Plant + its linked Media record, are each written together in one
+        # TransactWriteItems call).
         garden_handler.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["dynamodb:TransactWriteItems"],
                 resources=[app_table.table_arn],
             )
         )
+        # OB-02: createMediaUpload signs a presigned PUT URL — the signing identity (this
+        # Lambda's role) must actually be authorized for the action, or the URL 403s when used.
+        media_bucket.grant_put(garden_handler)
 
         # --- Load + patch the OpenAPI spec, one Lambda for both operations for now ---
         with open(OPENAPI_PATH, encoding="utf-8") as f:

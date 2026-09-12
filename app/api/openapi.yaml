@@ -6,8 +6,9 @@ info:
     Tendril's user-facing Client API. Contract-first per ADR-0011: this file is the actual
     deploy artifact — infra/stacks/client_api_stack.py imports it directly via
     apigateway.SpecRestApi, patching each operation's x-amazon-apigateway-integration.uri
-    with the real Lambda ARN at synth time. Scoped to OB-01's two operations only; the rest
-    of ADR-0004's endpoint table is added incrementally as later stories land (docs/roadmap.md).
+    with the real Lambda ARN at synth time. Covers OB-01 (Setup My Garden) and OB-02 (Add a
+    Plant, with a photo); the rest of ADR-0004's endpoint table is added incrementally as later
+    stories land (docs/roadmap.md).
 
 paths:
   /gardens:
@@ -96,6 +97,80 @@ paths:
         passthroughBehavior: when_no_match
     options: *cors-preflight
 
+  /gardens/{gardenId}/media:
+    post:
+      operationId: createMediaUpload
+      summary: Get a presigned URL to upload a photo directly to S3
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: gardenId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaUploadRequest"
+      responses:
+        "201":
+          description: Presigned upload URL issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaUploadResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants:
+    post:
+      operationId: createPlant
+      summary: Add a plant to a garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: gardenId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlantCreateRequest"
+      responses:
+        "201":
+          description: Plant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlantCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
 components:
   parameters:
     UserId:
@@ -155,4 +230,47 @@ components:
       required: [message]
       properties:
         message:
+          type: string
+
+    MediaUploadRequest:
+      type: object
+      required: [contentType, fileName]
+      properties:
+        contentType:
+          type: string
+          description: MIME type of the file being uploaded (e.g. "image/jpeg").
+        fileName:
+          type: string
+          minLength: 1
+
+    MediaUploadResponse:
+      type: object
+      required: [uploadUrl, mediaId]
+      properties:
+        uploadUrl:
+          type: string
+          description: Presigned S3 PUT URL — the frontend uploads directly to it, never via
+            the Lambda.
+        mediaId:
+          type: string
+
+    PlantCreateRequest:
+      type: object
+      required: [species]
+      properties:
+        species:
+          type: string
+          minLength: 1
+        variety:
+          type: string
+        mediaId:
+          type: string
+          description: Id returned by a prior createMediaUpload call, once the upload itself
+            has completed.
+
+    PlantCreateResponse:
+      type: object
+      required: [plantId]
+      properties:
+        plantId:
           type: string

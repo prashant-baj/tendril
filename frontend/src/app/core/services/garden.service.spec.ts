@@ -90,9 +90,58 @@ describe('HttpGardenApi', () => {
     });
   });
 
-  it('getGarden()/getPlants() still delegate to the mock (not backed by a real endpoint yet)', (done) => {
+  it('getGarden() still delegates to the mock (not backed by a real endpoint yet)', (done) => {
     api.getGarden().subscribe((garden) => {
       expect(garden.gardenId).toBe('balcony-kitchen-garden');
+      done();
+    });
+  });
+
+  it('requestMediaUpload() POSTs to /gardens/{id}/media', () => {
+    let result: unknown;
+    api
+      .requestMediaUpload('g-1', { contentType: 'image/jpeg', fileName: 'tomato.jpg' })
+      .subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/media`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ contentType: 'image/jpeg', fileName: 'tomato.jpg' });
+    req.flush({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });
+
+    expect(result).toEqual({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });
+  });
+
+  it('uploadMedia() PUTs the file directly to the presigned URL with its content-type', () => {
+    const file = new File(['x'], 'tomato.jpg', { type: 'image/jpeg' });
+    let completed = false;
+    api.uploadMedia('https://s3.example/upload', file).subscribe(() => (completed = true));
+
+    const req = httpMock.expectOne('https://s3.example/upload');
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toBe(file);
+    expect(req.request.headers.get('Content-Type')).toBe('image/jpeg');
+    req.flush(null);
+
+    expect(completed).toBe(true);
+  });
+
+  it('createPlant() POSTs to /gardens/{id}/plants and prepends the result onto getPlants()', (done) => {
+    let result: { plantId: string } | undefined;
+    api.createPlant('g-1', { species: 'Tomato', variety: 'Pusa Ruby' }).subscribe((r) => {
+      result = r;
+    });
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ species: 'Tomato', variety: 'Pusa Ruby' });
+    req.flush({ plantId: 'p-1' });
+
+    expect(result).toEqual({ plantId: 'p-1' });
+
+    api.getPlants().subscribe((plants) => {
+      expect(plants[0]).toEqual(
+        jasmine.objectContaining({ plantId: 'p-1', species: 'Tomato', variety: 'Pusa Ruby' }),
+      );
       done();
     });
   });

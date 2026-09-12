@@ -1,10 +1,19 @@
-"""Garden Client API handler (OB-01) — create + read a Garden.
+"""Garden Client API handler (OB-01, OB-02) — gardens, media upload URLs, and plants.
 
-Implements the two operations in app/api/openapi.yaml (`createGarden`, `getGarden`), invoked by
-API Gateway's Lambda proxy integration (ClientApiStack, ADR-0011). Writes both DynamoDB records
-a Garden needs in one transaction (data-architecture.md §2): the canonical
-`GARDEN#{garden_id}/METADATA` record and the `USER#{user_id}/GARDEN#{garden_id}` ownership index
-— never one without the other.
+Implements every operation in app/api/openapi.yaml, invoked by API Gateway's Lambda proxy
+integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API for now (ADR-0011's
+"one Lambda for both operations for now" note, extended as new operations land):
+
+- `createGarden`/`getGarden` (OB-01): both DynamoDB records a Garden needs written in one
+  transaction (data-architecture.md §2) — canonical `GARDEN#{id}/METADATA` + the
+  `USER#{user_id}/GARDEN#{id}` ownership index, never one without the other.
+- `createMediaUpload` (OB-02): issues a presigned S3 PUT URL against `FoundationStack`'s media
+  bucket and writes the `Media` record immediately (`GARDEN#{id}/MEDIA#{media_id}`) — this is
+  the only step with the `s3_key`/`content_type` needed to write it (data-architecture.md §4).
+- `createPlant` (OB-02): writes the `Plant` record (`GARDEN#{id}/PLANT#{plant_id}`) and, when a
+  `mediaId` from a prior `createMediaUpload` call is given, atomically links that Media record
+  to this plant (`plant_id` set via the same transaction) — so a Plant is never left pointing at
+  a Media record that doesn't actually exist.
 
 No auth yet (ADR-0004's seam is still open): `X-User-Id` is a per-browser anonymous identifier
 the frontend generates and persists (garden-onboarding.md's stories), not a verified identity.
@@ -26,9 +35,11 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("tendril.api.garden_handler")
 
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by ClientApiStack; never hardcoded
+MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by ClientApiStack; never hardcoded
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
+_s3 = None
 
 
 def _get_table():
@@ -49,6 +60,13 @@ def _get_client():
     if _client is None:
         _client = boto3.client("dynamodb")
     return _client
+
+
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3")
+    return _s3
 
 
 def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +161,130 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     return _response(201, {"gardenId": garden_id})
 
 
+def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    content_type = payload.get("contentType")
+    file_name = payload.get("fileName")
+    if not isinstance(content_type, str) or not content_type.strip():
+        return _error(400, "contentType is required")
+    if not isinstance(file_name, str) or not file_name.strip():
+        return _error(400, "fileName is required")
+
+    media_id = str(uuid.uuid4())
+    s3_key = f"{garden_id}/{media_id}/{file_name}"
+
+    try:
+        upload_url = _get_s3().generate_presigned_url(
+            "put_object",
+            Params={"Bucket": MEDIA_BUCKET_NAME, "Key": s3_key, "ContentType": content_type},
+            ExpiresIn=900,
+        )
+        # Written now, not deferred to create_plant: this is the only step that has the
+        # s3_key/content_type. create_plant links plant_id onto this same record later if the
+        # upload is actually attached to a plant (data-architecture.md §2/§4).
+        _get_table().put_item(
+            Item={
+                "pk": f"GARDEN#{garden_id}",
+                "sk": f"MEDIA#{media_id}",
+                "media_id": media_id,
+                "garden_id": garden_id,
+                "s3_key": s3_key,
+                "content_type": content_type,
+                "uploaded_at": datetime.now(UTC).isoformat(),
+            }
+        )
+    except Exception:
+        logger.exception("Failed to create media upload for garden %s", garden_id)
+        return _error(500, "could not create upload URL")
+
+    return _response(201, {"uploadUrl": upload_url, "mediaId": media_id})
+
+
+def create_plant(event: dict[str, Any]) -> dict[str, Any]:
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    species = payload.get("species")
+    variety = payload.get("variety")
+    media_id = payload.get("mediaId")
+    if not isinstance(species, str) or not species.strip():
+        return _error(400, "species is required")
+    if variety is not None and not isinstance(variety, str):
+        return _error(400, "variety must be a string if provided")
+    if media_id is not None and not isinstance(media_id, str):
+        return _error(400, "mediaId must be a string if provided")
+
+    plant_id = str(uuid.uuid4())
+    plant_item = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"PLANT#{plant_id}",
+        "plant_id": plant_id,
+        "garden_id": garden_id,
+        "species": species,
+        "stage": "new",
+    }
+    if variety:
+        plant_item["variety"] = variety
+
+    try:
+        if media_id:
+            _get_client().transact_write_items(
+                TransactItems=[
+                    {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(plant_item)}},
+                    {
+                        "Update": {
+                            "TableName": APP_TABLE_NAME,
+                            "Key": _to_dynamo(
+                                {"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}
+                            ),
+                            "UpdateExpression": "SET plant_id = :pid",
+                            "ExpressionAttributeValues": {":pid": {"S": plant_id}},
+                            "ConditionExpression": "attribute_exists(pk)",
+                        }
+                    },
+                ]
+            )
+        else:
+            _get_table().put_item(Item=plant_item)
+    except Exception as e:
+        logger.error(
+            "Failed to write plant %s for garden %s: %s | response=%s",
+            plant_id,
+            garden_id,
+            e,
+            getattr(e, "response", None),
+        )
+        return _error(500, "could not create plant")
+
+    return _response(201, {"plantId": plant_id})
+
+
 def get_garden(event: dict[str, Any]) -> dict[str, Any]:
     garden_id = (event.get("pathParameters") or {}).get("gardenId")
     if not garden_id:
@@ -189,6 +331,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return create_garden(event)
         if method == "GET" and resource == "/gardens/{gardenId}":
             return get_garden(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/media":
+            return create_media_upload(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/plants":
+            return create_plant(event)
         return _error(404, f"no route for {method} {resource}")
     except Exception:
         logger.exception("Unhandled error for %s %s", method, resource)
