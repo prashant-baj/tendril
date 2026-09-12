@@ -93,7 +93,7 @@ def main() -> int:
     ap.add_argument("--debug", action="store_true", help="print raw responses")
     args = ap.parse_args()
 
-    name = args.name or f"tendril-{args.env}-hello-guardrail"
+    name = args.name or f"tendril-{args.env}-vision-guardrail"
     bedrock = boto3.client("bedrock", region_name=args.region)
     runtime = boto3.client("bedrock-runtime", region_name=args.region)
 

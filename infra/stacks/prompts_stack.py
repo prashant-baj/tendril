@@ -24,10 +24,6 @@ PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 # template text is read from `prompts/<key>.md`. `cid` is the CloudFormation construct
 # id prefix (kept stable so redeploys update in place rather than replace).
 PROMPT_CATALOG = {
-    "hello-system": {
-        "cid": "Hello",
-        "description": "System prompt for the hello agent (externalized).",
-    },
     "vision-system": {
         "cid": "Vision",
         "description": "System prompt for the vision/plant-identification specialist (externalized).",

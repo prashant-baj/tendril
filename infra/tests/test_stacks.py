@@ -5,8 +5,6 @@ we depend on: guardrail policies, the file-sourced prompt, and the agent runtime
 vars + IAM. Runs offline; skips if aws-cdk-lib isn't installed.
 """
 
-import json
-
 import pytest
 
 aws_cdk = pytest.importorskip("aws_cdk")
@@ -16,7 +14,7 @@ from stacks.agentcore_stack import AgentCoreStack  # noqa: E402
 from stacks.client_api_stack import ClientApiStack  # noqa: E402
 from stacks.foundation_stack import FoundationStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
-from stacks.guardrails_stack import GUARDRAILS_DIR, GuardrailsStack  # noqa: E402
+from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
 from stacks.pipeline_stack import PipelineStack  # noqa: E402
 from stacks.prompts_stack import PromptsStack  # noqa: E402
 
@@ -38,31 +36,22 @@ def _app() -> App:
 
 
 # --- guardrails --------------------------------------------------------------
-
-
-def test_guardrail_descriptions_fit_bedrock_max_length():
-    # AWS::Bedrock::Guardrail's Description property has a hard 200-char limit that
-    # cdk synth does not check locally — it only surfaces at actual deploy time as an
-    # "Early validation failed for change set" error. Catch it here instead.
-    for path in sorted(GUARDRAILS_DIR.glob("*.json")):
-        policy = json.loads(path.read_text(encoding="utf-8"))
-        description = policy["description"]
-        assert len(description) <= 200, (
-            f"{path.name}: description is {len(description)} chars, "
-            "exceeds Bedrock's 200-char Guardrail Description limit"
-        )
+# Static policy-file checks (description/topic/messaging length limits Bedrock enforces
+# that cdk synth doesn't catch) live in tests/test_guardrail_policy.py, generalized over
+# every guardrails/*.json file. The tests below are CDK-synth assertions instead.
 
 
 def test_guardrail_resource_and_policies():
     app = _app()
     tpl = Template.from_stack(GuardrailsStack(app, "gr", env_name="dev", env=ENV))
-    # One per guardrails/*.json (AF-01: hello + vision, WS-04's vision specialist).
-    tpl.resource_count_is("AWS::Bedrock::Guardrail", 2)
-    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 2)
+    # One per guardrails/*.json (AF-01: vision, WS-04's vision specialist; hello was
+    # decommissioned once vision took over as the orchestrator's proof specialist).
+    tpl.resource_count_is("AWS::Bedrock::Guardrail", 1)
+    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 1)
     tpl.has_resource_properties(
         "AWS::Bedrock::Guardrail",
         {
-            "Name": "tendril-dev-hello-guardrail",
+            "Name": "tendril-dev-vision-guardrail",
             "ContentPolicyConfig": Match.object_like(
                 {"FiltersConfig": Match.array_with([Match.object_like({"Type": "PROMPT_ATTACK"})])}
             ),
@@ -82,9 +71,6 @@ def test_guardrail_resource_and_policies():
             ),
         },
     )
-    tpl.has_resource_properties(
-        "AWS::Bedrock::Guardrail", Match.object_like({"Name": "tendril-dev-vision-guardrail"})
-    )
 
 
 # --- prompts (sourced from file) --------------------------------------------
@@ -93,19 +79,20 @@ def test_guardrail_resource_and_policies():
 def test_prompt_uses_file_text():
     app = _app()
     tpl = Template.from_stack(PromptsStack(app, "pr", env_name="dev", env=ENV))
-    # One per PROMPT_CATALOG entry (hello + vision, WS-04's vision specialist).
-    tpl.resource_count_is("AWS::Bedrock::Prompt", 2)
+    # One per PROMPT_CATALOG entry (vision, WS-04's vision specialist; hello was decommissioned
+    # once vision took over as the orchestrator's proof specialist).
+    tpl.resource_count_is("AWS::Bedrock::Prompt", 1)
     tpl.has_resource_properties(
         "AWS::Bedrock::Prompt",
         Match.object_like(
             {
-                "Name": "tendril-dev-hello-system",
+                "Name": "tendril-dev-vision-system",
                 "Variants": Match.array_with(
                     [
                         Match.object_like(
                             {
                                 "TemplateConfiguration": {
-                                    "Text": {"Text": Match.string_like_regexp("hello agent")}
+                                    "Text": {"Text": Match.string_like_regexp("plant")}
                                 }
                             }
                         )
@@ -113,9 +100,6 @@ def test_prompt_uses_file_text():
                 ),
             }
         ),
-    )
-    tpl.has_resource_properties(
-        "AWS::Bedrock::Prompt", Match.object_like({"Name": "tendril-dev-vision-system"})
     )
 
 
@@ -133,9 +117,9 @@ def test_agentcore_env_and_iam():
             {
                 "EnvironmentVariables": Match.object_like(
                     {
-                        "PROMPT_NAME": "tendril-dev-hello-system",
-                        "GUARDRAIL_NAME": "tendril-dev-hello-guardrail",
-                        "MODEL_ID": "global.amazon.nova-2-lite-v1:0",
+                        "PROMPT_NAME": "tendril-dev-vision-system",
+                        "GUARDRAIL_NAME": "tendril-dev-vision-guardrail",
+                        "MODEL_ID": "google.gemma-3-27b-it",
                     }
                 )
             }
@@ -168,7 +152,7 @@ def test_one_runtime_provisioned_per_registry_file():
 
     registry_dir = Path(__file__).resolve().parents[2] / "agents" / "registry"
     expected_count = len(list(registry_dir.glob("*.json")))
-    assert expected_count >= 1  # sanity: hello.json must exist
+    assert expected_count >= 1  # sanity: vision.json must exist
 
     app = _app()
     tpl = Template.from_stack(AgentCoreStack(app, "ac2", env_name="dev", env=ENV))
@@ -182,8 +166,8 @@ def test_one_runtime_provisioned_per_registry_file():
                 "name": "fixtureagent",
                 "template": "hello_agent",
                 "model_id": "",
-                "prompt_name": "hello-system",
-                "guardrail_name": "hello-guardrail",
+                "prompt_name": "vision-system",
+                "guardrail_name": "vision-guardrail",
                 "description": "test fixture",
                 "tools": [],
             }

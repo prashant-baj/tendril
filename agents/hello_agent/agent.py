@@ -189,6 +189,9 @@ def resolve_content(payload: dict) -> str | list[dict]:
     except Exception as e:
         logger.warning("Could not fetch image %s (%s); continuing text-only.", image_url, e)
         return prompt
+    logger.info(
+        "Fetched image (%d bytes, format=%s) for this turn.", len(image_bytes), image_format
+    )
     return [
         {"image": {"format": image_format, "source": {"bytes": image_bytes}}},
         {"text": prompt},
@@ -200,7 +203,9 @@ def invoke(payload: dict) -> dict:
     content = resolve_content(payload)
     agent = Agent(model=_get_model(), system_prompt=_get_system_prompt())
     result = agent(content)
-    return {"result": str(result)}
+    text = str(result)
+    logger.info("invoke returning %d chars: %s", len(text), text[:500])
+    return {"result": text}
 
 
 if __name__ == "__main__":

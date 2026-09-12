@@ -16,8 +16,8 @@ Client API's synchronous request path (ADR-0004). On wake it:
    exist comes from `AGENT_MANIFEST` (an env var built by `AgentCoreStack` at synth time from
    `agents/registry/*.json` + the runtimes it actually provisioned — never discovered at runtime
    via `ListAgentRuntimes`).
-3. Runs one turn, calling at least one specialist (`hello` for text-only issues; `vision`, per
-   its registry description, once a photo is attached), and writes the result back onto the Goal
+3. Runs one turn, calling whichever specialist(s) its registry description suggests are
+   relevant (e.g. `vision`, once a photo is attached), and writes the result back onto the Goal
    record so a future status endpoint (WS-05+) has something real to read.
 4. On any failure (specialist unreachable, malformed response, guardrail block), the Goal is
    reverted to `Intake` with an `orchestrator_error` field — the lifecycle

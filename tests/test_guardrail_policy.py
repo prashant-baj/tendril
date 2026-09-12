@@ -1,4 +1,4 @@
-"""Static checks on the guardrail policy data (guardrails/hello_guardrail.json).
+"""Static checks on every guardrail policy under `guardrails/*.json` (AF-01: registry-driven).
 
 Bedrock enforces length limits that CDK's early change-set validation does NOT catch
 (only the service does, at create time) — e.g. topic *definitions* max 200 chars. These
@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-POLICY = REPO / "guardrails" / "hello_guardrail.json"
+GUARDRAILS_DIR = REPO / "guardrails"
+POLICY_PATHS = sorted(GUARDRAILS_DIR.glob("*.json"))
 
 # Bedrock Guardrail field limits (chars).
 MAX_DESCRIPTION = 200
@@ -21,9 +22,17 @@ MAX_TOPIC_EXAMPLE = 100
 MAX_BLOCKED_MESSAGING = 500
 
 
-@pytest.fixture(scope="module")
-def policy() -> dict:
-    return json.loads(POLICY.read_text(encoding="utf-8"))
+def _policies() -> list[dict]:
+    return [json.loads(path.read_text(encoding="utf-8")) for path in POLICY_PATHS]
+
+
+@pytest.fixture(params=_policies(), ids=[p.name for p in POLICY_PATHS])
+def policy(request) -> dict:
+    return request.param
+
+
+def test_at_least_one_policy_exists():
+    assert POLICY_PATHS, "expected at least one guardrails/*.json file"
 
 
 def test_policy_file_exists_and_parses(policy):

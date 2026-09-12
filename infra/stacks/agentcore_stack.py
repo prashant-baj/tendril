@@ -142,10 +142,10 @@ class AgentCoreStack(Stack):
                 prompt_name=f"{prefix}-{entry['prompt_name']}",  # stable name; owned by PromptsStack
                 guardrail_name=f"{prefix}-{entry['guardrail_name']}",  # owned by GuardrailsStack
             )
-        self.hello_runtime = self.runtimes["hello"]
 
         CfnOutput(self, "AgentExecRoleArn", value=self.exec_role.role_arn)
-        CfnOutput(self, "HelloRuntimeArn", value=self.hello_runtime.agent_runtime_arn)
+        for name, runtime in self.runtimes.items():
+            CfnOutput(self, f"{name.capitalize()}RuntimeArn", value=runtime.agent_runtime_arn)
 
         # --- Orchestrator Lambda (WS-02 infra + WS-04 application: Strands agent loop) ---
         app_table = ddb.Table.from_table_name(self, "AppTable", f"{prefix}-app")

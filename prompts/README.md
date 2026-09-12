@@ -8,8 +8,8 @@ guardrails (`guardrails/` ↔ `GuardrailsStack`).
 ## File convention
 
 - One file per prompt, **named for the prompt's logical name**: `prompts/<logical-name>.md`.
-- The logical name is **env-agnostic** (e.g. `hello-system`). The stack adds the environment
-  prefix, so `prompts/hello-system.md` becomes the Bedrock prompt `tendril-<env>-hello-system`.
+- The logical name is **env-agnostic** (e.g. `vision-system`). The stack adds the environment
+  prefix, so `prompts/vision-system.md` becomes the Bedrock prompt `tendril-<env>-vision-system`.
 - The **entire file content is the prompt template text** — no front-matter, no wrapping. Write
   the system prompt directly (markdown is fine; it's passed through as text).
 - Naming follows `<specialty>-<role>` per ADR-0006 (e.g. `agronomy-system`, `pest-diagnosis`),
@@ -33,4 +33,4 @@ non-prompt files from being published, and keeps CloudFormation construct ids st
 
 | File | Logical name | Bedrock prompt | Used by |
 |------|--------------|----------------|---------|
-| `hello-system.md` | `hello-system` | `tendril-<env>-hello-system` | hello agent |
+| `vision-system.md` | `vision-system` | `tendril-<env>-vision-system` | vision specialist (plant-photo identification) |

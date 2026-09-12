@@ -42,13 +42,15 @@ deployed:
 - The orchestrator (`app/orchestrator/`) builds its invocation manifest (agent name → runtime
   ARN + description) from the same files at deploy time.
 
-**Current state (WS-02, 2026-09-12):** `hello.json` is the first real entry — `AgentCoreStack`
-now loops over this directory instead of a single hardcoded `_agent_runtime()` call. Its
-`template` value is `"hello_agent"` (today's actual, only agent folder), **not**
-`"template_agent"` — that shared-codebase generalization is AF-02's job, done once a second
-specialist (Agronomy, AF-01) actually exists to prove "one codebase, many configs" against.
-Renaming `hello_agent/` → `template_agent/` and repointing this file's `template` value is the
-*only* change AF-02 needs here — the schema doesn't change. `model_id` is left `""` for now,
-meaning "use the `--context model_id=...` CDK override" (unchanged deploy-time behavior); a
-non-empty value here will take precedence once a specialist genuinely needs a different model
-than the deploy-time default. `memory` isn't set on this entry yet — that field lands with AF-05.
+**Current state (2026-09-12):** `vision.json` (plant-photo identification, `google.gemma-3-27b-it`)
+is the only live entry — it's a real specialist the orchestrator can call, not a stand-in.
+`AgentCoreStack` loops over this directory instead of a single hardcoded `_agent_runtime()` call.
+Its `template` value is `"hello_agent"` (today's actual, only agent folder) — that folder is
+**pure shared-template code now**: nothing deploys it under the name "hello" anymore (the
+original stand-in specialist used to prove the orchestrator pipe end-to-end before a real
+specialist existed — decommissioned once `vision` took over that role). Renaming `hello_agent/`
+→ `template_agent/` and repointing every entry's `template` value is still AF-02's job; the
+schema doesn't change. `model_id` is left `""` on entries that want "use the
+`--context model_id=...` CDK override" (unchanged deploy-time behavior); a non-empty value takes
+precedence once a specialist genuinely needs a different model than the deploy-time default.
+`memory` isn't set on any entry yet — that field lands with AF-05.

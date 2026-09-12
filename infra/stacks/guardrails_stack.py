@@ -11,10 +11,8 @@ Agents reference a guardrail by a **stable name** (no CloudFormation cross-stack
 resolving id + version at runtime — so this stack stays fully decoupled.
 
 Per AF-01 (docs/stories/agent-factory.md), this loops over every `guardrails/*.json` file
-instead of a single hardcoded `hello_guardrail.json` — adding a specialist's guardrail is
-adding a policy file, not a stack-code change. The construct id for the existing `hello`
-policy is kept exactly as it was (`HelloGuardrail`/`HelloGuardrailVersion`) so this refactor
-updates that resource in place rather than replacing it.
+instead of a single hardcoded policy — adding a specialist's guardrail is adding a policy
+file, not a stack-code change.
 """
 
 import json
@@ -29,12 +27,10 @@ from constructs import Construct
 
 GUARDRAILS_DIR = Path(__file__).resolve().parents[2] / "guardrails"
 
-# policy["name"] (e.g. "hello-guardrail") -> the CDK construct id prefix to use for it. Kept
-# explicit (not derived automatically) so the pre-existing `hello` entry's construct ids never
-# change — anything not listed here gets an automatically-derived id from its policy name.
-CONSTRUCT_ID_OVERRIDES = {
-    "hello-guardrail": "Hello",
-}
+# policy["name"] -> a CDK construct id prefix override, for when a policy's derived id would
+# collide or needs to stay stable across a rename. Empty for now — anything not listed here
+# gets an automatically-derived id from its policy name.
+CONSTRUCT_ID_OVERRIDES: dict[str, str] = {}
 
 
 def _construct_id(policy_name: str) -> str:
@@ -73,10 +69,6 @@ class GuardrailsStack(Stack):
             self.guardrails[policy["name"]] = guardrail
             CfnOutput(self, f"{policy_cid}GuardrailName", value=guardrail.name)
             CfnOutput(self, f"{policy_cid}GuardrailId", value=guardrail.attr_guardrail_id)
-
-        # Back-compat alias — existing code (AgentCoreStack) doesn't reference this, but keeps
-        # the pre-refactor attribute name available in case anything external still does.
-        self.hello_guardrail = self.guardrails["hello-guardrail"]
 
     @staticmethod
     def _content_policy(policy: dict) -> bedrock.CfnGuardrail.ContentPolicyConfigProperty | None:

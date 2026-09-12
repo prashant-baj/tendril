@@ -76,6 +76,15 @@ specialist is only ever a data change (ADR-0001, ADR-0012).
   specialist's real guardrail policy" task is done here too, for `vision` instead of Agronomy).
 - [ ] Add/extend CDK assertion tests for the N-item loops and per-agent tool IAM scoping.
 
+**2026-09-12 update:** `hello` — the stand-in specialist used above to prove the N-item loop —
+has since been decommissioned as a live registry entry. `agents/registry/hello.json`,
+`guardrails/hello_guardrail.json`, and `prompts/hello-system.md` are deleted; the orchestrator no
+longer sees or can call a `hello` specialist. `agents/hello_agent/` (the folder) stays exactly
+where it is — it's the shared template `vision.json`'s `template` field still points at, per
+AF-01's proof above. Only its role changed: from "also a deployed proof specialist" to "template
+code only." CDK assertion tests were updated accordingly (guardrail/prompt resource counts are
+now 1, not 2).
+
 **Dependencies:** WS-02 (registry-loop foundation), ADR-0006, ADR-0008, ADR-0012.
 **Status:** ◐ done in substance (proven with `vision`, not the originally-planned Agronomy) —
 per-agent tool IAM scoping (the one unchecked AC) has nothing to scope until AF-03 exists.

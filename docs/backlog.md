@@ -5,14 +5,17 @@ To reprioritize, move a row up/down and renumber the Rank column. Status reflect
 on the date below — re-verify before starting a story.
 
 **Last updated:** 2026-09-12 (OB-01/OB-02/WS-01..05 all done and smoke-tested end-to-end in dev —
-the full photo/issue → orchestrator → `hello` specialist pipe is proven live, including finding
+the full photo/issue → orchestrator → specialist pipe is proven live, including finding
 and fixing a real IAM gap along the way (WS-04); added OB-03, a deprioritized follow-up story to
 show real plant photos instead of a generic icon; fixed a real CI gap —
 `pytest -q || echo "no tests yet"` had been silently masking every test suite failing to even
 collect, since `boto3`/`strands-agents`/etc. were never installed in the `quality` job; built a
 real second specialist — **vision**, a plant-photo-identification agent on
 `google.gemma-3-27b-it` — substantially completing AF-01's registry/prompts/guardrails
-generalization ahead of schedule, using a real need instead of the originally-planned Agronomy)
+generalization ahead of schedule, using a real need instead of the originally-planned Agronomy;
+decommissioned `hello` as a live registry entry now that `vision` is real — `agents/hello_agent/`
+remains only as the shared template code every specialist's `template` field points at, no
+longer separately deployed or callable by the orchestrator)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
@@ -24,11 +27,10 @@ immediate next thing.
 
 ## Known drift / housekeeping (clear these first)
 
-- **Uncommitted work in the tree** (branch `dev`, else up to date with `origin/dev`): the guardrail
-  over-block retune (`guardrails/hello_guardrail.json`) and the improved eval
-  (`scripts/eval_guardrail.py`) are modified but **not committed or pushed**, so CI hasn't
-  redeployed them — the **deployed guardrail still has the over-blocking `UnsafeChemicalUse`
-  definition**.
+- **`guardrails/hello_guardrail.json` is deleted (2026-09-12)** — `hello` was decommissioned as a
+  live registry entry; its over-block retune history no longer applies. `scripts/eval_guardrail.py`
+  now defaults to `vision-guardrail`. Re-verify the deployed `hello-guardrail` Bedrock resource is
+  actually torn down after the next `cdk deploy tendril-<env>-guardrails`.
 - **`.mcp.json` and `.pre-commit-config.yaml` are missing on disk** — they were never added (the
   device bridge can't write those protected filenames). This regresses TF-05 / TF-01 / TF-08.
 - **Stale `.git/index.lock`** is present and blocks `git add`/`commit`. Remove it first

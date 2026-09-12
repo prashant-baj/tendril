@@ -24,9 +24,9 @@ is separated from code so it can be reviewed, versioned, and deployed on its own
 
 | File | Guardrail | Applies to |
 |------|-----------|-----------|
-| `hello_guardrail.json` | `tendril-<env>-hello-guardrail` | hello agent (MVP) |
+| `vision_guardrail.json` | `tendril-<env>-vision-guardrail` | vision specialist (plant-photo identification) |
 
-## Policy shape (`hello_guardrail.json`)
+## Policy shape (`vision_guardrail.json`)
 
 - **Content filters** — HATE / INSULTS / SEXUAL / VIOLENCE / MISCONDUCT at HIGH/HIGH, plus
   **PROMPT_ATTACK** on input (HIGH) to catch injection in user text, photos, and tool output.
