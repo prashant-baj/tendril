@@ -41,6 +41,7 @@ export class GardenSetupComponent {
 
     this.gardenApi.createGarden({ name, geolocation, vision: vision || undefined }).subscribe({
       next: ({ gardenId }) => {
+        console.log('Garden created with ID:', gardenId);
         this.currentGarden.setCurrentGardenId(gardenId);
         this.router.navigateByUrl('/home');
       },
