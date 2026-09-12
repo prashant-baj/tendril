@@ -1,7 +1,17 @@
 """Unit tests for the garden Client API handler (OB-01).
 
-No AWS calls — DynamoDB access is monkeypatched via a fake table object, following the same
-mocked-boto3-client convention as agents/hello_agent/tests/test_agent.py.
+No AWS calls — DynamoDB access is monkeypatched via fake table/client objects, following the
+same mocked-boto3-client convention as agents/hello_agent/tests/test_agent.py.
+
+Note: `create_garden` and `get_garden` intentionally use *separate* fakes (`_client` vs.
+`_table`) mirroring the real code's split between a plain low-level client (`_get_client()`,
+used for `transact_write_items`) and the resource `Table` (`_get_table()`, used for
+`get_item`) — a real production bug (`_get_table().meta.client` double-serializing
+already-AttributeValue-shaped items into `{"M": {"S": {...}}}`) came from conflating the two,
+which a hand-rolled fake mocking only the happy-path shape could not have caught. These fakes
+verify request *shape*, not boto3's actual (de)serialization behavior — that gap is exactly
+what let the bug through unit tests in the first place; it was only found via a live
+invocation against real DynamoDB.
 """
 
 import json
@@ -9,7 +19,7 @@ import json
 import garden_handler as handler
 
 
-class FakeMetaClient:
+class FakeClient:
     def __init__(self, raise_on_transact: Exception | None = None):
         self.raise_on_transact = raise_on_transact
         self.calls: list[list[dict]] = []
@@ -20,14 +30,8 @@ class FakeMetaClient:
         self.calls.append(TransactItems)
 
 
-class FakeMeta:
-    def __init__(self, client: FakeMetaClient):
-        self.client = client
-
-
 class FakeTable:
-    def __init__(self, get_item_response=None, raise_on_get=None, raise_on_transact=None):
-        self.meta = FakeMeta(FakeMetaClient(raise_on_transact))
+    def __init__(self, get_item_response=None, raise_on_get=None):
         self._get_item_response = get_item_response or {}
         self.raise_on_get = raise_on_get
 
@@ -51,8 +55,8 @@ def _event(method, resource, *, body=None, headers=None, path_params=None):
 
 
 def test_create_garden_happy_path(monkeypatch):
-    fake_table = FakeTable()
-    monkeypatch.setattr(handler, "_table", fake_table)
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
 
     event = _event(
         "POST",
@@ -67,8 +71,8 @@ def test_create_garden_happy_path(monkeypatch):
     assert "gardenId" in body and body["gardenId"]
 
     # exactly one transaction, with both the canonical + ownership-index Put items
-    assert len(fake_table.meta.client.calls) == 1
-    items = fake_table.meta.client.calls[0]
+    assert len(fake_client.calls) == 1
+    items = fake_client.calls[0]
     assert len(items) == 2
     puts = [i["Put"]["Item"] for i in items]
     pks = {p["pk"]["S"] for p in puts}
@@ -76,7 +80,7 @@ def test_create_garden_happy_path(monkeypatch):
 
 
 def test_create_garden_missing_user_id_header(monkeypatch):
-    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event("POST", "/gardens", body={"name": "G", "geolocation": "Pune"}, headers={})
     resp = handler.create_garden(event)
     assert resp["statusCode"] == 400
@@ -84,21 +88,21 @@ def test_create_garden_missing_user_id_header(monkeypatch):
 
 
 def test_create_garden_missing_name(monkeypatch):
-    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event("POST", "/gardens", body={"geolocation": "Pune"}, headers={"X-User-Id": "u"})
     resp = handler.create_garden(event)
     assert resp["statusCode"] == 400
 
 
 def test_create_garden_missing_geolocation(monkeypatch):
-    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event("POST", "/gardens", body={"name": "G"}, headers={"X-User-Id": "u"})
     resp = handler.create_garden(event)
     assert resp["statusCode"] == 400
 
 
 def test_create_garden_malformed_json_body(monkeypatch):
-    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event("POST", "/gardens", headers={"X-User-Id": "u"})
     event["body"] = "{not json"
     resp = handler.create_garden(event)
@@ -106,8 +110,8 @@ def test_create_garden_malformed_json_body(monkeypatch):
 
 
 def test_create_garden_header_lookup_is_case_insensitive(monkeypatch):
-    fake_table = FakeTable()
-    monkeypatch.setattr(handler, "_table", fake_table)
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
     event = _event(
         "POST",
         "/gardens",
@@ -119,8 +123,8 @@ def test_create_garden_header_lookup_is_case_insensitive(monkeypatch):
 
 
 def test_create_garden_dynamo_failure_returns_500(monkeypatch):
-    fake_table = FakeTable(raise_on_transact=RuntimeError("boom"))
-    monkeypatch.setattr(handler, "_table", fake_table)
+    fake_client = FakeClient(raise_on_transact=RuntimeError("boom"))
+    monkeypatch.setattr(handler, "_client", fake_client)
     event = _event(
         "POST",
         "/gardens",
@@ -188,7 +192,7 @@ def test_get_garden_dynamo_failure_returns_500(monkeypatch):
 
 
 def test_handler_routes_post_gardens(monkeypatch):
-    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event(
         "POST", "/gardens", body={"name": "G", "geolocation": "Pune"}, headers={"X-User-Id": "u"}
     )

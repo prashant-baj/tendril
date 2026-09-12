@@ -28,6 +28,7 @@ logger = logging.getLogger("tendril.api.garden_handler")
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by ClientApiStack; never hardcoded
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
+_client = None
 
 
 def _get_table():
@@ -35,6 +36,19 @@ def _get_table():
     if _table is None:
         _table = boto3.resource("dynamodb").Table(APP_TABLE_NAME)
     return _table
+
+
+def _get_client():
+    # NOT the same as `_get_table().meta.client`: a resource's `.meta.client` has DynamoDB's
+    # automatic Python<->AttributeValue transform injected (boto3.dynamodb.transform), which
+    # re-serializes anything already AttributeValue-shaped — e.g. our pre-serialized
+    # {"S": "..."} becomes {"M": {"S": {"S": "..."}}}, a real "Type mismatch...actual: M" bug
+    # found via a live TransactWriteItems failure. A plain client has no such transform, so
+    # raw AttributeValue dicts from _to_dynamo() pass through unchanged.
+    global _client
+    if _client is None:
+        _client = boto3.client("dynamodb")
+    return _client
 
 
 def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -103,7 +117,7 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     }
 
     try:
-        _get_table().meta.client.transact_write_items(
+        _get_client().transact_write_items(
             TransactItems=[
                 {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(garden_item)}},
                 {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(ownership_item)}},
@@ -154,9 +168,9 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _to_dynamo(item: dict[str, Any]) -> dict[str, Any]:
-    """boto3's Table resource normally handles Python<->DynamoDB type marshalling for us, but
-    transact_write_items via the low-level client (meta.client) needs raw AttributeValue dicts.
-    Delegate to the resource's own serializer rather than hand-rolling type tags."""
+    """The plain low-level client (_get_client()) needs raw AttributeValue dicts — it has none
+    of the resource layer's automatic Python<->DynamoDB marshalling. Delegate to boto3's own
+    serializer rather than hand-rolling type tags."""
     from boto3.dynamodb.types import TypeSerializer
 
     serializer = TypeSerializer()
