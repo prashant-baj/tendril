@@ -28,6 +28,10 @@ PROMPT_CATALOG = {
         "cid": "Hello",
         "description": "System prompt for the hello agent (externalized).",
     },
+    "vision-system": {
+        "cid": "Vision",
+        "description": "System prompt for the vision/plant-identification specialist (externalized).",
+    },
 }
 
 

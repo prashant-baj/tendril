@@ -39,34 +39,46 @@ second real specialist (**Agronomy**) with zero stack-code changes, **so that** 
 specialist is only ever a data change (ADR-0001, ADR-0012).
 
 **Acceptance Criteria**
-- [ ] `PromptsStack` loops over `prompts/*.md` (one file per specialist) instead of the single
-  hardcoded hello prompt, provisioning a `CfnPrompt` + version per file.
-- [ ] `GuardrailsStack` loops over `guardrails/*.json` instead of the single hardcoded hello
+- [x] `PromptsStack` loops over a catalog keyed by logical prompt name (`prompts/<name>.md`)
+  instead of the single hardcoded hello prompt, provisioning a `CfnPrompt` + version per entry.
+- [x] `GuardrailsStack` loops over `guardrails/*.json` instead of the single hardcoded hello
   guardrail, provisioning a `CfnGuardrail` + version per file.
-- [ ] `AgentCoreStack` loops over `agents/registry/*.json` (per ADR-0012/WS-02) and provisions
+- [x] `AgentCoreStack` loops over `agents/registry/*.json` (per ADR-0012/WS-02) and provisions
   one `aws_bedrockagentcore.Runtime` per entry, **all built from the same `template` image** —
-  never one Docker build per agent (ADR-0012's 2026-09-12 refinement).
-- [ ] `agents/registry/agronomy.json` (referencing a real `tendril-<env>-agronomy-system` prompt
-  and `tendril-<env>-agronomy-guardrail` guardrail) deploys successfully alongside `hello` with
-  **zero changes to any stack's Python code**.
+  never one Docker build per agent (ADR-0012's 2026-09-12 refinement). Verified directly in a
+  synthesized template: `HelloRuntime` and the second specialist's runtime reference the
+  *identical* `ContainerUri` (same CDK asset hash) — CDK deduplicated the build since both
+  registry entries point at the same `hello_agent/` source directory.
+- [x] A second specialist deploys successfully alongside `hello` with **zero changes to any
+  stack's Python code**. **Deviation from the original plan:** the proof specialist built here
+  is **vision** (`agents/registry/vision.json`, a plant-photo-inspection agent on
+  `google.gemma-3-27b-it`), not the originally-planned **Agronomy** — a real, immediately-useful
+  need (2026-09-12) came up before Agronomy did. The generalization work is identical either
+  way; Agronomy is still exactly as easy to add now (one registry file + one prompt + one
+  guardrail file) as this ADR/story always intended — it just isn't the one that happened to
+  prove it.
 - [ ] Each specialist's execution IAM only grants the tools it actually declares in its own
-  registry entry — no specialist can invoke a tool it didn't ask for.
-- [ ] `cdk synth`/`cdk deploy` succeed for `dev`, env-prefixed, no hardcoded account IDs.
-- [ ] CDK assertion tests: N registry/prompt/guardrail files → N provisioned resources; adding a
-  fixture file changes the count without touching stack code; per-agent tool IAM is scoped, not
-  global.
+  registry entry — no specialist can invoke a tool it didn't ask for. **Not yet applicable:**
+  neither `hello` nor `vision` declares any `tools` yet (AF-03, Lambda-backed Tool APIs, isn't
+  built) — there's nothing to scope per-specialist until a specialist actually has a tool.
+- [x] `cdk synth` succeeds for `dev`, env-prefixed, no hardcoded account IDs (verified with a
+  real Docker build). `cdk deploy` not yet re-run after this change.
+- [x] CDK assertion tests: registry/prompt/guardrail file count → provisioned resource count
+  (`test_one_runtime_provisioned_per_registry_file` adds a fixture file and re-asserts the
+  count, proving the loop); per-agent tool IAM scoping is deferred with AF-03 above.
 
 **Tasks**
-- [ ] Refactor `PromptsStack`/`GuardrailsStack` to loop over their data folders.
-- [ ] Confirm `AgentCoreStack`'s registry loop (from WS-02) builds one shared `template` image,
+- [x] Refactor `PromptsStack`/`GuardrailsStack` to loop over their data folders.
+- [x] Confirm `AgentCoreStack`'s registry loop (from WS-02) builds one shared `template` image,
   not per-entry images.
-- [ ] Author `agents/registry/agronomy.json` + a placeholder `prompts/agronomy-system.md` +
-  `guardrails/agronomy_guardrail.json` stub (real content is AF-04's job — a minimal valid file
-  is enough here to prove the loop).
+- [x] Author `agents/registry/vision.json` + real `prompts/vision-system.md` +
+  `guardrails/vision_guardrail.json` (not placeholders — AF-04's "author the second
+  specialist's real guardrail policy" task is done here too, for `vision` instead of Agronomy).
 - [ ] Add/extend CDK assertion tests for the N-item loops and per-agent tool IAM scoping.
 
 **Dependencies:** WS-02 (registry-loop foundation), ADR-0006, ADR-0008, ADR-0012.
-**Status:** ☐ to do.
+**Status:** ◐ done in substance (proven with `vision`, not the originally-planned Agronomy) —
+per-agent tool IAM scoping (the one unchecked AC) has nothing to scope until AF-03 exists.
 
 ---
 
@@ -141,6 +153,13 @@ deployable APIs — never code baked into one agent (architecture.md §4.2, "too
 ---
 
 ## AF-04 — Guardrails: author the Agronomy specialist's real guardrail policy
+
+> **Note (2026-09-12):** `guardrails/vision_guardrail.json` was authored alongside AF-01, for
+> the **vision** specialist rather than Agronomy — it proves "a second real (non-placeholder)
+> guardrail deploys through AF-01's generalized loop," but reuses `hello`'s topic definitions
+> verbatim rather than the domain-specific tuning + eval-scenario work this story actually
+> calls for below. **Still genuinely open**, just for whichever specialist picks it up next
+> (Agronomy or a vision-specific tuning pass) — this story's AC/Tasks are otherwise unchanged.
 
 **As a** safety/domain reviewer, **I want** `guardrails/agronomy_guardrail.json` authored with
 real agronomy-specific policy — not AF-01's placeholder stub — **so that** the second real

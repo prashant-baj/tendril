@@ -1,0 +1,9 @@
+{
+  "name": "vision",
+  "template": "hello_agent",
+  "model_id": "google.gemma-3-27b-it",
+  "prompt_name": "vision-system",
+  "guardrail_name": "vision-guardrail",
+  "description": "Inspects a photo of a plant to identify its species/variety and any visible issues (pests, disease, discoloration, damage), phrasing its identification as a question for the gardener to confirm. Call this when the goal has an attached photo.",
+  "tools": []
+}

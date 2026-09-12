@@ -3,14 +3,22 @@
 Invoked **asynchronously** by an EventBridge rule (`AgentCoreStack`) — never reachable from the
 Client API's synchronous request path (ADR-0004). On wake it:
 
-1. Loads the submitted Goal from `AppTable` (data-architecture.md §2).
+1. Loads the submitted Goal from `AppTable` (data-architecture.md §2). If the goal has an
+   attached photo (`media_ids`), resolves a short-lived presigned S3 **GET** URL for the first
+   one — the orchestrator is the trusted-tier exception that holds `MediaBucket` IAM (ADR-0013);
+   specialists never do, so the URL (not direct S3 access) is how a photo reaches them, exactly
+   the design data-architecture.md §4 sketched as an open option and this resolves.
 2. Builds a Strands `Agent` whose tools are the registered specialists (agents-as-tools,
    ADR-0012) — each tool calls AgentCore's `InvokeAgentRuntime` against that specialist's
-   deployed runtime. Which specialists exist comes from `AGENT_MANIFEST` (an env var built by
-   `AgentCoreStack` at synth time from `agents/registry/*.json` + the runtimes it actually
-   provisioned — never discovered at runtime via `ListAgentRuntimes`).
-3. Runs one turn, calling at least the `hello` stand-in specialist, and writes the result back
-   onto the Goal record so a future status endpoint (WS-05+) has something real to read.
+   deployed runtime, passing the same image URL to every specialist uniformly (config-driven:
+   each specialist's own template code — `agents/hello_agent/agent.py`'s `resolve_content` —
+   decides whether its prompt/model actually needs it, not the orchestrator). Which specialists
+   exist comes from `AGENT_MANIFEST` (an env var built by `AgentCoreStack` at synth time from
+   `agents/registry/*.json` + the runtimes it actually provisioned — never discovered at runtime
+   via `ListAgentRuntimes`).
+3. Runs one turn, calling at least one specialist (`hello` for text-only issues; `vision`, per
+   its registry description, once a photo is attached), and writes the result back onto the Goal
+   record so a future status endpoint (WS-05+) has something real to read.
 4. On any failure (specialist unreachable, malformed response, guardrail block), the Goal is
    reverted to `Intake` with an `orchestrator_error` field — the lifecycle
    (architecture.md §7.3) has no dedicated "Failed" state yet, so `Intake` doubles as
@@ -41,11 +49,22 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("tendril.orchestrator")
 
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by AgentCoreStack; never hardcoded
+MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by AgentCoreStack; never hardcoded
 MODEL_ID = os.getenv("MODEL_ID") or None
 AGENT_MANIFEST: dict[str, dict[str, str]] = json.loads(os.getenv("AGENT_MANIFEST", "{}"))
 
+# Media.content_type (data-architecture.md §2) -> strands.types.media.ImageContent format.
+CONTENT_TYPE_TO_IMAGE_FORMAT = {
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+
 _table = None
 _agentcore = None
+_s3 = None
 
 
 def _get_table():
@@ -62,7 +81,20 @@ def _get_agentcore_client():
     return _agentcore
 
 
-def _make_specialist_tool(name: str, arn: str, description: str):
+def _get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = boto3.client("s3")
+    return _s3
+
+
+def _make_specialist_tool(
+    name: str,
+    arn: str,
+    description: str,
+    image_url: str | None = None,
+    image_format: str | None = None,
+):
     """Wraps one registered specialist as a Strands tool calling InvokeAgentRuntime (ADR-0012)."""
 
     @tool(name=name, description=description)
@@ -70,11 +102,15 @@ def _make_specialist_tool(name: str, arn: str, description: str):
         # AgentCore requires 33-256 chars; two concatenated UUIDs comfortably clears that.
         session_id = uuid.uuid4().hex + uuid.uuid4().hex
         started = time.monotonic()
+        payload: dict[str, Any] = {"prompt": prompt}
+        if image_url and image_format:
+            payload["imageUrl"] = image_url
+            payload["imageFormat"] = image_format
         try:
             resp = _get_agentcore_client().invoke_agent_runtime(
                 agentRuntimeArn=arn,
                 runtimeSessionId=session_id,
-                payload=json.dumps({"prompt": prompt}).encode("utf-8"),
+                payload=json.dumps(payload).encode("utf-8"),
             )
             body = json.loads(resp["response"].read())
             logger.info(
@@ -94,9 +130,9 @@ def _make_specialist_tool(name: str, arn: str, description: str):
     return call_specialist
 
 
-def _build_tools() -> list:
+def _build_tools(image_url: str | None = None, image_format: str | None = None) -> list:
     return [
-        _make_specialist_tool(name, entry["arn"], entry["description"])
+        _make_specialist_tool(name, entry["arn"], entry["description"], image_url, image_format)
         for name, entry in AGENT_MANIFEST.items()
     ]
 
@@ -104,6 +140,27 @@ def _build_tools() -> list:
 def _load_goal(garden_id: str, goal_id: str) -> dict[str, Any] | None:
     resp = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{goal_id}"})
     return resp.get("Item")
+
+
+def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
+    """First attached photo -> (presigned GET URL, image format), or None if there isn't one
+    or its Media record/content-type is missing/unrecognized. Only the first is used — a goal
+    with several photos is future work, not needed to prove this pipe."""
+    if not media_ids:
+        return None
+    resp = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_ids[0]}"})
+    item = resp.get("Item")
+    if not item:
+        return None
+    image_format = CONTENT_TYPE_TO_IMAGE_FORMAT.get(item.get("content_type", ""))
+    if not image_format:
+        return None
+    url = _get_s3().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": MEDIA_BUCKET_NAME, "Key": item["s3_key"]},
+        ExpiresIn=900,
+    )
+    return url, image_format
 
 
 def _update_goal(garden_id: str, goal_id: str, **fields: Any) -> None:
@@ -126,14 +183,18 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
 
     _update_goal(garden_id, goal_id, status="Decomposing")
 
+    image = _resolve_image(garden_id, goal.get("media_ids") or [])
+    image_url, image_format = image if image else (None, None)
+
     agent = Agent(
         model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
         system_prompt=(
             "You are Tendril's orchestrator. A gardener has submitted an issue about their "
-            "garden. Call the most relevant specialist tool(s) to help understand it, then "
-            "summarize what you learned in one or two sentences."
+            "garden. Call the most relevant specialist tool(s) to help understand it — if a "
+            "photo is available, prefer a specialist that can inspect it — then summarize "
+            "what you learned in one or two sentences."
         ),
-        tools=_build_tools(),
+        tools=_build_tools(image_url, image_format),
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},
     )
 

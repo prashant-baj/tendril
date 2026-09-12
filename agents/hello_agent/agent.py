@@ -1,5 +1,10 @@
 """Hello agent — minimal Strands + AgentCore runtime to validate deployment (TF-04).
 
+This is also the **shared agent template** every `agents/registry/*.json` entry currently
+points at (ADR-0012's 2026-09-12 refinement) — "hello" and "vision" (the plant-vision
+specialist) both run this exact codebase, differing only by their registry config
+(model_id/prompt_name/guardrail_name). A registry entry is only its config, not its code.
+
 Model id comes from the environment. The system prompt is externalized to Bedrock
 Prompt Management (ADR-0006) in a separate CDK stack and referenced here only by a
 stable NAME (PROMPT_NAME) — the agent resolves the prompt id at runtime, so prompt
@@ -16,6 +21,7 @@ deterministic layers beneath (IAM, hardcoded checks, HITL) do not depend on this
 
 import logging
 import os
+import urllib.request
 
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
@@ -151,11 +157,49 @@ def resolve_user_message(payload: dict) -> str:
     return prompt
 
 
+ALLOWED_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}  # strands.types.media.ImageContent
+IMAGE_FETCH_TIMEOUT_SECONDS = 10
+MAX_IMAGE_BYTES = 15 * 1024 * 1024  # comfortably above a phone photo; bounds a bad/huge URL
+
+
+def fetch_image_bytes(url: str) -> bytes:
+    """Specialists get no direct S3 IAM (ADR-0013) — a photo arrives as a short-lived
+    presigned GET URL from the orchestrator (the trusted-tier exception) and is fetched over
+    plain HTTPS here, the same posture as calling any other Tool API."""
+    with urllib.request.urlopen(url, timeout=IMAGE_FETCH_TIMEOUT_SECONDS) as resp:  # noqa: S310
+        data = resp.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes")
+    return data
+
+
+def resolve_content(payload: dict) -> str | list[dict]:
+    """Builds the Agent() call's input: plain text, or [image, text] content blocks when the
+    orchestrator attached a photo (``payload['imageUrl']``/``['imageFormat']``) — e.g. for the
+    vision specialist (agents/registry/vision.json). Falls back to text-only if the image
+    can't be fetched, rather than failing the whole turn over a bad/expired URL — every
+    specialist can receive an image (config-driven, not vision-specific code)."""
+    prompt = resolve_user_message(payload)
+    image_url = payload.get("imageUrl")
+    image_format = payload.get("imageFormat")
+    if not image_url or image_format not in ALLOWED_IMAGE_FORMATS:
+        return prompt
+    try:
+        image_bytes = fetch_image_bytes(image_url)
+    except Exception as e:
+        logger.warning("Could not fetch image %s (%s); continuing text-only.", image_url, e)
+        return prompt
+    return [
+        {"image": {"format": image_format, "source": {"bytes": image_bytes}}},
+        {"text": prompt},
+    ]
+
+
 @app.entrypoint
 def invoke(payload: dict) -> dict:
-    user_message = resolve_user_message(payload)
+    content = resolve_content(payload)
     agent = Agent(model=_get_model(), system_prompt=_get_system_prompt())
-    result = agent(user_message)
+    result = agent(content)
     return {"result": str(result)}
 
 

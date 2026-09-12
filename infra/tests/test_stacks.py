@@ -41,8 +41,9 @@ def _app() -> App:
 def test_guardrail_resource_and_policies():
     app = _app()
     tpl = Template.from_stack(GuardrailsStack(app, "gr", env_name="dev", env=ENV))
-    tpl.resource_count_is("AWS::Bedrock::Guardrail", 1)
-    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 1)
+    # One per guardrails/*.json (AF-01: hello + vision, WS-04's vision specialist).
+    tpl.resource_count_is("AWS::Bedrock::Guardrail", 2)
+    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 2)
     tpl.has_resource_properties(
         "AWS::Bedrock::Guardrail",
         {
@@ -66,6 +67,9 @@ def test_guardrail_resource_and_policies():
             ),
         },
     )
+    tpl.has_resource_properties(
+        "AWS::Bedrock::Guardrail", Match.object_like({"Name": "tendril-dev-vision-guardrail"})
+    )
 
 
 # --- prompts (sourced from file) --------------------------------------------
@@ -74,7 +78,8 @@ def test_guardrail_resource_and_policies():
 def test_prompt_uses_file_text():
     app = _app()
     tpl = Template.from_stack(PromptsStack(app, "pr", env_name="dev", env=ENV))
-    tpl.resource_count_is("AWS::Bedrock::Prompt", 1)
+    # One per PROMPT_CATALOG entry (hello + vision, WS-04's vision specialist).
+    tpl.resource_count_is("AWS::Bedrock::Prompt", 2)
     tpl.has_resource_properties(
         "AWS::Bedrock::Prompt",
         Match.object_like(
@@ -93,6 +98,9 @@ def test_prompt_uses_file_text():
                 ),
             }
         ),
+    )
+    tpl.has_resource_properties(
+        "AWS::Bedrock::Prompt", Match.object_like({"Name": "tendril-dev-vision-system"})
     )
 
 
@@ -212,11 +220,27 @@ def test_goal_submitted_eventbridge_rule_targets_orchestrator():
                 "FunctionName": "tendril-dev-orchestrator",
                 "PackageType": "Image",
                 "Environment": Match.object_like(
-                    {"Variables": Match.object_like({"APP_TABLE_NAME": "tendril-dev-app"})}
+                    {
+                        "Variables": Match.object_like(
+                            {
+                                "APP_TABLE_NAME": "tendril-dev-app",
+                                "MEDIA_BUCKET_NAME": "tendril-dev-media",
+                            }
+                        )
+                    }
                 ),
             }
         ),
     )
+
+    # WS-04 (vision specialist): the orchestrator is ADR-0013's trusted-tier exception — it
+    # needs s3:GetObject to generate a presigned GET URL for a goal's attached photo.
+    actions = set()
+    for res in tpl.find_resources("AWS::IAM::Policy").values():
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions.update(act if isinstance(act, list) else [act])
+    assert "s3:GetObject*" in actions
 
 
 # --- pipeline (GitHub OIDC deploy role) --------------------------------------

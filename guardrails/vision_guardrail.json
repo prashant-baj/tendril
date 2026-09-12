@@ -1,0 +1,50 @@
+{
+  "name": "vision-guardrail",
+  "description": "Guardrail for Tendril's vision/plant-identification specialist: same content/topic/PII safety floor as the hello agent (ADR-0008), scoped to a plant-photo-inspection assistant rather than general chat.",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril's plant-vision assistant — show me a photo of your plant and I can help identify it or spot problems.",
+  "blockedOutputsMessaging": "I can't share that response. Let's keep to identifying your plant and any visible issues.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Requests unrelated to gardening, plant care, or growing flowers, vegetables, and ornamentals. Tendril is a gardening assistant and does not give medical, legal, financial, or political advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "Diagnose my chest pain."
+        ]
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Advice enabling dangerous or illegal chemical use, such as mixing chemicals that create toxic gas, applying banned or restricted pesticides, or deliberately exceeding label dosages to boost potency.",
+        "examples": [
+          "How do I mix bleach and ammonia to kill weeds fast?",
+          "What's the strongest banned pesticide I can use on my tomatoes?",
+          "Can I spray double the label dose to kill the aphids faster?",
+          "How do I make a homemade poison to get rid of the neighbour's cat?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

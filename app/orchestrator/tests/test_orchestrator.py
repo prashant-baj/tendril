@@ -26,15 +26,29 @@ class FakeAgentCoreClient:
 
 
 class FakeTable:
-    def __init__(self, get_item_response=None):
+    def __init__(self, get_item_response=None, responses_by_sk=None):
         self._get_item_response = get_item_response if get_item_response is not None else {}
+        self._responses_by_sk = responses_by_sk or {}
         self.update_calls: list[dict] = []
 
     def get_item(self, Key):
+        if Key.get("sk") in self._responses_by_sk:
+            return self._responses_by_sk[Key["sk"]]
         return self._get_item_response
 
     def update_item(self, **kwargs):
         self.update_calls.append(kwargs)
+
+
+class FakeS3:
+    def __init__(self):
+        self.presign_calls: list[dict] = []
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):
+        self.presign_calls.append(
+            {"operation": operation, "Params": Params, "ExpiresIn": ExpiresIn}
+        )
+        return f"https://example-bucket.s3.amazonaws.com/{Params['Key']}?presigned=1"
 
 
 class FakeAgent:
@@ -101,6 +115,93 @@ def test_build_tools_one_per_manifest_entry(monkeypatch):
     assert len(tools) == 2
 
 
+def test_specialist_tool_includes_image_in_payload_when_provided(monkeypatch):
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+
+    tool_fn = handler._make_specialist_tool(
+        "vision", "arn:vision", "desc", image_url="https://s3.example/photo", image_format="jpeg"
+    )
+    tool_fn("what plant is this?")
+
+    payload = json.loads(fake_client.calls[0]["payload"])
+    assert payload == {
+        "prompt": "what plant is this?",
+        "imageUrl": "https://s3.example/photo",
+        "imageFormat": "jpeg",
+    }
+
+
+def test_specialist_tool_omits_image_when_not_provided(monkeypatch):
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+
+    tool_fn = handler._make_specialist_tool("hello", "arn:hello", "desc")
+    tool_fn("hi")
+
+    payload = json.loads(fake_client.calls[0]["payload"])
+    assert payload == {"prompt": "hi"}
+
+
+def test_build_tools_passes_image_to_every_tool(monkeypatch):
+    monkeypatch.setattr(
+        handler, "AGENT_MANIFEST", {"hello": {"arn": "arn:hello", "description": "d"}}
+    )
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+
+    (tool_fn,) = handler._build_tools("https://s3.example/photo", "jpeg")
+    tool_fn("prompt")
+
+    payload = json.loads(fake_client.calls[0]["payload"])
+    assert payload["imageUrl"] == "https://s3.example/photo"
+    assert payload["imageFormat"] == "jpeg"
+
+
+# --- _resolve_image (data-architecture.md §4 — presigned GET, no specialist S3 IAM) --------
+
+
+def test_resolve_image_returns_none_when_goal_has_no_media():
+    assert handler._resolve_image("g1", []) is None
+
+
+def test_resolve_image_returns_none_when_media_record_missing(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    assert handler._resolve_image("g1", ["media-1"]) is None
+
+
+def test_resolve_image_returns_none_for_unrecognized_content_type(monkeypatch):
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(get_item_response={"Item": {"s3_key": "k", "content_type": "application/pdf"}}),
+    )
+    assert handler._resolve_image("g1", ["media-1"]) is None
+
+
+def test_resolve_image_returns_presigned_url_and_format(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={
+            "Item": {"s3_key": "g1/media-1/tomato.jpg", "content_type": "image/jpeg"}
+        }
+    )
+    fake_s3 = FakeS3()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", fake_s3)
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+
+    result = handler._resolve_image("g1", ["media-1"])
+
+    assert result is not None
+    url, image_format = result
+    assert image_format == "jpeg"
+    assert "g1/media-1/tomato.jpg" in url
+    assert fake_s3.presign_calls[0]["Params"] == {
+        "Bucket": "tendril-dev-media",
+        "Key": "g1/media-1/tomato.jpg",
+    }
+
+
 # --- handle_goal_submitted (agent-loop wiring; Agent/BedrockModel mocked) ------------------
 
 
@@ -118,6 +219,53 @@ def test_handle_goal_submitted_happy_path(monkeypatch):
     assert statuses == ["Decomposing", "PlanProposed"]
     final_call = fake_table.update_calls[-1]
     assert final_call["ExpressionAttributeValues"][":orchestrator_result"] == "orchestrator summary"
+
+
+def test_handle_goal_submitted_with_photo_passes_image_url_to_tools(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {
+                    "garden_id": "g1",
+                    "goal_id": "goal-1",
+                    "description": "what's wrong with this?",
+                    "media_ids": ["media-1"],
+                }
+            },
+            "MEDIA#media-1": {
+                "Item": {"s3_key": "g1/media-1/tomato.jpg", "content_type": "image/jpeg"}
+            },
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+    monkeypatch.setattr(
+        handler, "AGENT_MANIFEST", {"vision": {"arn": "arn:vision", "description": "d"}}
+    )
+    monkeypatch.setattr(handler, "_agentcore", FakeAgentCoreClient())
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+
+    captured_tools = {}
+
+    class CapturingAgent:
+        def __init__(self, **kwargs):
+            captured_tools["tools"] = kwargs["tools"]
+
+        def __call__(self, text):
+            return "orchestrator summary"
+
+    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    (vision_tool,) = captured_tools["tools"]
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    vision_tool("what plant is this?")
+    payload = json.loads(fake_client.calls[0]["payload"])
+    assert payload["imageUrl"].endswith("g1/media-1/tomato.jpg?presigned=1")
+    assert payload["imageFormat"] == "jpeg"
 
 
 def test_handle_goal_submitted_goal_not_found(monkeypatch):

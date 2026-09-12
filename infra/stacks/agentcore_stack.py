@@ -38,6 +38,7 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_s3 as s3,
 )
 from constructs import Construct
 
@@ -148,6 +149,7 @@ class AgentCoreStack(Stack):
 
         # --- Orchestrator Lambda (WS-02 infra + WS-04 application: Strands agent loop) ---
         app_table = ddb.Table.from_table_name(self, "AppTable", f"{prefix}-app")
+        media_bucket = s3.Bucket.from_bucket_name(self, "MediaBucket", f"{prefix}-media")
 
         orchestrator_image_repo = self.node.try_get_context("orchestrator_image_repo")
         if orchestrator_image_repo:
@@ -181,12 +183,17 @@ class AgentCoreStack(Stack):
             memory_size=512,
             environment={
                 "APP_TABLE_NAME": app_table.table_name,
+                "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
                 "MODEL_ID": context_model_id,
                 "LOG_LEVEL": "INFO",
                 "AGENT_MANIFEST": self.to_json_string(agent_manifest),
             },
         )
         app_table.grant_read_write_data(self.orchestrator)
+        # The orchestrator is ADR-0013's trusted-tier exception: it holds MediaBucket IAM so it
+        # can generate a short-lived presigned GET URL for a goal's attached photo and pass
+        # *that* to specialists (who get no S3 IAM at all) — never the bucket access itself.
+        media_bucket.grant_read(self.orchestrator)
         self.orchestrator.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],

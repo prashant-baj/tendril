@@ -39,6 +39,54 @@ def test_resolve_user_message_rejects_non_dict():
         agent.resolve_user_message("not a dict")
 
 
+def test_resolve_content_text_only_when_no_image(monkeypatch):
+    assert agent.resolve_content({"prompt": "why are my basil leaves yellow?"}) == (
+        "why are my basil leaves yellow?"
+    )
+
+
+def test_resolve_content_builds_multimodal_blocks_when_image_present(monkeypatch):
+    monkeypatch.setattr(agent, "fetch_image_bytes", lambda url: b"fake-bytes")
+    content = agent.resolve_content(
+        {
+            "prompt": "what plant is this?",
+            "imageUrl": "https://s3.example/photo",
+            "imageFormat": "jpeg",
+        }
+    )
+    assert content == [
+        {"image": {"format": "jpeg", "source": {"bytes": b"fake-bytes"}}},
+        {"text": "what plant is this?"},
+    ]
+
+
+def test_resolve_content_falls_back_to_text_on_fetch_failure(monkeypatch):
+    def boom(url):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(agent, "fetch_image_bytes", boom)
+    content = agent.resolve_content(
+        {
+            "prompt": "what plant is this?",
+            "imageUrl": "https://s3.example/photo",
+            "imageFormat": "jpeg",
+        }
+    )
+    assert content == "what plant is this?"
+
+
+def test_resolve_content_ignores_unrecognized_image_format(monkeypatch):
+    monkeypatch.setattr(
+        agent,
+        "fetch_image_bytes",
+        lambda url: (_ for _ in ()).throw(AssertionError("should not fetch")),
+    )
+    content = agent.resolve_content(
+        {"prompt": "hi", "imageUrl": "https://s3.example/photo", "imageFormat": "bmp"}
+    )
+    assert content == "hi"
+
+
 # --- prompt resolution (ADR-0006) -------------------------------------------
 
 
