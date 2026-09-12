@@ -109,6 +109,19 @@ jobs:
         if: needs.changes.outputs.frontend == 'true'
         run: npm ci && npx ng build
         working-directory: frontend
+      # CLIENT_API_BASE_URL (frontend/src/app/core/config/client-api.config.ts) is baked into
+      # the build as the literal placeholder "__CLIENT_API_BASE_URL__" — there's no
+      # environments/ pipeline, so the real per-env API Gateway URL is substituted into the
+      # already-built JS here, post-build, using this stack's own CfnOutput.
+      - name: Inject Client API URL
+        if: needs.changes.outputs.frontend == 'true'
+        run: |
+          API_URL=$(aws cloudformation describe-stacks --stack-name tendril-dev-client-api \
+            --region ${{ vars.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" --output text)
+          API_URL="${API_URL%/}"
+          grep -rl "__CLIENT_API_BASE_URL__" frontend/dist/tendril-web/browser/ \
+            | xargs -r sed -i "s|__CLIENT_API_BASE_URL__|$API_URL|g"
       - name: Sync frontend to S3
         if: needs.changes.outputs.frontend == 'true'
         run: aws s3 sync frontend/dist/tendril-web/browser/ s3://tendril-dev-web --delete
