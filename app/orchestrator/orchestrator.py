@@ -110,6 +110,10 @@ def _make_specialist_tool(
         if image_url and image_format:
             payload["imageUrl"] = image_url
             payload["imageFormat"] = image_format
+        # Reasoning trace: exactly what the orchestrator's model decided to ask this specialist —
+        # the closest reliable substitute for "why," since the model's own chain-of-thought isn't
+        # exposed by every model/isn't logged by Strands' default (print-based, unreliable) handler.
+        logger.info("specialist_call name=%s prompt=%r", name, prompt)
         try:
             resp = _get_agentcore_client().invoke_agent_runtime(
                 agentRuntimeArn=arn,
@@ -117,19 +121,27 @@ def _make_specialist_tool(
                 payload=json.dumps(payload).encode("utf-8"),
             )
             body = json.loads(resp["response"].read())
+            result_text = body.get("result", "")
             logger.info(
-                "specialist_call name=%s duration_ms=%d outcome=ok",
+                "specialist_call name=%s duration_ms=%d outcome=ok result=%r",
                 name,
                 int((time.monotonic() - started) * 1000),
+                result_text[:500],
             )
-            return body.get("result", "")
-        except Exception:
+            return result_text
+        except Exception as e:
+            # Never re-raise: a specialist failure must degrade to a tool-error string the
+            # orchestrator's own model can react to, not kill the whole turn. Re-raising here was
+            # observed, live, to sometimes propagate past this function's own async/thread
+            # boundary inside Strands' agent loop — bypassing handle_goal_submitted's own
+            # try/except entirely (no orchestration_failed log, an unhandled Lambda invocation
+            # error) rather than being caught as a graceful tool error every time.
             logger.exception(
                 "specialist_call name=%s duration_ms=%d outcome=error",
                 name,
                 int((time.monotonic() - started) * 1000),
             )
-            raise
+            return f"The '{name}' specialist is unavailable right now ({e}). Try another approach."
 
     return call_specialist
 

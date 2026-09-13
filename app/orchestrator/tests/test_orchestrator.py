@@ -94,17 +94,19 @@ def test_specialist_tool_calls_invoke_agent_runtime(monkeypatch):
     }
 
 
-def test_specialist_tool_propagates_errors(monkeypatch):
+def test_specialist_tool_degrades_to_error_string_instead_of_raising(monkeypatch):
+    # Regression: re-raising here was observed, live, to sometimes propagate past this
+    # function's own async/thread boundary inside Strands' agent loop, bypassing
+    # handle_goal_submitted's own try/except entirely (an unhandled Lambda invocation error,
+    # silently masked by EventBridge's automatic retry) instead of a graceful tool-error result.
     fake_client = FakeAgentCoreClient(raise_on_invoke=RuntimeError("unreachable"))
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
     tool_fn = handler._make_specialist_tool("hello", "arn:x", "desc", "g1")
-    try:
-        tool_fn("prompt")
-        raised = False
-    except RuntimeError:
-        raised = True
-    assert raised
+    result = tool_fn("prompt")
+
+    assert "hello" in result
+    assert "unreachable" in result
 
 
 def test_build_tools_one_per_manifest_entry(monkeypatch):
