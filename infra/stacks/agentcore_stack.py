@@ -285,22 +285,28 @@ class AgentCoreStack(Stack):
         # (`memory.enabled: true`). Wildcarded to the knowledge-base resource type, not a
         # specific id — MemoryStack deploys independently, so its real id isn't known here at
         # synth time (same posture as the prompt/guardrail wildcards above).
+        #
+        # All actions use the "bedrock:" IAM prefix, NOT "bedrock-agent:"/"bedrock-agent-runtime:"
+        # (the boto3 *client* names) — confirmed via a real AccessDeniedException naming
+        # "bedrock:ListKnowledgeBases" as the required action when this was first granted under
+        # the (wrong) client-matching prefix. Same quirk as GetPrompt/GetGuardrail above, just not
+        # applied here the first time.
         if (memory_config or {}).get("enabled"):
             role.add_to_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock-agent-runtime:Retrieve"],
+                    actions=["bedrock:Retrieve"],
                     resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
                 )
             )
             role.add_to_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock-agent:IngestKnowledgeBaseDocuments"],
+                    actions=["bedrock:IngestKnowledgeBaseDocuments"],
                     resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
                 )
             )
             role.add_to_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock-agent:ListKnowledgeBases", "bedrock-agent:ListDataSources"],
+                    actions=["bedrock:ListKnowledgeBases", "bedrock:ListDataSources"],
                     resources=["*"],  # ListX actions have no ARN resource type to scope to
                 )
             )

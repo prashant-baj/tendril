@@ -355,11 +355,11 @@ def test_memory_iam_scoped_to_the_specialist_that_enables_it():
             for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
                 act = stmt["Action"]
                 actions = act if isinstance(act, list) else [act]
-                if "bedrock-agent-runtime:Retrieve" in actions:
+                if "bedrock:Retrieve" in actions:
                     granted_on.append(logical_id)
 
         assert any("Vision" in lid for lid in granted_on), (
-            "vision (memory.enabled) should have bedrock-agent-runtime:Retrieve"
+            "vision (memory.enabled) should have bedrock:Retrieve"
         )
         assert not any("Fixturenomemory" in lid for lid in granted_on), (
             "a specialist without memory.enabled must not get the grant"
