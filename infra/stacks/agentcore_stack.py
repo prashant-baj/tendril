@@ -61,8 +61,11 @@ TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
 
 # The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
 # source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
+# goal.message.received (PA-02) is the same source, published by the goal-message handler for
+# every chat-thread turn after the first.
 GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
+GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
 
 
 class AgentCoreStack(Stack):
@@ -223,6 +226,19 @@ class AgentCoreStack(Stack):
             ),
         )
         goal_submitted_rule.add_target(targets.LambdaFunction(self.orchestrator))
+
+        # EventBridge: goal.message.received -> orchestrator (PA-02) — every chat-thread turn
+        # after the first, mirroring GoalSubmittedRule exactly. No new IAM: the Client API
+        # Lambda's events:PutEvents grant isn't scoped by detail-type.
+        goal_message_received_rule = events.Rule(
+            self,
+            "GoalMessageReceivedRule",
+            rule_name=f"{prefix}-goal-message-received",
+            event_pattern=events.EventPattern(
+                source=[GOAL_EVENT_SOURCE], detail_type=[GOAL_MESSAGE_RECEIVED_DETAIL_TYPE]
+            ),
+        )
+        goal_message_received_rule.add_target(targets.LambdaFunction(self.orchestrator))
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 

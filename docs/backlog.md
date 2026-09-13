@@ -4,7 +4,27 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-13, later still (configured + deployed four new specialists —
+**Last updated:** 2026-09-13, latest (built, tested, and deployed **PA-01/PA-02/PA-03 together** —
+the orchestrator now proposes a real, structured `Plan`+`Task` list via Strands' verified
+`structured_output_model` mechanism (no specialist changes needed), a full chat thread lets the
+gardener discuss/revise it or answer a clarifying question, an explicit **Approve** action is a
+synchronous, deterministic status flip (not event-routed — a real, documented deviation from the
+original design, since approval needs no model reasoning), and goal photos render for real in Goal
+Detail. Frontend: `HttpGoalApi` replaces the mocked reads; Home splits into real "Goals in
+progress"/"Needs your attention" sections; the old mockup-only trace/follow-up UI and models were
+deleted, not repurposed. Deployed to `dev` (`client-api` → `agentcore` → frontend) and smoke-tested
+live against a real goal, including a full propose → chat-revise → approve round-trip (the model
+correctly incorporated a follow-up correction — "I already water daily" — and revised the plan
+accordingly). **Found + fixed a real IAM bug**: `getGoalDetail`'s presigned photo `downloadUrl`
+403'd on actual fetch — `client_api_stack.py` only ever granted the garden handler `s3:PutObject`
+(OB-02's upload flow), never `s3:GetObject`; `generate_presigned_url()` had signed it successfully
+regardless, masking the gap until something really tried to fetch it. Fixed with
+`media_bucket.grant_read(garden_handler)`, redeployed, re-verified live (HTTP 200). All three
+stories flip to ✅; `data-architecture.md` and `stories/plan-approval.md` updated to match what was
+actually built, including the `plan.approval.responded` event's removal. See
+`stories/plan-approval.md` for full detail.)
+
+**Earlier, 2026-09-13:** configured + deployed four new specialists —
 **agronomy, irrigation, pest_disease, pruning** — each with a real prompt/guardrail/registry
 entry matching `vision`'s pattern, ahead of PA-01 per direct instruction. Found + fixed a real
 `cdk synth` bug (AgentCore `runtime_name` rejects hyphens — `"pest-disease"` → `"pest_disease"`).
@@ -89,9 +109,9 @@ A quick-glance grouping of the same rows below by status — the ranked table re
 source of truth (rank, dependencies, notes); this section is just a faster read. Regenerate it by
 eye whenever a Status cell changes below.
 
-**✅ Completed (16)**
-OB-01 · OB-02 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PG-06 · PG-05 · TF-02 · TF-03 ·
-TF-04 · PG-01 · PG-03 · PG-04
+**✅ Completed (19)**
+OB-01 · OB-02 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PA-01 · PA-02 · PA-03 · PG-06 ·
+PG-05 · TF-02 · TF-03 · TF-04 · PG-01 · PG-03 · PG-04
 
 **◐ In progress (10)**
 AF-03 (tools — manual dev smoke test pending) · AF-04 (real guardrail content now exists for 4
@@ -101,14 +121,11 @@ specialists; confirmed `pest_disease` over-block still needs the eval-scenario r
 (pre-commit gitleaks missing) · PG-02 (prompt scope/refusal framing not yet added) · TF-07 (no
 prod deploy path yet) · TF-06 (frontend has no formal per-screen stories)
 
-**☐ Backlog (7, ranked)**
-1. **PA-01** — orchestrator proposes a structured Plan (rank 13, next up)
-2. **PA-03** — show the goal's photo(s) in Goal Detail (rank 14)
-3. **PA-02** — conversational plan approval, chat + explicit Approve (rank 15)
-4. *(not yet storied)* Tasks & Activity on real data (rank 16)
-5. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 17)
-6. **AF-06** — external data-source tools for specialists, researched but deferred (rank 18)
-7. **OB-03** — real plant photo, narrowed scope (rank 34)
+**☐ Backlog (4, ranked)**
+1. *(not yet storied)* Tasks & Activity on real data (rank 16)
+2. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 17)
+3. **AF-06** — external data-source tools for specialists, researched but deferred (rank 18)
+4. **OB-03** — real plant photo, narrowed scope (rank 34)
 
 **Not on the board:** AF-02 (rank 9) — deliberately **skipped**, not backlog: a pure rename with
 no new capability, superseded by `vision.json` already proving the "one codebase, many
@@ -139,9 +156,9 @@ specialists" pattern.
 | 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ◐ | AF-01 | `app/tools/weather/` (Lambda + IAM Function URL, real Open-Meteo forecast) + tool-agnostic HTTP binding in `agents/hello_agent/agent.py` (SigV4-signed) + per-specialist IAM execution roles (`_make_agent_role`, replacing one shared role). `vision.json` declares `tools: ["weather"]`. Unit + CDK tests green; real `cdk synth` confirms scoped IAM. Only gap: manual dev smoke test not yet run (needs deploy). |
 | 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ◐ | AF-01 | Real, domain-reworded (not copy-pasted) denied-topic policies now exist for agronomy/irrigation/pest_disease/pruning (2026-09-13). **Confirmed still open:** a live smoke test found `pest_disease`'s `UnsafeChemicalUse` topic over-blocking a legitimate, safe answer — the eval-scenario proof this story calls for ("safe advice isn't over-blocked") is real, necessary follow-up work, not hypothetical. |
 | 12 | AF | AF-05 | Memory & Context: per-garden memory for every specialist | ◐ | AF-01, AF-03 | `infra/stacks/memory_stack.py` (Bedrock KB on S3 Vectors — pay-per-use, not OpenSearch Serverless) + per-garden `MemoryManager`/`BedrockKnowledgeBaseStore` in the template + `context_manager="auto"` + per-specialist IAM (mirrors AF-03). Scoped per-garden not per-user (no auth yet). Open: context pinning (needs session continuity, not yet built) and the manual dev smoke test. |
-| 13 | PA | PA-01 | The orchestrator proposes a structured Plan | ☐ | WS-04 | `docs/roadmap.md` Phase 4.5. `stories/plan-approval.md`. Replaces today's free-text `orchestrator_result` with real `Plan`/`Task` DynamoDB entities + `GET /gardens/{id}/goals[/{goalId}]` read endpoints; riskiest part is making the model's output reliably structured (fail-open to a single raw-text task if it doesn't parse). |
-| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ☐ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media (never a public bucket). Shares its `generate_download_url` helper with OB-03 (rank 34) rather than duplicating it — whichever ships first extracts it. |
-| 15 | PA | PA-02 | Conversational plan approval (chat + explicit Approve) | ☐ | PA-01 | `docs/roadmap.md` Phase 5. `stories/plan-approval.md`. New chat (`Message` entity) + explicit, deterministic `POST /plans/{id}/approve` (approval is never inferred from free text). **Real, documented scope call:** does *not* build `SnapshotSessionManager`/`AgentStateBucket` session-resume yet — each chat turn is a fresh, stateless orchestrator invocation instead; true session-resume is deferred to rank 17 below. Approved goals surface under Home's "Goals in progress"; a real (not fictitious) "Waiting on you" indicator covers goals still awaiting approval. |
+| 13 | PA | PA-01 | The orchestrator proposes a structured Plan | ✅ | WS-04 | `docs/roadmap.md` Phase 4.5. `stories/plan-approval.md`. Real `Plan`/`Task` DynamoDB entities + `GET /gardens/{id}/goals[/{goalId}]`. Structured output via Strands' real `structured_output_model` mechanism (verified against installed source), applied only at the orchestrator's synthesis step — no specialist changes needed. Deployed + smoke-tested live in `dev`. |
+| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ✅ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media via a shared `_generate_download_url` helper (OB-03, rank 34, will reuse it). Deployed + smoke-tested live. |
+| 15 | PA | PA-02 | Conversational plan approval (chat + explicit Approve) | ✅ | PA-01 | `docs/roadmap.md` Phase 5. `stories/plan-approval.md`. Real chat (`Message` entity) + explicit, deterministic approve. **Deviation from the original event-based design:** approve is a fully synchronous Client API operation (no model reasoning needed, so no event/orchestrator round-trip) — `plan.approval.responded` was never implemented. Still does *not* build `SnapshotSessionManager`/`AgentStateBucket` session-resume — each chat turn is a fresh, stateless orchestrator invocation; true session-resume stays deferred to rank 17. Approved goals surface under Home's "Goals in progress"; a real "Needs your attention" section covers goals still awaiting approval. Deployed + smoke-tested live — a real goal correctly consulted multiple specialists and produced a real Plan. |
 | 16 | — | — | *(not yet storied)* Tasks & Activity on real data | ☐ | WS-04 | `docs/roadmap.md` Phase 6 — replaces `MockTaskApi`/`MockActivityApi`. Write the story once Phase 5 ships. |
 | 17 | — | — | *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` follow-ups | ☐ | AF-05, PA-02 | `docs/roadmap.md` Phase 7.5+ — builds the `SnapshotSessionManager`/`AgentStateBucket` design PA-02 deliberately deferred, plus the tracker/scheduler Lambda (`app/tracker/`, not yet scaffolded) and `TasksDueIndex` GSI (`data-architecture.md` §2/§9). Prerequisite for using photos to compare progress over time (see "Carried forward" below). |
 | 18 | AF | AF-06 | External data-source tools for specialists (researched, deferred) | ☐ | AF-03, PA-01 | `stories/agent-factory.md`. Researched real candidates (Pl@ntNet, Plantix, SoilGrids, Agmarknet/data.gov.in) 2026-09-13 — **deliberately not built**; every specialist relies on the foundation model's own reasoning alone until PA-01 + a couple of real specialists surface an actual gap. Re-verify each candidate's live status/terms before picking it up (Plantix looks commercial; SoilGrids' own docs flag instability). |

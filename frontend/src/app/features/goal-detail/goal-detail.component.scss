@@ -43,90 +43,134 @@
   }
 }
 
-.stats {
+.photos {
+  padding: 16px;
   display: flex;
-  gap: 20px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--td-color-line-soft);
-}
-.stat-value {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--td-color-ink);
-  font-variant-numeric: tabular-nums;
-  font-family: var(--td-font-mono);
-}
-.stat-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--td-color-ink-tertiary);
-  margin-top: 2px;
-}
-
-.trace-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
   gap: 10px;
-  padding: 14px 16px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  text-align: left;
+  overflow-x: auto;
 
-  &:hover { background: var(--td-color-bg-app); }
-}
-.trace-icon { color: var(--td-color-primary); }
-.trace-toggle-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.trace-toggle-title { font-size: 14px; font-weight: 600; color: var(--td-color-ink); }
-.trace-toggle-sub { font-size: 12px; color: var(--td-color-ink-tertiary); margin-top: 2px; }
-.chevron {
-  color: var(--td-color-ink-tertiary);
-  transition: transform 150ms cubic-bezier(.2, 0, 0, 1);
-  &.open { transform: rotate(180deg); }
-}
-
-.trace-body {
-  padding: 4px 16px 16px 16px;
-  border-top: 1px solid var(--td-color-line-soft);
-}
-.trace-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 12px;
-  border-radius: var(--td-radius-md);
-  background: var(--td-color-bg-app);
-  color: var(--td-color-ink-tertiary);
-  font-size: 12px;
-  line-height: 18px;
-
-  span { color: var(--td-color-ink-secondary); text-wrap: pretty; }
+  img {
+    height: 160px;
+    width: auto;
+    border-radius: var(--td-radius-md);
+    object-fit: cover;
+  }
 }
 
 h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px 0; color: var(--td-color-ink); }
 
-.plan-list { display: flex; flex-direction: column; gap: 10px; }
-
-.follow-ups { padding: 16px; }
-.follow-ups-head {
+.section-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+
+  h2 { margin: 0; }
+}
+
+.plan-list { display: flex; flex-direction: column; gap: 10px; }
+
+.chat { padding: 16px; }
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.message {
+  align-self: flex-start;
+  max-width: 85%;
+  background: var(--td-color-bg-app);
+  border-radius: var(--td-radius-md);
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--td-color-ink);
+  text-wrap: pretty;
+
+  &.assistant {
+    align-self: flex-end;
+    background: var(--td-color-primary-surface);
+  }
+}
+
+// The reply's markdown is rendered via [innerHTML] (MarkdownPipe), so these child elements are
+// inserted at runtime, not compiled from this component's template — Angular's emulated view
+// encapsulation only scopes elements it compiled, so plain descendant selectors here would never
+// match. ::ng-deep (still functional, just deprecated) is the standard workaround for exactly
+// this "style dynamically-inserted HTML" case.
+.content {
+  ::ng-deep {
+    p { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
+    h1, h2, h3, h4 { font-size: 14px; font-weight: 700; margin: 0 0 4px 0; }
+    strong { font-weight: 700; }
+    ul, ol { margin: 4px 0 8px 0; padding-left: 18px; }
+    li { margin-bottom: 2px; }
+    code { background: var(--td-color-bg-page); border-radius: 4px; padding: 1px 4px; font-size: 13px; }
+  }
+}
+
+.typing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 14px;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--td-color-ink-tertiary);
+  animation: td-typing-bounce 1.2s infinite ease-in-out;
+
+  &:nth-child(2) { animation-delay: 0.15s; }
+  &:nth-child(3) { animation-delay: 0.3s; }
+}
+@keyframes td-typing-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+.empty {
+  font-size: 13px;
+  color: var(--td-color-ink-tertiary);
+}
+
+.reply {
+  display: flex;
   gap: 8px;
 
-  h2 { margin: 0; font-size: 16px; }
+  input {
+    flex: 1;
+    height: 44px;
+    padding: 0 12px;
+    border-radius: var(--td-radius-md);
+    border: 1px solid var(--td-color-line);
+    font-size: 14px;
+  }
 }
-.follow-ups-icon { color: var(--td-color-amber-accent); }
-.follow-ups p {
-  font-size: 13px;
-  line-height: 19px;
-  color: var(--td-color-ink-secondary);
-  margin: 6px 0 14px 0;
-  text-wrap: pretty;
+
+.btn-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: var(--td-radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: var(--td-color-primary);
+  color: var(--td-color-bg-surface);
+  white-space: nowrap;
+
+  &:hover:not(:disabled) { background: var(--td-color-primary-hover); }
+  &:active:not(:disabled) { transform: scale(.98); }
+  &:disabled { opacity: .6; cursor: not-allowed; }
 }
 
 .not-found {

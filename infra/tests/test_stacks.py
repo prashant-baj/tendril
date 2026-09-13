@@ -398,6 +398,18 @@ def test_goal_submitted_eventbridge_rule_targets_orchestrator():
             }
         ),
     )
+    # PA-02: every chat-thread turn after the first mirrors goal.submitted's rule exactly.
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": {
+                    "source": ["tendril.client-api"],
+                    "detail-type": ["goal.message.received"],
+                }
+            }
+        ),
+    )
     tpl.has_resource_properties(
         "AWS::Lambda::Function",
         Match.object_like(
@@ -512,6 +524,9 @@ def test_client_api_stack_synthesizes_garden_operations():
     assert "dynamodb:TransactWriteItems" in actions
     # OB-02: createMediaUpload signs a presigned PUT URL — the signing role needs s3:PutObject.
     assert "s3:PutObject" in actions
+    # PA-03: getGoalDetail signs a presigned GET url the same way — a real 403 was found live
+    # (generate_presigned_url succeeds regardless of IAM; only the real fetch reveals the gap).
+    assert "s3:GetObject*" in actions
     # WS-03: createGoal publishes goal.submitted via events:PutEvents.
     assert "events:PutEvents" in actions
 

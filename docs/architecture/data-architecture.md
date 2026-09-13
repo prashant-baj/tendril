@@ -42,12 +42,13 @@ deliberate GSI below.
 | Garden (canonical) | `GARDEN#{garden_id}` | `METADATA` | `name`, `vision`, `geolocation`, `climate_zone`, `owner_user_id` | |
 | Plant | `GARDEN#{garden_id}` | `PLANT#{plant_id}` | `species`, `variety`, `stage` | |
 | Goal | `GARDEN#{garden_id}` | `GOAL#{goal_id}` | `description`, `type`, `status`, `plant_id?` | `plant_id` present only if plant-scoped |
-| Plan | `GARDEN#{garden_id}` | `PLAN#{plan_id}` | `goal_id`, `success_criteria`, `status` | 1:1 with its goal (architecture.md §2) |
-| Task | `GARDEN#{garden_id}` | `TASK#{task_id}` | `plan_id`, `scope` (`plant`\|`garden`), `plant_id?`, `status`, `due_date`, **`gsi1pk`, `gsi1sk`** | see the `TasksDueIndex` GSI below |
-| Tracking | `GARDEN#{garden_id}` | `TRACKING#{tracking_id}` | `goal_id`, `plan_id?`, `task_id?`, `timestamp`, `observation`, `decision` | |
-| Event (capture-first log) | `GARDEN#{garden_id}` | `EVENT#{iso_timestamp}#{event_id}` | `type`, `payload` | `sk` is time-sortable — directly backs the frontend's Activity screen |
-| Media | `GARDEN#{garden_id}` | `MEDIA#{media_id}` | `s3_key`, `content_type`, `plant_id?`, `uploaded_at` | `s3_key` points into `MediaBucket` |
-| Notification | `USER#{user_id}` | `NOTIFICATION#{sent_at}#{notification_id}` | `channel`, `status`, `related_goal_id?`, `related_task_id?` | scoped by user, not garden — a user may have several gardens |
+| Plan | `GARDEN#{garden_id}` | `PLAN#{goal_id}` | `plan_id`(=`goal_id`), `goal_id`, `success_criteria`, `status` | **Implemented (PA-01)**. `plan_id` reuses `goal_id` directly (always 1:1, avoids a pointless extra id) — a deviation from this table's original sketch of a separate `plan_id`. |
+| Task | `GARDEN#{garden_id}` | `TASK#{goal_id}#{task_id}` | `task_id`, `plan_id`(=`goal_id`), `goal_id`, `title`, `detail`, `scope` (`plant`\|`garden`), `status` | **Implemented (PA-01)**, keyed `TASK#{goal_id}#{task_id}` — a deviation from the flat `TASK#{task_id}` (+ `gsi1pk`/`gsi1sk`) originally sketched here for the `TasksDueIndex` GSI. That GSI is Phase 7+ work and doesn't exist yet; this key instead makes "replace this goal's task set on a plan revision" one cheap prefix `Query`, not a scan. Revisit the key (or add the GSI alongside it) when the tracker/scheduler is actually built. |
+| Message | `GARDEN#{garden_id}` | `GOALMSG#{goal_id}#{iso_timestamp}#{message_id}` | `message_id`, `goal_id`, `role` (`user`\|`assistant`), `content`, `created_at` | **Implemented (PA-02)** — the chat thread backing conversational plan approval; not in the original design, added when PA-02 was scoped. `sk` is time-sortable, same trick as `Event` below. |
+| Tracking | `GARDEN#{garden_id}` | `TRACKING#{tracking_id}` | `goal_id`, `plan_id?`, `task_id?`, `timestamp`, `observation`, `decision` | Not yet implemented — Phase 6/7+. |
+| Event (capture-first log) | `GARDEN#{garden_id}` | `EVENT#{iso_timestamp}#{event_id}` | `type`, `payload` | `sk` is time-sortable — directly backs the frontend's Activity screen. Not yet implemented — Phase 6+. |
+| Media | `GARDEN#{garden_id}` | `MEDIA#{media_id}` | `s3_key`, `content_type`, `plant_id?`, `uploaded_at` | `s3_key` points into `MediaBucket`. `getGoalDetail` (PA-03) generates a fresh presigned GET url per read — never stored. |
+| Notification | `USER#{user_id}` | `NOTIFICATION#{sent_at}#{notification_id}` | `channel`, `status`, `related_goal_id?`, `related_task_id?` | scoped by user, not garden — a user may have several gardens. Not yet implemented. |
 
 ### GSI: `TasksDueIndex` (on `AppTable`)
 
@@ -188,10 +189,16 @@ previously named explicitly in AF-03.
 | Event (`detail-type`) | Source | Target | Carries |
 |---|---|---|---|
 | `goal.submitted` | Client API / Ingestion | Orchestrator | `garden_id`, `goal_id` |
-| `plan.approval.responded` | Client API (`/plans/{id}/approve`) | Orchestrator | `garden_id`, `goal_id`, `plan_id`, decision (approve/revise) |
+| `goal.message.received` | Client API (`/goals/{id}/messages`) | Orchestrator | `garden_id`, `goal_id` — **Implemented (PA-02)**. The orchestrator reloads the goal/plan/message history from `AppTable` rather than the event carrying it, same posture as `goal.submitted`. |
 | `followup.due` | Tracker/Scheduler | Orchestrator | `garden_id`, `goal_id`, `task_id` |
 | `followup.reply.received` | Notification | Orchestrator | `garden_id`, `goal_id`, reply content/media reference |
 | `media.uploaded` | S3 event notification on `MediaBucket` | Ingestion | `garden_id`, `media_id`, `s3_key` |
+
+**`plan.approval.responded` — not implemented as an event (PA-02 deviation):** approving a plan
+needs no model reasoning, only a deterministic status flip, so `POST /plans/{id}/approve` is
+handled synchronously in the Client API Lambda itself — it never publishes an event or reaches
+the orchestrator at all. This row is deliberately removed from the table above; §7 below reflects
+the real flow.
 
 Every orchestrator-bound event carries both `garden_id` and `goal_id` so the orchestrator's
 `AppTable` reads stay single-partition queries (§2) — never a lookup by `goal_id` alone.
@@ -210,26 +217,39 @@ Every orchestrator-bound event carries both `garden_id` and `goal_id` so the orc
 
 ---
 
-## 7. Data flow: goal submission → orchestrator → specialist → HITL approval
+## 7. Data flow: goal submission → orchestrator → specialist → conversation → approval
+
+**As actually implemented (PA-01/PA-02) — see those stories' Context notes for why this departs
+from the original sketch below it:**
 
 ```
 User (UI) --POST /gardens/{id}/media--> Client API --presigned PUT--> MediaBucket
 User (UI) --POST /gardens/{id}/goals--> Client API
     Client API: validate, write Goal (status=Intake) to AppTable, write Media record
     Client API --EventBridge: goal.submitted (garden_id, goal_id)--> Orchestrator
-Orchestrator (new SnapshotSessionManager, session_id=goal_id):
-    read Goal + Media + Garden context from AppTable (direct IAM)
-    query Garden Memory (scoped) + Horticultural Reference for relevant history/knowledge
-    InvokeAgentRuntime -> agronomy specialist, passing only the relevant fields (not raw table access)
-    agronomy calls the Weather tool API directly (its own registry-declared tool)
-    Orchestrator writes Plan + Tasks (status=PlanProposed) to AppTable
-    Orchestrator pushes the proposed plan over the WebSocket (ConnectionsTable lookup by user_id)
-    Orchestrator's HumanInTheLoop `ask` returns "interrupt"; session snapshot persisted to AgentStateBucket
-User (UI) --POST /plans/{id}/approve--> Client API
-    Client API --EventBridge: plan.approval.responded--> Orchestrator
-Orchestrator: resumes the SAME session_id from AgentStateBucket, writes Plan status=Approved,
-    schedules follow-ups (Task.due_date + gsi1 attributes for TasksDueIndex)
+Orchestrator (fresh Agent — no SnapshotSessionManager; see PA-02's Context note):
+    read Goal + Media from AppTable (direct IAM)
+    InvokeAgentRuntime -> whichever specialist(s) are relevant, chaining vision's identification
+        into the others when a photo is attached
+    Orchestrator's own agent: one normal turn (tool-calling), then one prompt-less
+        structured_output_model call on the same agent instance to extract {reply, updated_plan?}
+    If updated_plan: writes Plan + Tasks (status=PlanProposed) to AppTable; Goal.status=PlanProposed
+    Writes an assistant Message either way
+User (UI) --POST /gardens/{id}/goals/{id}/messages--> Client API
+    Client API: write a user Message, --EventBridge: goal.message.received (garden_id, goal_id)--> Orchestrator
+Orchestrator: reconstructs a fresh Agent from the goal + current Plan/Tasks + full Message
+    history read back from AppTable (no live session to resume), runs the same turn shape as
+    above — may revise the Plan, or just ask a clarifying question (updated_plan absent)
+User (UI) --POST /gardens/{id}/plans/{id}/approve--> Client API
+    Client API: synchronous update_item, Plan.status=Approved, Goal.status=Approved — no event,
+    no model call (approval needs no reasoning, only a deterministic status flip)
 ```
+
+**As originally sketched (not built — kept for context on what's still open):** a
+`SnapshotSessionManager`-based live session resume, a WebSocket push of the proposed plan, and
+scheduling follow-ups (`Task.due_date` + `gsi1` attributes for `TasksDueIndex`) on approval. All
+three remain real, undone work — the tracker/scheduler and true session-resume are Phase 7.5+
+(`docs/backlog.md`), and the WebSocket push channel is still carried-forward, future work.
 
 ---
 

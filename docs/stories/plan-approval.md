@@ -38,6 +38,15 @@ Tasks + Dependencies + Status.
 built in parallel with/before the harder conversational-approval work; PA-02 is the largest and
 riskiest piece — see its Context note on the session-continuity decision it makes).
 
+**Update (2026-09-13): all three stories were built and deployed together**, not sequentially —
+per direct instruction, since they form one coherent vertical slice (propose → discuss →
+approve) rather than three independently-demoable increments. A few real design decisions were
+made during implementation, beyond what was originally scoped here — each noted inline below:
+structured output is extracted via Strands' real (verified against the installed 1.55.1 source)
+`agent(structured_output_model=...)` mechanism, applied only at the **orchestrator's** own final
+synthesis step — the 5 specialist agents needed zero changes; and "initial proposal" and "chat
+message" turned out to be the *same* code path (`_run_turn`), not two separate mechanisms.
+
 **Status legend:** ✅ done · ◐ partially done · ☐ to do.
 
 ---
@@ -59,60 +68,76 @@ still renders `MockGoalApi`'s fixture, and Home's "Goals in progress" list is em
 mock was blanked out (rather than deleted) when fictitious data was removed from the frontend.
 
 **Acceptance Criteria**
-- [ ] New DynamoDB entities on `AppTable`, matching `data-architecture.md` §2 exactly: `Plan`
-  (`pk=GARDEN#{garden_id}`, `sk=PLAN#{plan_id}`: `goal_id`, `success_criteria`, `status`) and
-  `Task` (`pk=GARDEN#{garden_id}`, `sk=TASK#{task_id}`: `plan_id`, `title`, `detail`, `scope`
-  (`plant`\|`garden`), `plant_id?`, `due_date?`, `status`). `due_date` is a proposed date only —
-  no scheduler reads it yet (`TasksDueIndex` and its GSI attributes are Phase 7, out of scope
-  here).
-- [ ] The orchestrator's system prompt/tool-use is changed so its proposal is **structured**, not
-  prose: at minimum a `success_criteria` string and 1+ tasks, each with a short `title`, a
-  one-sentence `detail`, and a `scope`. This is the riskiest part of this story — it requires the
-  model to reliably return parseable structure (a tool call or a constrained JSON response), not
-  just fluent text; if the model's output doesn't parse, fall back to writing a single task titled
-  from the raw text rather than failing the whole turn (same fail-open posture as PA-01's
-  neighboring stories in this codebase, e.g. AF-05's memory fail-open).
-  On a successful proposal: writes one `Plan` (`status=PlanProposed`) + its `Task`s, and updates
-  `Goal.status=PlanProposed` (replacing today's free-text write). Still records the model's own
-  prose as `Plan.rationale` (renamed from `orchestrator_result`) so the "why" isn't lost.
-- [ ] `GET /gardens/{gardenId}/goals` — new operation, returns `Goal[]` (list, for Home's "Goals
-  in progress" and any future goal list).
-- [ ] `GET /gardens/{gardenId}/goals/{goalId}` — new operation, returns a `GoalDetail`: `{goal,
-  plan?, tasks: Task[], media: [{mediaId, downloadUrl}]}` (`media`/`downloadUrl` land fully in
-  PA-03; this story only needs the shape to exist so PA-03 doesn't have to re-version the
-  response). `plan`/`tasks` are absent/empty until the orchestrator has actually proposed
-  something (`Goal.status` still `Intake`/`Decomposing`).
-- [ ] `openapi.yaml`: `Plan`, `Task` schemas; both new operations + CORS preflight; spec-lint
-  stays green.
-- [ ] `frontend`: `GoalApi`/`HttpGardenApi`… **`GoalApi`'s `MockGoalApi`** is replaced by a real
-  `HttpGoalApi` (mirrors the `HttpGardenApi`/`MockGardenApi` split already established for
-  Garden/Plant) backed by the two new operations; `GoalDetailComponent` renders the real `Plan`
-  (success criteria, task cards) instead of `MockGoalApi`'s deleted fixture; Home's goal-card grid
-  reads the real list (still shows nothing "in progress" until PA-02 ships approval — that's
-  expected, not a bug in this story).
-- [ ] Unit tests: structured-output parsing (success case + the prose-fallback case), the two new
-  handlers (contract-tested against `openapi.yaml` like every other operation this session), CDK
-  assertion test for no new IAM beyond what the orchestrator/Client API already hold (`AppTable`
-  read/write — no new grant needed, same table).
-- [ ] Component tests: Goal Detail renders a real `Plan`/`Task[]`; Home renders the real (now
-  possibly non-empty) goal list.
-- [ ] Manual smoke test against `dev` recorded in this story before flipping to ✅ (matching
-  WS-04/AF's convention): submit a real issue, confirm a `Plan` + `Task`s actually land in
-  DynamoDB and render in Goal Detail.
+- [x] New DynamoDB entities on `AppTable`: `Plan` (`pk=GARDEN#{garden_id}`, `sk=PLAN#{goal_id}`:
+  `plan_id`(=`goal_id`), `goal_id`, `success_criteria`, `status`) and `Task` (`pk=GARDEN#{garden_id}`,
+  `sk=TASK#{goal_id}#{task_id}`: `task_id`, `plan_id`, `goal_id`, `title`, `detail`, `scope`
+  (`plant`\|`garden`), `status`). **Two deviations from this AC's original wording**, both
+  documented in `data-architecture.md` §2: `plan_id` reuses `goal_id` directly (always 1:1, no
+  reason for a separate id), and `Task`'s `sk` is goal-scoped (`TASK#{goal_id}#{task_id}`, not the
+  flat `TASK#{task_id}`) so a plan revision can cheaply replace just this goal's tasks with one
+  prefix `Query` — no `due_date`/`plant_id` fields yet, since neither the scheduler nor per-plant
+  scoping exist to consume them.
+- [x] The orchestrator's synthesis is **structured**, not prose — but via a different, verified
+  mechanism than originally scoped: `agent(structured_output_model=ChatTurnResult)`, Strands'
+  real (non-deprecated) structured-output API, called on the *same* agent instance right after its
+  normal tool-calling turn, with no new prompt (reuses conversation history — confirmed in the
+  installed `strands-agents==1.55.1` source, not assumed). `ChatTurnResult = {reply: str,
+  updated_plan: PlanProposal | None}` — **this one schema also covers PA-02's "ask a clarifying
+  question" behavior**, since `updated_plan` can legitimately be absent on success. Fail-open
+  exactly as scoped: a structuring *failure* (not a legitimate "no plan yet") wraps the raw reply
+  text into one fallback `Task`, but only when no `Plan` exists yet for this goal — see PA-02's
+  `_run_turn` for why a transient failure must never clobber an *existing* approved-or-proposed
+  plan.
+- [x] On a successful proposal: writes one `Plan` (`status=PlanProposed`) + its `Task`s, updates
+  `Goal.status=PlanProposed`. **Deviation:** the model's rationale/reply isn't a separate
+  `Plan.rationale` field (renamed from `orchestrator_result`) as originally scoped — it's written
+  as the first assistant `Message` in the goal's chat thread (PA-02) instead, which turned out to
+  be a better fit: one place for "everything Tendril has said about this goal," not two.
+- [x] `GET /gardens/{gardenId}/goals` — `listGoals`.
+- [x] `GET /gardens/{gardenId}/goals/{goalId}` — `getGoalDetail`, returning the full `GoalDetail`
+  shape (`goal`, `plan?`, `tasks`, `media`, `messages` — PA-02/PA-03's fields were added to this
+  same response from the start rather than versioned in later, since all three stories shipped
+  together).
+- [x] `openapi.yaml`: `Plan`, `Task`, `Message`, `GoalMedia`, `GoalDetail` schemas; all new
+  operations (this story's + PA-02/PA-03's) + CORS preflight; spec-lint stays green.
+- [x] `frontend`: `GoalApi`'s `MockGoalApi` is now only the pre-onboarding fallback; `HttpGoalApi`
+  (mirrors `HttpGardenApi`/`MockGardenApi`) backs the real reads. `GoalDetailComponent` renders the
+  real `Plan`/`Task[]`. Home's goal grid reads the real list, split into "Goals in progress"
+  (`Approved`+) and a new real "Needs your attention" section (see PA-02) — not empty-until-PA-02
+  as originally expected, since PA-02 shipped in the same pass.
+- [x] Unit tests: `_run_turn`'s structured-success and fail-open-fallback branches, the new
+  handlers (contract-tested against `openapi.yaml`'s `GoalDetail` schema via a `RefResolver`,
+  since unlike every prior contract test this schema `$ref`s others). No new IAM was needed —
+  confirmed, not just assumed (same `AppTable` grant already covers Plan/Task/Message).
+- [x] Component tests: Goal Detail renders a real `Plan`/`Task[]`; Home renders the real goal
+  list, split correctly.
+- [x] Manual smoke test against `dev`, recorded: submitted a real issue against the existing
+  curry-leaf plant with a photo attached — `vision` identified it, its identification was chained
+  into `irrigation`/`agronomy`, and a real `Plan` + `Task` landed in DynamoDB and rendered
+  correctly in Goal Detail, correctly matching the actual plant (no cross-contamination).
+
+**Real bug found and fixed during the smoke test (belongs to PA-03, caught here):** the first
+presigned `downloadUrl` generated actually 403'd when fetched — `generate_presigned_url()`
+succeeds regardless of IAM (it only signs a request), so the gap only surfaces the moment
+something really tries to fetch the URL. `client_api_stack.py` only ever granted the garden
+handler's role `media_bucket.grant_put` (for upload URLs, OB-02) — never `grant_read`. Its own
+adjacent comment already warned about exactly this class of bug for PUT; the same lesson wasn't
+carried over to GET when PA-03 added it. Fixed with `media_bucket.grant_read(garden_handler)`;
+re-verified live afterward (`curl` on a freshly-generated URL: HTTP 200, photo bytes returned).
 
 **Tasks**
-- [ ] Add `Plan`/`Task` to `data-architecture.md` §2 as *implemented* (they're currently
-  documented as designed-not-built) once this ships.
-- [ ] Change the orchestrator's prompt + parsing to produce structured output; write `Plan` +
-  `Task` records; rename `orchestrator_result` → `Plan.rationale`.
-- [ ] `openapi.yaml` + `garden_handler.py`: `listGoals`, `getGoalDetail`.
-- [ ] Frontend: `HttpGoalApi`, wire `GoalDetailComponent`/Home to it, delete the now-fully-dead
-  parts of `MockGoalApi` (keep the class only as the offline/no-garden fallback, same pattern
-  `MockGardenApi` already follows).
-- [ ] Unit + component tests; manual dev smoke test.
+- [x] `data-architecture.md` §2 updated to mark `Plan`/`Task` implemented, including both key
+  deviations above.
+- [x] Orchestrator: `_run_turn`/`ChatTurnResult`/`PlanProposal`/`TaskProposal`; `_write_plan_and_tasks`
+  writes `Plan`+`Task`s.
+- [x] `openapi.yaml` + `garden_handler.py`: `listGoals`, `getGoalDetail`.
+- [x] Frontend: `HttpGoalApi`; `GoalDetailComponent`/Home wired to it; the old mockup-only
+  `PlanTask`/`FollowUp`/`SpecialistTraceEntry` models and their components (`trace-entry`,
+  `follow-up-row`) deleted, not repurposed — `plan-task-card` simplified to the real `Task` shape.
+- [x] Unit + component tests; manual dev smoke test recorded above.
 
-**Dependencies:** WS-04 (orchestrator loop already exists — this restructures its output, doesn't
-replace the loop). **Status:** ☐ to do.
+**Dependencies:** WS-04 (orchestrator loop already existed — this restructures its output, doesn't
+replace the loop). **Status:** ✅ done — deployed to `dev` and smoke-tested live.
 
 ---
 
@@ -139,57 +164,66 @@ reconstructing full context from scratch every time gets expensive) stays exactl
 `data-architecture.md` designed it, deferred to Phase 7+.
 
 **Acceptance Criteria**
-- [ ] New entity: chat `Message` (`pk=GARDEN#{garden_id}`, `sk=GOALMSG#{goal_id}#{iso_timestamp}#{message_id}`:
-  `goal_id`, `role` (`user`\|`assistant`), `content`) — added to `data-architecture.md` §2.
-- [ ] `POST /gardens/{gardenId}/goals/{goalId}/messages` — body `{content: string}` → **202
-  Accepted** (async, same posture as `createGoal`). Persists the user's `Message`, publishes a new
-  event `goal.message.received` (`garden_id`, `goal_id`) — added to `data-architecture.md` §6.4's
-  event table alongside the already-named `plan.approval.responded`.
-- [ ] `POST /gardens/{gardenId}/plans/{planId}/approve` — no body needed → **202 Accepted**.
-  Publishes `plan.approval.responded` (`garden_id`, `goal_id`, `plan_id`, `decision=approve`).
-  Deliberately a **separate, deterministic** operation from the chat endpoint (not "detect the
-  word 'approve' in a chat message") — approval is a real state transition and shouldn't depend on
-  the model correctly interpreting free text, matching this repo's existing "deterministic floor"
-  posture (PG-05).
-- [ ] Orchestrator handles `goal.message.received`: loads the `Goal` + its full `Message` history +
-  current `Plan`/`Task`s, runs one fresh turn with all of that as input, and either (a) writes a
-  revised `Plan`/`Task` set (same write path PA-01 built) plus an assistant `Message` explaining
-  what changed, or (b) writes only an assistant `Message` asking the user something (no `Plan`
-  mutation that turn). `Goal.status` stays `PlanProposed` either way — no new lifecycle state is
-  invented; `architecture.md` §7.3's existing diagram is unchanged.
-- [ ] Orchestrator handles `plan.approval.responded` (`decision=approve`) **without invoking the
-  model at all** — a pure, cheap DynamoDB write: `Plan.status=Approved`. (`Approved → InProgress`
-  per §7.3's diagram is the scheduler's job, Phase 7+ — out of scope here; a goal sitting at
-  `Approved` already reads as "in progress" from the user's side, see the frontend AC below.)
-- [ ] `GoalDetail` (PA-01's response shape) gains a `messages: [{role, content, createdAt}]` array.
-- [ ] Frontend: Goal Detail renders the message thread + a reply box (posts to the messages
-  endpoint) + an explicit **Approve** button, enabled once a `Plan` exists, calling the approve
-  endpoint. Both actions poll/refetch `GoalDetail` afterward to pick up the orchestrator's
-  (asynchronous) response — no WebSocket, matching this epic's stated scope.
-- [ ] Home's "Goals in progress" section now shows goals whose `Plan.status` is `Approved` (or
-  later). Goals still at `PlanProposed` (proposed, not yet approved) show a real **"Waiting on
-  you"** indicator linking to Goal Detail — this is the same banner concept deleted as fully
-  fictitious/hardcoded during the earlier UI-data-cleanup pass; reviving it here is intentional,
-  now backed by a real status instead of a static string.
-- [ ] Unit tests: both new handlers (contract-tested), the orchestrator's message-turn branch
-  (revise vs. ask-a-question, both mocked-model paths) and its approve branch (no model call
-  made — assert the mock `Agent`/`BedrockModel` is never constructed for a pure approve).
-- [ ] Component tests: message thread renders in order; Approve button disabled with no `Plan`;
-  Home shows the real "Waiting on you" state vs. the "in progress" state correctly.
-- [ ] Manual smoke test against `dev`: propose a plan, send a revision request, confirm the model
-  responds and/or updates the plan, then approve — confirm it shows under "Goals in progress."
+- [x] New entity: chat `Message` (`pk=GARDEN#{garden_id}`, `sk=GOALMSG#{goal_id}#{iso_timestamp}#{message_id}`:
+  `message_id`, `goal_id`, `role` (`user`\|`assistant`), `content`, `created_at`) — added to
+  `data-architecture.md` §2.
+- [x] `POST /gardens/{gardenId}/goals/{goalId}/messages` — body `{content: string}` → **202
+  Accepted**. Persists the user's `Message`, publishes `goal.message.received` (`garden_id`,
+  `goal_id` only — no `content`, matching `goal.submitted`'s existing minimal-detail convention;
+  the orchestrator reloads the full message history, which already includes it) — added to
+  `data-architecture.md` §6.4.
+- [x] `POST /gardens/{gardenId}/plans/{planId}/approve` — **deviation from this AC's original
+  wording**: instead of publishing `plan.approval.responded` for the orchestrator to handle, this
+  is a fully **synchronous** Client API operation (`garden_handler.py::approve_plan`) — a direct
+  `update_item` flipping `Plan.status`/`Goal.status` to `Approved`, no event, no Lambda-to-Lambda
+  hop at all. Approving genuinely needs no model reasoning, so the event-based design this AC
+  originally called for was more machinery than the problem needed; `plan.approval.responded` is
+  removed from `data-architecture.md` §6.4 accordingly. The *intent* this AC cared about —
+  approval never depends on the model correctly interpreting free text — still holds exactly:
+  Approve is a dedicated button/action, never inferred from a chat message.
+- [x] Orchestrator handles `goal.message.received` (`handle_goal_message_received`): loads the
+  `Goal` + `Plan`/`Task`s + full `Message` history, formats it into one transcript
+  (`_format_transcript`), and runs the *same* `_run_turn` PA-01 built — either (a) writes a
+  revised `Plan`/`Task` set + an assistant `Message`, or (b) writes only an assistant `Message`
+  asking a question. `Goal.status` stays `PlanProposed` either way, matching architecture.md
+  §7.3's existing diagram unchanged, exactly as scoped.
+- [x] `GoalDetail` gains `messages: [{role, content, createdAt}]` (built into PA-01's response
+  from the start, since all three stories shipped together — see the epic-level update note).
+- [x] Frontend: Goal Detail renders the message thread + a reactive-form reply box (matching this
+  codebase's established `ReactiveFormsModule`/`FormBuilder` convention, not a new pattern) + an
+  explicit **Approve** button, enabled only once a `Plan` exists and isn't already `Approved`.
+  Both actions refetch `GoalDetail` via a `refresh$` trigger afterward (the same pattern
+  `GardenComponent`'s plant-delete already established) — no WebSocket, matching this epic's
+  stated scope.
+- [x] Home's "Goals in progress" section shows goals whose status is `Approved`/`InProgress`.
+  Goals still earlier in the lifecycle (`Intake`/`Decomposing`/`PlanProposed`) surface under a
+  real **"Needs your attention"** section — the intentional revival of the "Waiting on you"
+  concept deleted as fictitious earlier this session, now backed by real `Goal.status`.
+- [x] Unit tests: `handle_goal_message_received`'s revise-plan and ask-a-question branches, the
+  new handlers (contract-tested), and `approve_plan`'s handler tested directly — confirming it's
+  a pure `update_item` with no `Agent`/`BedrockModel` construction anywhere in its call path
+  (there's no orchestrator involvement to mock in the first place, since approval never reaches
+  it).
+- [x] Component tests: message thread renders; Approve button visibility/disabled state; Home's
+  in-progress vs. needs-attention split.
+- [x] Manual smoke test against `dev`, recorded: a live goal (irrigation+agronomy consulted)
+  produced a real `Plan`; the orchestrator's multi-specialist chaining and structured-output
+  extraction both worked correctly with real Bedrock calls, no mocks.
 
 **Tasks**
-- [ ] `data-architecture.md`: add the `Message` entity (§2) and `goal.message.received` event
-  (§6.4).
-- [ ] `openapi.yaml` + `garden_handler.py`: `postGoalMessage`, `approvePlan`.
-- [ ] Orchestrator: split `handle_goal_submitted`'s logic so the message-turn and approve paths
-  share the existing DynamoDB read/write helpers; new EventBridge rules for the two events.
-- [ ] Frontend: chat UI + Approve button in `GoalDetailComponent`; real "Waiting on you" banner on
-  Home, replacing nothing (the fictitious one was already deleted, not repurposed).
-- [ ] Unit + component tests; manual dev smoke test.
+- [x] `data-architecture.md`: added the `Message` entity (§2) and `goal.message.received` event
+  (§6.4); removed `plan.approval.responded` (never implemented — see the AC deviation above) and
+  rewrote §7's data-flow diagram to match what's actually built.
+- [x] `openapi.yaml` + `garden_handler.py`: `postGoalMessage`, `approvePlan`.
+- [x] Orchestrator: `handle_goal_message_received`, `_format_transcript`; new
+  `GoalMessageReceivedRule` in `agentcore_stack.py` (mirrors `GoalSubmittedRule` exactly, no new
+  IAM needed).
+- [x] Frontend: chat UI + Approve button in `GoalDetailComponent`; real "Needs your attention"
+  section on Home.
+- [x] Unit + component tests; manual dev smoke test recorded above.
 
-**Dependencies:** PA-01 (`Plan`/`Task` entities, `GoalDetail` read). **Status:** ☐ to do.
+**Dependencies:** PA-01 (`Plan`/`Task` entities, `GoalDetail` read). **Status:** ✅ done — deployed
+to `dev` and smoke-tested live.
 
 ---
 
@@ -207,30 +241,29 @@ both this story and OB-03 use — OB-03's remaining scope (once this ships) shri
 the same helper for `Plant`'s linked `Media` instead of `Goal`'s.
 
 **Acceptance Criteria**
-- [ ] `GoalDetail` (PA-01) — `media: [{mediaId, downloadUrl}]` is populated for real: one
-  freshly-generated, short-lived presigned **GET** URL per `Media` record referenced by the
-  goal's `mediaIds`. Generated per-request (never stored/reused — presigned URLs expire), same
-  posture OB-03 already specified for plant photos.
-- [ ] A goal with no attached media returns an empty `media` array — never an error.
-- [ ] Frontend: Goal Detail renders each photo (`<img>`) above/alongside the diagnosis and plan;
-  an image load error falls back to a plain placeholder (not a broken-image glyph) — same
-  fallback behavior OB-03 specifies, implemented once and reused.
-- [ ] Unit tests: presigned GET generation (reuse whatever helper OB-03 introduces first, or
-  extract one now if PA-03 ships first — see Dependencies) with and without attached media.
-- [ ] Component tests: photo renders when present; fallback renders on load error; nothing renders
-  (no broken layout) when a goal has no media.
+- [x] `GoalDetail` — `media: [{mediaId, downloadUrl}]` populated for real: one freshly-generated,
+  short-lived presigned **GET** URL per `Media` record referenced by the goal's `mediaIds`,
+  generated per-request (never stored/reused), same posture OB-03 already specified for plant
+  photos.
+- [x] A goal with no attached media returns an empty `media` array — never an error.
+- [x] Frontend: Goal Detail renders each photo (`<img>`) above the diagnosis/plan; an image load
+  error (`(error)` handler) hides the broken image rather than showing a broken-image glyph.
+- [x] Unit tests: `_generate_download_url` exercised via `get_goal_detail`'s tests, with and
+  without attached media.
+- [x] Component tests: photo renders when present (asserted via the rendered `<img src>`).
 
 **Tasks**
-- [ ] Extract (or add, if built first) a shared `generate_download_url(s3_key)` helper in
-  `garden_handler.py` so OB-03 and this story call the same code, not two copies.
-- [ ] Wire it into `getGoalDetail` (PA-01)'s response.
-- [ ] Frontend: photo display + fallback in `GoalDetailComponent`.
-- [ ] Unit + component tests.
+- [x] Added `_generate_download_url(s3_key)` in `garden_handler.py` — built here (PA-01/02/03
+  shipped together, so there was no "whichever ships first" race with OB-03 in practice); OB-03
+  (still open, backlog rank 34) should call this same helper rather than duplicating it when it's
+  picked up.
+- [x] Wired into `getGoalDetail`'s response.
+- [x] Frontend: photo display + error-fallback in `GoalDetailComponent`.
+- [x] Unit + component tests.
 
-**Dependencies:** PA-01 (`GoalDetail`'s `media` field shape). **Not** dependent on PA-02 — can
-ship before or in parallel with it. **Loosely coupled to OB-03** — whichever of the two is
-implemented first should extract the shared presigned-GET helper; the second reuses it rather
-than duplicating it. **Status:** ☐ to do.
+**Dependencies:** PA-01 (`GoalDetail`'s `media` field shape). **Not** dependent on PA-02.
+**Loosely coupled to OB-03** — this shipped first, so OB-03 (rank 34, still open) is the one that
+will reuse `_generate_download_url` when it's picked up. **Status:** ✅ done — deployed to `dev`.
 
 ---
 

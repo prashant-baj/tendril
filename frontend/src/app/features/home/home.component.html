@@ -13,11 +13,23 @@
     </div>
   </section>
 
+  <!-- goals needing your attention -->
+  @if (goalsNeedingAttention().length > 0) {
+    <section>
+      <h2 class="section-title">Needs your attention</h2>
+      <div class="goal-grid">
+        @for (goal of goalsNeedingAttention(); track goal.goalId) {
+          <td-goal-card [goal]="goal" />
+        }
+      </div>
+    </section>
+  }
+
   <!-- goals -->
   <section>
     <h2 class="section-title">Goals in progress</h2>
     <div class="goal-grid">
-      @for (goal of goals(); track goal.goalId) {
+      @for (goal of goalsInProgress(); track goal.goalId) {
         <td-goal-card [goal]="goal" />
       }
     </div>

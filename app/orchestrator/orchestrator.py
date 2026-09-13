@@ -1,34 +1,33 @@
-"""Orchestrator Lambda — Strands agent loop triggered by `goal.submitted` (WS-02/WS-04, ADR-0012).
+"""Orchestrator Lambda — Strands agent loop triggered by `goal.submitted`/`goal.message.received`
+(WS-02/WS-04, ADR-0012, PA-01/PA-02).
 
-Invoked **asynchronously** by an EventBridge rule (`AgentCoreStack`) — never reachable from the
-Client API's synchronous request path (ADR-0004). On wake it:
+Invoked **asynchronously** by EventBridge rules (`AgentCoreStack`) — never reachable from the
+Client API's synchronous request path (ADR-0004). Two entry points share one mechanism:
 
-1. Loads the submitted Goal from `AppTable` (data-architecture.md §2). If the goal has an
-   attached photo (`media_ids`), resolves a short-lived presigned S3 **GET** URL for the first
-   one — the orchestrator is the trusted-tier exception that holds `MediaBucket` IAM (ADR-0013);
-   specialists never do, so the URL (not direct S3 access) is how a photo reaches them, exactly
-   the design data-architecture.md §4 sketched as an open option and this resolves.
-2. Builds a Strands `Agent` whose tools are the registered specialists (agents-as-tools,
-   ADR-0012) — each tool calls AgentCore's `InvokeAgentRuntime` against that specialist's
-   deployed runtime, passing the same image URL to every specialist uniformly (config-driven:
-   each specialist's own template code — `agents/hello_agent/agent.py`'s `resolve_content` —
-   decides whether its prompt/model actually needs it, not the orchestrator). Which specialists
-   exist comes from `AGENT_MANIFEST` (an env var built by `AgentCoreStack` at synth time from
-   `agents/registry/*.json` + the runtimes it actually provisioned — never discovered at runtime
-   via `ListAgentRuntimes`).
-3. Runs one turn, calling whichever specialist(s) its registry description suggests are
-   relevant (e.g. `vision`, once a photo is attached), and writes the result back onto the Goal
-   record so a future status endpoint (WS-05+) has something real to read.
-4. On any failure (specialist unreachable, malformed response, guardrail block), the Goal is
-   reverted to `Intake` with an `orchestrator_error` field — the lifecycle
-   (architecture.md §7.3) has no dedicated "Failed" state yet, so `Intake` doubles as
-   "needs re-triggering," which is more informative than leaving it stuck at `Decomposing`
-   with no other signal.
+1. `goal.submitted` (`handle_goal_submitted`) — the first turn on a new goal.
+2. `goal.message.received` (`handle_goal_message_received`) — every subsequent turn, after the
+   gardener replies in Goal Detail's chat thread or the model itself asked a question.
 
-Tracing: `Agent(trace_attributes={"session.id": goal_id, ...})` is Strands' own documented
-correlation mechanism (`.claude/skills/strands-agents/SKILL.md`) — this Lambda doesn't hand-wire
-a separate OTel exporter; structured `logger.info(...)` calls at each major step (specialist
-called, duration, outcome) cover the rest of ADR-0001's observability NFR for now.
+Both are "just a turn in an ongoing conversation" — this orchestrator never resumes a live Strands
+session across Lambda invocations (no `SnapshotSessionManager`; see `docs/stories/plan-approval.md`'s
+PA-02 Context note for why that's a deliberate scope decision, not an oversight). Instead, every
+turn after the first reconstructs enough context from DynamoDB (the goal, its current `Plan`/
+`Task`s if any, and the full `Message` history) and feeds it back into a **fresh** `Agent`.
+
+Each turn runs in two steps (`_run_turn`): first, a normal call so the model can call whichever
+specialist tools are relevant (agents-as-tools, ADR-0012 — which specialists exist comes from
+`AGENT_MANIFEST`, a deploy-time env var built by `AgentCoreStack` from `agents/registry/*.json`,
+never discovered at runtime); second, a **prompt-less** call on the *same* agent instance with
+`structured_output_model=ChatTurnResult` — Strands reuses the just-built conversation history for
+this (no new prompt, no re-running tool calls), extracting a `reply` string plus an optional
+`updated_plan`. This is what turns the model's reasoning into a real `Plan`/`Task` the gardener can
+review and approve, instead of one free-text paragraph — and it needs zero changes to the
+specialist agents themselves (`agents/hello_agent/agent.py`), since only the orchestrator's own
+final synthesis step is structured.
+
+On any failure, the Goal is reverted to `Intake` (submission) or left as-is with an apologetic
+chat message (a later turn) — the lifecycle (architecture.md §7.3) has no dedicated "Failed"
+state, so `Intake` doubles as "needs re-triggering."
 """
 
 from __future__ import annotations
@@ -39,9 +38,11 @@ import os
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import boto3
+from boto3.dynamodb.conditions import Key
+from pydantic import BaseModel, Field
 from strands import Agent, tool
 from strands.models import BedrockModel
 
@@ -92,6 +93,54 @@ def _get_s3():
     if _s3 is None:
         _s3 = boto3.client("s3")
     return _s3
+
+
+# --- Structured plan-proposal shapes (PA-01/PA-02) --------------------------------------------
+
+
+class TaskProposal(BaseModel):
+    title: str = Field(description="A short task name, a few words, e.g. 'Water deeply'.")
+    detail: str = Field(description="One concise sentence — what to actually do.")
+    scope: Literal["plant", "garden"] = "plant"
+
+
+class PlanProposal(BaseModel):
+    success_criteria: str = Field(description="One short sentence: how you'll know it worked.")
+    tasks: list[TaskProposal]
+
+
+class ChatTurnResult(BaseModel):
+    reply: str = Field(
+        description=(
+            "A short, conversational chat reply for the gardener — 2-4 short sentences, plain "
+            "prose. No markdown headings (no '#'/'##'/'###'), no bold-labeled sections, and no "
+            "restating the full task list — that's what the plan/task list already shows. Use "
+            "at most one short bullet list only if genuinely listing several distinct items, "
+            "never as the whole reply."
+        )
+    )
+    updated_plan: PlanProposal | None = None
+
+
+ORCHESTRATOR_SYSTEM_PROMPT = (
+    "You are Tendril's orchestrator. A gardener has submitted an issue about their "
+    "garden. Call whichever specialist tool(s) are actually relevant — a plant issue "
+    "can span more than one domain (e.g. watering AND nutrition, or a pest that's also "
+    "a disease), so consult more than one specialist when the issue plausibly touches "
+    "more than one area. If a photo is available, call a vision-capable specialist "
+    "first and pass along what it identifies to any other specialist you consult, so "
+    "they reason from the same starting point instead of re-diagnosing from scratch. "
+    "Then reply to the gardener like a text message, not a report: 2-4 short sentences, "
+    "plain conversational prose — no markdown headings, no bold-labeled sections, no "
+    "restating every specialist's answer. If you have enough information, propose a "
+    "short, concrete plan (a handful of specific tasks); the plan itself carries the "
+    "step-by-step detail, so your reply doesn't need to repeat it — just say what you "
+    "concluded and why in a sentence or two. If you genuinely need more information "
+    "first, ask one specific clarifying question instead of guessing — it's fine not "
+    "to propose a plan on this turn."
+)
+
+FALLBACK_TASK_TITLE_MAX_CHARS = 60
 
 
 def _make_specialist_tool(
@@ -168,6 +217,29 @@ def _load_goal(garden_id: str, goal_id: str) -> dict[str, Any] | None:
     return resp.get("Item")
 
 
+def _load_plan(garden_id: str, goal_id: str) -> dict[str, Any] | None:
+    resp = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLAN#{goal_id}"})
+    return resp.get("Item")
+
+
+def _load_tasks(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
+    resp = _get_table().query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"TASK#{goal_id}#")
+    )
+    return resp.get("Items", [])
+
+
+def _load_messages(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
+    # sk is GOALMSG#{goal_id}#{iso_timestamp}#{message_id} — a Query on this prefix comes back
+    # already time-ordered, same trick architecture.md §2 already uses for EVENT records.
+    resp = _get_table().query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"GOALMSG#{goal_id}#")
+    )
+    return resp.get("Items", [])
+
+
 def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
     """First attached photo -> (presigned GET URL, image format), or None if there isn't one
     or its Media record/content-type is missing/unrecognized. Only the first is used — a goal
@@ -198,6 +270,149 @@ def _update_goal(garden_id: str, goal_id: str, **fields: Any) -> None:
     )
 
 
+def _write_message(garden_id: str, goal_id: str, *, role: str, content: str) -> None:
+    message_id = uuid.uuid4().hex
+    created_at = datetime.now(UTC).isoformat()
+    _get_table().put_item(
+        Item={
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
+            "message_id": message_id,
+            "goal_id": goal_id,
+            "role": role,
+            "content": content,
+            "created_at": created_at,
+        }
+    )
+
+
+def _write_plan_and_tasks(garden_id: str, goal_id: str, plan: PlanProposal) -> None:
+    """Writes/replaces the goal's Plan + Task set. A revision always reflects the latest
+    proposal — any previously-proposed tasks for this goal are cleared first. `TASK#{goal_id}#*`
+    (not the flat `TASK#{task_id}` data-architecture.md §2 originally sketched) is what makes
+    that a single cheap prefix Query, not a table scan or a GSI — that sketch's key was optimized
+    for the TasksDueIndex GSI, which is Phase 7+ work and doesn't exist yet."""
+    table = _get_table()
+    existing = table.query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"TASK#{goal_id}#")
+    )
+    for item in existing.get("Items", []):
+        table.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+
+    table.put_item(
+        Item={
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"PLAN#{goal_id}",
+            "plan_id": goal_id,
+            "goal_id": goal_id,
+            "success_criteria": plan.success_criteria,
+            "status": "PlanProposed",
+        }
+    )
+    for t in plan.tasks:
+        task_id = uuid.uuid4().hex
+        table.put_item(
+            Item={
+                "pk": f"GARDEN#{garden_id}",
+                "sk": f"TASK#{goal_id}#{task_id}",
+                "task_id": task_id,
+                "plan_id": goal_id,
+                "goal_id": goal_id,
+                "title": t.title,
+                "detail": t.detail,
+                "scope": t.scope,
+                "status": "pending",
+            }
+        )
+
+
+def _apply_turn_result(garden_id: str, goal_id: str, turn: ChatTurnResult) -> None:
+    _write_message(garden_id, goal_id, role="assistant", content=turn.reply)
+    now = datetime.now(UTC).isoformat()
+    if turn.updated_plan is not None:
+        _write_plan_and_tasks(garden_id, goal_id, turn.updated_plan)
+        _update_goal(garden_id, goal_id, status="PlanProposed", updated_at=now)
+    else:
+        _update_goal(garden_id, goal_id, updated_at=now)
+
+
+def _run_turn(agent: Agent, prompt: str, *, synthesize_fallback_plan: bool) -> ChatTurnResult:
+    """Runs one turn: a normal call (tool-calling happens as usual), then a second, prompt-less
+    call on the *same* agent instance with structured_output_model — Strands reuses the just-built
+    conversation history for this (no new prompt, confirmed in strands' own agent.py docstrings),
+    so it never re-runs the tool calls, just extracts structure from what already happened.
+
+    Fails open: if the structured call itself errors, the turn isn't lost — the free-text reply
+    from the first call is still relayed. When `synthesize_fallback_plan` is set (there's no
+    existing Plan yet for this goal), the raw text is also wrapped into a single fallback Task
+    rather than leaving the gardener with nothing structured at all (PA-01's stated AC); when a
+    Plan already exists, a transient structuring failure must never silently clobber it, so no
+    plan mutation happens on that path."""
+    first = agent(prompt)
+    free_text = str(first).strip()
+    try:
+        structured = agent(structured_output_model=ChatTurnResult)
+        if structured.structured_output is not None:
+            return structured.structured_output
+        logger.warning("structured_output_empty; falling back to raw text")
+    except Exception:
+        logger.exception("structured_output_failed; falling back to raw text")
+
+    reply = free_text or "(no response)"
+    if not synthesize_fallback_plan:
+        return ChatTurnResult(reply=reply, updated_plan=None)
+
+    fallback_title = free_text[:FALLBACK_TASK_TITLE_MAX_CHARS] or "Review Tendril's notes"
+    return ChatTurnResult(
+        reply=reply,
+        updated_plan=PlanProposal(
+            success_criteria="Confirm with the gardener whether this addressed the issue.",
+            tasks=[
+                TaskProposal(title=fallback_title, detail=free_text or "No details.", scope="plant")
+            ],
+        ),
+    )
+
+
+def _format_transcript(
+    goal: dict[str, Any],
+    plan: dict[str, Any] | None,
+    tasks: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> str:
+    """Builds the prompt text for a chat-turn re-invocation. This orchestrator never resumes a
+    live Strands session (plan-approval.md's PA-02 Context note) — every turn after the first
+    reconstructs context from DynamoDB instead."""
+    parts = [f"Original issue: {goal.get('description', '')}"]
+    if plan:
+        parts.append(f"\nCurrent plan — success criteria: {plan.get('success_criteria', '')}")
+        if tasks:
+            parts.append("Current tasks:")
+            for t in tasks:
+                parts.append(f"- {t.get('title', '')}: {t.get('detail', '')}")
+    if messages:
+        parts.append("\nConversation so far:")
+        for m in messages:
+            speaker = "Gardener" if m.get("role") == "user" else "Tendril"
+            parts.append(f"{speaker}: {m.get('content', '')}")
+    parts.append(
+        "\nRespond to the gardener's latest message above. If they're asking for a change, "
+        "revise the plan. If you need more information first, ask a clarifying question "
+        "instead of guessing."
+    )
+    return "\n".join(parts)
+
+
+def _build_orchestrator_agent(garden_id: str, goal_id: str, image_url, image_format) -> Agent:
+    return Agent(
+        model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
+        system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
+        tools=_build_tools(garden_id, image_url, image_format),
+        trace_attributes={"session.id": goal_id, "garden.id": garden_id},
+    )
+
+
 def handle_goal_submitted(detail: dict[str, Any]) -> None:
     garden_id = detail["gardenId"]
     goal_id = detail["goalId"]
@@ -208,27 +423,12 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         return
 
     _update_goal(garden_id, goal_id, status="Decomposing")
+    _write_message(garden_id, goal_id, role="user", content=goal["description"])
 
     image = _resolve_image(garden_id, goal.get("media_ids") or [])
     image_url, image_format = image if image else (None, None)
 
-    agent = Agent(
-        model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
-        system_prompt=(
-            "You are Tendril's orchestrator. A gardener has submitted an issue about their "
-            "garden. Call whichever specialist tool(s) are actually relevant — a plant issue "
-            "can span more than one domain (e.g. watering AND nutrition, or a pest that's also "
-            "a disease), so consult more than one specialist when the issue plausibly touches "
-            "more than one area. If a photo is available, call a vision-capable specialist "
-            "first and pass along what it identifies to any other specialist you consult, so "
-            "they reason from the same starting point instead of re-diagnosing from scratch. "
-            "Then summarize what you learned into one clear, actionable takeaway for the "
-            "gardener — a few sentences is fine if multiple specialists contributed, but stay "
-            "concise and don't just restate each specialist's answer verbatim."
-        ),
-        tools=_build_tools(garden_id, image_url, image_format),
-        trace_attributes={"session.id": goal_id, "garden.id": garden_id},
-    )
+    agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format)
 
     message = goal["description"]
     if image_url:
@@ -237,25 +437,18 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         message += "\n\n(A photo of the affected plant is attached to this goal.)"
 
     try:
-        result = agent(message)
-        result_text = str(result)
+        turn = _run_turn(agent, message, synthesize_fallback_plan=True)
         # Explicit, not just Strands' streaming callback print: that relies on stdout being
         # flushed before Lambda freezes the execution environment, which isn't guaranteed and
         # has been observed to drop the final response from CloudWatch even on a successful run.
         logger.info(
-            "orchestration_result garden_id=%s goal_id=%s chars=%d: %s",
+            "orchestration_result garden_id=%s goal_id=%s has_plan=%s reply=%r",
             garden_id,
             goal_id,
-            len(result_text),
-            result_text,
+            turn.updated_plan is not None,
+            turn.reply[:500],
         )
-        _update_goal(
-            garden_id,
-            goal_id,
-            status="PlanProposed",
-            orchestrator_result=result_text,
-            updated_at=datetime.now(UTC).isoformat(),
-        )
+        _apply_turn_result(garden_id, goal_id, turn)
     except Exception as e:
         logger.exception("orchestration_failed garden_id=%s goal_id=%s", garden_id, goal_id)
         _update_goal(
@@ -267,9 +460,53 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         )
 
 
+def handle_goal_message_received(detail: dict[str, Any]) -> None:
+    garden_id = detail["gardenId"]
+    goal_id = detail["goalId"]
+
+    goal = _load_goal(garden_id, goal_id)
+    if not goal:
+        logger.error("goal_not_found garden_id=%s goal_id=%s", garden_id, goal_id)
+        return
+
+    plan = _load_plan(garden_id, goal_id)
+    tasks = _load_tasks(garden_id, goal_id)
+    # Already includes the newest user message — the Client API writes it before publishing this
+    # event, the same ordering create_goal already relies on for goal.submitted.
+    messages = _load_messages(garden_id, goal_id)
+
+    image = _resolve_image(garden_id, goal.get("media_ids") or [])
+    image_url, image_format = image if image else (None, None)
+
+    agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format)
+    transcript = _format_transcript(goal, plan, tasks, messages)
+
+    try:
+        turn = _run_turn(agent, transcript, synthesize_fallback_plan=plan is None)
+        logger.info(
+            "chat_turn_result garden_id=%s goal_id=%s has_plan=%s reply=%r",
+            garden_id,
+            goal_id,
+            turn.updated_plan is not None,
+            turn.reply[:500],
+        )
+        _apply_turn_result(garden_id, goal_id, turn)
+    except Exception as e:
+        logger.exception("chat_turn_failed garden_id=%s goal_id=%s", garden_id, goal_id)
+        _write_message(
+            garden_id,
+            goal_id,
+            role="assistant",
+            content=f"Sorry, something went wrong processing that ({e}). Please try again.",
+        )
+
+
 def handler(event: dict[str, Any], _context: Any) -> None:
     detail_type = event.get("detail-type")
-    if detail_type != "goal.submitted":
+    detail = event.get("detail") or {}
+    if detail_type == "goal.submitted":
+        handle_goal_submitted(detail)
+    elif detail_type == "goal.message.received":
+        handle_goal_message_received(detail)
+    else:
         logger.warning("unhandled_event detail_type=%s", detail_type)
-        return
-    handle_goal_submitted(event.get("detail") or {})

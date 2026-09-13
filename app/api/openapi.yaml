@@ -240,6 +240,111 @@ paths:
         httpMethod: POST
         uri: "__LAMBDA_INTEGRATION_URI__"
         passthroughBehavior: when_no_match
+    get:
+      operationId: listGoals
+      summary: List every goal submitted for a garden
+      responses:
+        "200":
+          description: The garden's goals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Goal"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+    get:
+      operationId: getGoalDetail
+      summary: >
+        Read a goal's full detail — its proposed/approved Plan and Tasks (if any), its attached
+        media (with freshly-generated presigned download URLs), and its chat message thread
+        (PA-01/PA-02/PA-03)
+      responses:
+        "200":
+          description: The goal's full detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoalDetail"
+        "404":
+          description: No such goal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+    post:
+      operationId: postGoalMessage
+      summary: >
+        Send a chat message about a goal — asks/adjusts the proposed plan; triggers the
+        orchestrator asynchronously (PA-02)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalMessageCreateRequest"
+      responses:
+        "202":
+          description: >
+            Message accepted — persisted and handed off for async orchestration, same posture
+            as createGoal. Not a synchronous result.
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plans/{planId}/approve:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/PlanId"
+    post:
+      operationId: approvePlan
+      summary: >
+        Approve a proposed plan (PA-02). A pure, deterministic status flip — never depends on
+        model behavior, so this is handled synchronously, not routed through the orchestrator.
+      responses:
+        "200":
+          description: Plan approved
+        "404":
+          description: No such plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
     options: *cors-preflight
 
 components:
@@ -253,6 +358,20 @@ components:
 
     PlantId:
       name: plantId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    GoalId:
+      name: goalId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    PlanId:
+      name: planId
       in: path
       required: true
       schema:
@@ -416,3 +535,85 @@ components:
           type: array
           items:
             type: string
+
+    Plan:
+      type: object
+      required: [planId, goalId, successCriteria, status]
+      properties:
+        planId:
+          type: string
+        goalId:
+          type: string
+        successCriteria:
+          type: string
+        status:
+          type: string
+          description: "\"PlanProposed\" or \"Approved\" (architecture.md §7.3)."
+
+    Task:
+      type: object
+      required: [taskId, title, detail, scope, status]
+      properties:
+        taskId:
+          type: string
+        title:
+          type: string
+        detail:
+          type: string
+        scope:
+          type: string
+          description: "\"plant\" or \"garden\"."
+        status:
+          type: string
+
+    Message:
+      type: object
+      required: [role, content, createdAt]
+      properties:
+        role:
+          type: string
+          description: "\"user\" or \"assistant\"."
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    GoalMedia:
+      type: object
+      required: [mediaId, downloadUrl]
+      properties:
+        mediaId:
+          type: string
+        downloadUrl:
+          type: string
+          description: Freshly-generated, short-lived presigned S3 GET URL — never stored/reused.
+
+    GoalDetail:
+      type: object
+      required: [goal, tasks, media, messages]
+      properties:
+        goal:
+          $ref: "#/components/schemas/Goal"
+        plan:
+          $ref: "#/components/schemas/Plan"
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/GoalMedia"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+
+    GoalMessageCreateRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1

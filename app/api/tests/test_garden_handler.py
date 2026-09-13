@@ -35,24 +35,40 @@ class FakeTable:
     def __init__(
         self,
         get_item_response=None,
+        get_item_responses=None,
         raise_on_get=None,
         raise_on_put=None,
         query_response=None,
+        query_responses=None,
         raise_on_query=None,
         raise_on_delete=None,
+        raise_on_update=None,
     ):
         self._get_item_response = get_item_response or {}
+        # sk -> response, checked before falling back to the flat default above — lets a single
+        # test model several distinct records (Goal/Plan/Media) behind one FakeTable, mirroring
+        # the orchestrator tests' equivalent `responses_by_sk`.
+        self._get_item_responses = get_item_responses or {}
         self.raise_on_get = raise_on_get
         self.raise_on_put = raise_on_put
         self.put_calls: list[dict] = []
         self._query_response = query_response or {"Items": []}
+        # A queue consumed in call order (get_goal_detail queries tasks then messages, each
+        # needing a different result) — falls back to the single flat response above when not
+        # given, so every existing single-query test keeps working unchanged.
+        self._query_responses = list(query_responses) if query_responses is not None else None
         self.raise_on_query = raise_on_query
         self.raise_on_delete = raise_on_delete
+        self.raise_on_update = raise_on_update
         self.delete_calls: list[dict] = []
+        self.update_calls: list[dict] = []
+        self.query_calls: list[dict] = []
 
     def get_item(self, Key):
         if self.raise_on_get:
             raise self.raise_on_get
+        if Key.get("sk") in self._get_item_responses:
+            return self._get_item_responses[Key["sk"]]
         return self._get_item_response
 
     def put_item(self, Item):
@@ -60,15 +76,26 @@ class FakeTable:
             raise self.raise_on_put
         self.put_calls.append(Item)
 
-    def query(self, KeyConditionExpression):
+    def query(self, **kwargs):
+        self.query_calls.append(kwargs)
         if self.raise_on_query:
             raise self.raise_on_query
+        if self._query_responses is not None:
+            index = len(self.query_calls) - 1
+            if index < len(self._query_responses):
+                return self._query_responses[index]
+            return {"Items": []}
         return self._query_response
 
     def delete_item(self, Key):
         if self.raise_on_delete:
             raise self.raise_on_delete
         self.delete_calls.append(Key)
+
+    def update_item(self, **kwargs):
+        if self.raise_on_update:
+            raise self.raise_on_update
+        self.update_calls.append(kwargs)
 
 
 class FakeS3:
@@ -705,6 +732,266 @@ def test_create_goal_eventbridge_failure_returns_500(monkeypatch):
     assert resp["statusCode"] == 500
 
 
+# --- list_goals / get_goal_detail / post_goal_message / approve_plan (PA-01/PA-02/PA-03) ----
+
+
+def test_list_goals_happy_path(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {"goal_id": "goal-1", "description": "leaves yellow", "status": "Intake"},
+                {
+                    "goal_id": "goal-2",
+                    "description": "pests",
+                    "type": "diagnosis",
+                    "status": "PlanProposed",
+                    "media_ids": ["m1"],
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event("GET", "/gardens/{gardenId}/goals", path_params={"gardenId": "g1"})
+    resp = handler.list_goals(event)
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == [
+        {
+            "goalId": "goal-1",
+            "description": "leaves yellow",
+            "type": "diagnosis",
+            "status": "Intake",
+        },
+        {
+            "goalId": "goal-2",
+            "description": "pests",
+            "type": "diagnosis",
+            "status": "PlanProposed",
+            "mediaIds": ["m1"],
+        },
+    ]
+
+
+def test_list_goals_missing_garden_id():
+    event = _event("GET", "/gardens/{gardenId}/goals", path_params=None)
+    resp = handler.list_goals(event)
+    assert resp["statusCode"] == 400
+
+
+def test_list_goals_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_query=RuntimeError("boom")))
+    event = _event("GET", "/gardens/{gardenId}/goals", path_params={"gardenId": "g1"})
+    resp = handler.list_goals(event)
+    assert resp["statusCode"] == 500
+
+
+def test_get_goal_detail_not_found(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "missing"},
+    )
+    resp = handler.get_goal_detail(event)
+    assert resp["statusCode"] == 404
+
+
+def test_get_goal_detail_missing_path_params():
+    event = _event("GET", "/gardens/{gardenId}/goals/{goalId}", path_params=None)
+    resp = handler.get_goal_detail(event)
+    assert resp["statusCode"] == 400
+
+
+def test_get_goal_detail_without_a_plan_yet(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {
+                "Item": {"goal_id": "goal-1", "description": "help", "status": "Decomposing"}
+            },
+            # No "PLAN#goal-1" entry — falls through to the default {} (no "Item"),
+            # matching real DynamoDB's actual "no such item" response shape.
+        },
+        query_responses=[{"Items": []}, {"Items": []}],  # tasks, then messages
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert "plan" not in body
+    assert body["tasks"] == []
+    assert body["media"] == []
+    assert body["messages"] == []
+
+
+def test_get_goal_detail_with_plan_tasks_media_and_messages(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {
+                "Item": {
+                    "goal_id": "goal-1",
+                    "description": "help",
+                    "status": "PlanProposed",
+                    "media_ids": ["media-1"],
+                }
+            },
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green again",
+                    "status": "PlanProposed",
+                }
+            },
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/tomato.jpg"}},
+        },
+        query_responses=[
+            {"Items": [{"task_id": "t1", "title": "Water", "detail": "Deeply", "scope": "plant"}]},
+            {
+                "Items": [
+                    {
+                        "role": "user",
+                        "content": "help",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "sk": "GOALMSG#goal-1#a",
+                    }
+                ]
+            },
+        ],
+    )
+    fake_s3 = FakeS3()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", fake_s3)
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert body["plan"] == {
+        "planId": "goal-1",
+        "goalId": "goal-1",
+        "successCriteria": "Leaves green again",
+        "status": "PlanProposed",
+    }
+    assert body["tasks"] == [
+        {
+            "taskId": "t1",
+            "title": "Water",
+            "detail": "Deeply",
+            "scope": "plant",
+            "status": "pending",
+        }
+    ]
+    assert len(body["media"]) == 1
+    assert body["media"][0]["mediaId"] == "media-1"
+    assert "g1/media-1/tomato.jpg" in body["media"][0]["downloadUrl"]
+    assert body["messages"] == [
+        {"role": "user", "content": "help", "createdAt": "2026-01-01T00:00:00+00:00"}
+    ]
+
+
+def test_post_goal_message_happy_path(monkeypatch):
+    fake_table = FakeTable()
+    fake_events = FakeEvents()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_events", fake_events)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/messages",
+        body={"content": "Can we water less often?"},
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.post_goal_message(event)
+
+    assert resp["statusCode"] == 202
+    assert len(fake_table.put_calls) == 1
+    message_item = fake_table.put_calls[0]
+    assert message_item["role"] == "user"
+    assert message_item["content"] == "Can we water less often?"
+    assert message_item["sk"].startswith("GOALMSG#goal-1#")
+    assert len(fake_events.put_calls) == 1
+    detail = json.loads(fake_events.put_calls[0][0]["Detail"])
+    assert detail == {"gardenId": "g1", "goalId": "goal-1"}
+    assert fake_events.put_calls[0][0]["DetailType"] == "goal.message.received"
+
+
+def test_post_goal_message_missing_content():
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/messages",
+        body={},
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.post_goal_message(event)
+    assert resp["statusCode"] == 400
+
+
+def test_post_goal_message_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_put=RuntimeError("boom")))
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/messages",
+        body={"content": "hi"},
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.post_goal_message(event)
+    assert resp["statusCode"] == 500
+
+
+def test_approve_plan_happy_path(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"plan_id": "goal-1", "status": "PlanProposed"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    resp = handler.approve_plan(event)
+
+    assert resp["statusCode"] == 200
+    assert len(fake_table.update_calls) == 2
+    plan_update, goal_update = fake_table.update_calls
+    assert plan_update["Key"] == {"pk": "GARDEN#g1", "sk": "PLAN#goal-1"}
+    assert plan_update["ExpressionAttributeValues"][":status"] == "Approved"
+    assert goal_update["Key"] == {"pk": "GARDEN#g1", "sk": "GOAL#goal-1"}
+    assert goal_update["ExpressionAttributeValues"][":status"] == "Approved"
+
+
+def test_approve_plan_not_found(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "missing"},
+    )
+    resp = handler.approve_plan(event)
+    assert resp["statusCode"] == 404
+
+
+def test_approve_plan_missing_path_params():
+    event = _event("POST", "/gardens/{gardenId}/plans/{planId}/approve", path_params=None)
+    resp = handler.approve_plan(event)
+    assert resp["statusCode"] == 400
+
+
 # --- contract test: responses conform to openapi.yaml's JSON Schema (WS-03) ----
 
 
@@ -780,6 +1067,51 @@ def test_list_plants_response_conforms_to_openapi_schema(monkeypatch):
         "items": spec["components"]["schemas"]["Plant"],
     }
     validate(instance=body, schema=schema)
+
+
+def test_get_goal_detail_response_conforms_to_openapi_schema(monkeypatch):
+    import jsonschema
+    import yaml
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(
+            get_item_responses={
+                "GOAL#goal-1": {
+                    "Item": {"goal_id": "goal-1", "description": "help", "status": "PlanProposed"}
+                },
+                "PLAN#goal-1": {
+                    "Item": {
+                        "plan_id": "goal-1",
+                        "goal_id": "goal-1",
+                        "success_criteria": "Healthy again",
+                        "status": "PlanProposed",
+                    }
+                },
+            },
+            query_responses=[{"Items": []}, {"Items": []}],
+        ),
+    )
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    # GoalDetail's schema $refs other component schemas (Goal/Plan/Task/...) — unlike the other
+    # contract tests' flat schemas, this needs a resolver rooted at the whole spec document to
+    # follow those "#/components/schemas/..." pointers.
+    resolver = jsonschema.RefResolver.from_schema(spec)
+    validator = jsonschema.Draft7Validator(
+        {"$ref": "#/components/schemas/GoalDetail"}, resolver=resolver
+    )
+    validator.validate(body)
 
 
 # --- handler() routing ---------------------------------------------------------
@@ -873,6 +1205,59 @@ def test_handler_routes_post_goals(monkeypatch):
     )
     resp = handler.handler(event, None)
     assert resp["statusCode"] == 202
+
+
+def test_handler_routes_get_goals(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/goals", path_params={"gardenId": "g1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
+def test_handler_routes_get_goal_detail(monkeypatch):
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(
+            get_item_responses={
+                "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}}
+            },
+            query_responses=[{"Items": []}, {"Items": []}],
+        ),
+    )
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
+def test_handler_routes_post_goal_messages(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/messages",
+        body={"content": "hi"},
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 202
+
+
+def test_handler_routes_post_plan_approve(monkeypatch):
+    monkeypatch.setattr(
+        handler, "_table", FakeTable(get_item_response={"Item": {"plan_id": "goal-1"}})
+    )
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
 
 
 def test_handler_unknown_route_returns_404():

@@ -86,6 +86,11 @@ class ClientApiStack(Stack):
         # OB-02: createMediaUpload signs a presigned PUT URL — the signing identity (this
         # Lambda's role) must actually be authorized for the action, or the URL 403s when used.
         media_bucket.grant_put(garden_handler)
+        # PA-03: getGoalDetail signs a presigned GET url the same way — generate_presigned_url()
+        # succeeds regardless of IAM (it only signs), so this gap only surfaces as a real 403 the
+        # first time someone actually fetches the URL, exactly the bug grant_put's own comment
+        # above already warned about, just for GET instead of PUT.
+        media_bucket.grant_read(garden_handler)
         # WS-03: createGoal publishes goal.submitted to the default event bus — AgentCoreStack's
         # rule (matching on source/detail-type, not this Lambda directly) routes it to the
         # orchestrator asynchronously (ADR-0004/ADR-0012).

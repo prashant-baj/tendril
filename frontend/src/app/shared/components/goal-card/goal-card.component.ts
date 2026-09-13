@@ -1,14 +1,15 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { IconComponent } from '../icon/icon.component';
 import { ChipComponent, ChipTone } from '../chip/chip.component';
 import { Goal } from '../../../core/models/goal.model';
+
+const IN_PROGRESS_STATUSES = new Set(['Approved', 'InProgress']);
 
 /** A goal-in-progress card on the Home screen's "Goals in progress" grid. */
 @Component({
   selector: 'td-goal-card',
   standalone: true,
-  imports: [RouterLink, IconComponent, ChipComponent],
+  imports: [RouterLink, ChipComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './goal-card.component.html',
   styleUrl: './goal-card.component.scss',
@@ -21,10 +22,6 @@ export class GoalCardComponent {
   }
 
   get statusTone(): ChipTone {
-    return this.goal.status === 'completed' ? 'green' : 'amber';
-  }
-
-  get barTone(): 'primary' | 'muted' {
-    return this.goal.status === 'completed' ? 'muted' : 'primary';
+    return IN_PROGRESS_STATUSES.has(this.goal.status) ? 'green' : 'amber';
   }
 }

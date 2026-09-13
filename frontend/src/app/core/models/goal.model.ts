@@ -1,23 +1,11 @@
-export type GoalStatus = 'in-progress' | 'completed';
-
-/** Mirrors GOAL + PLAN in docs/architecture/architecture.md §2, plus UI presentation. */
+/** Mirrors GOAL in docs/architecture/architecture.md §2 (PA-01). */
 export interface Goal {
   goalId: string;
-  title: string;
-  garden: string;
-  status: GoalStatus;
-  statusLabel: string;
-  statusIcon: string;
-  timing: string;
-  next: string;
-  /** 0-100. */
-  progressPct: number;
-  successCriteria: string;
-}
-
-export interface GoalStat {
-  value: string;
-  label: string;
+  description: string;
+  type: string;
+  /** architecture.md §7.3's lifecycle: Intake/Decomposing/PlanProposed/Approved/... */
+  status: string;
+  mediaIds?: string[];
 }
 
 /** Client API request for `POST /gardens/{gardenId}/goals` (WS-03/WS-05). */

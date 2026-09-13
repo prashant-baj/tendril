@@ -1,14 +1,8 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
-import { ChipComponent, ChipTone } from '../chip/chip.component';
-import { GateTone, PlanTask } from '../../../core/models/plan-task.model';
+import { ChipComponent } from '../chip/chip.component';
+import { Task } from '../../../core/models/plan.model';
 
-const GATE_TONE_MAP: Record<GateTone, ChipTone> = {
-  neutral: 'neutral',
-  weather: 'amber',
-  pest: 'red',
-};
-
-/** One task in a goal's approved plan, shown on the Goal-detail screen's plan list. */
+/** One task in a goal's proposed/approved plan, shown on the Goal-detail screen's plan list. */
 @Component({
   selector: 'td-plan-task-card',
   standalone: true,
@@ -18,9 +12,5 @@ const GATE_TONE_MAP: Record<GateTone, ChipTone> = {
   styleUrl: './plan-task-card.component.scss',
 })
 export class PlanTaskCardComponent {
-  @Input({ required: true }) task!: PlanTask;
-
-  get gateTone(): ChipTone {
-    return GATE_TONE_MAP[this.task.gateTone];
-  }
+  @Input({ required: true }) task!: Task;
 }

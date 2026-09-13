@@ -19,13 +19,6 @@
   gap: 8px;
 }
 
-.timing {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--td-color-ink-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
 .title {
   display: block;
   font-size: 16px;
@@ -34,51 +27,4 @@
   color: var(--td-color-ink);
   margin-top: 10px;
   text-wrap: pretty;
-}
-
-.garden {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--td-color-ink-secondary);
-  .ms { color: var(--td-color-ink-tertiary); }
-}
-
-.track {
-  display: block;
-  height: 6px;
-  border-radius: var(--td-radius-pill);
-  background: var(--td-color-bg-page);
-  margin-top: 14px;
-  overflow: hidden;
-}
-
-.bar {
-  display: block;
-  height: 100%;
-  border-radius: var(--td-radius-pill);
-  background: var(--td-color-primary);
-  &.muted { background: #7CB683; }
-}
-
-.bottom {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 8px;
-}
-
-.next {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--td-color-ink-tertiary);
-}
-
-.pct {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--td-color-ink-secondary);
-  font-variant-numeric: tabular-nums;
 }

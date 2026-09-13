@@ -4,36 +4,9 @@
   border-radius: var(--td-radius-lg);
   box-shadow: var(--td-shadow-card);
   padding: 14px 16px;
-  display: flex;
-  gap: 12px;
-}
-
-.when {
-  flex: 0 0 40px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding-top: 2px;
-}
-
-.when-top {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--td-color-ink-tertiary);
-}
-
-.when-big {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--td-color-primary);
-  font-family: var(--td-font-mono);
 }
 
 .body {
-  flex: 1;
   min-width: 0;
 }
 

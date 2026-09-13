@@ -28,6 +28,16 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
   epic is explicitly scoped to "prove the pipe" (walking-skeleton.md), not production-hardened
   exactly-once delivery — an outbox/saga pattern is future work if this gap ever matters in
   practice.
+- `listGoals`/`getGoalDetail` (PA-01/PA-02/PA-03): read the real `Plan`/`Task`/`Message` records
+  the orchestrator now writes (`app/orchestrator/orchestrator.py`), instead of the free-text
+  `orchestrator_result` field earlier stories used. `getGoalDetail` also generates a fresh
+  presigned **GET** url per attached Media record — never stored/reused, same posture as OB-02's
+  upload URLs, just the read-side mirror.
+- `postGoalMessage` (PA-02): writes a `role="user"` Message and publishes `goal.message.received`
+  — the orchestrator resumes the conversation asynchronously, same posture as `createGoal`.
+- `approvePlan` (PA-02): a synchronous, deterministic status flip (`Plan`/`Goal` → `Approved`) —
+  approving a plan needs no model reasoning, so this never goes through the orchestrator/
+  EventBridge at all, unlike `postGoalMessage`.
 
 No auth yet (ADR-0004's seam is still open): `X-User-Id` is a per-browser anonymous identifier
 the frontend generates and persists (garden-onboarding.md's stories), not a verified identity.
@@ -57,10 +67,12 @@ logger = logging.getLogger("tendril.api.garden_handler")
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by ClientApiStack; never hardcoded
 MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by ClientApiStack; never hardcoded
 
-# Must match infra/stacks/agentcore_stack.py's GOAL_EVENT_SOURCE/GOAL_SUBMITTED_DETAIL_TYPE —
-# that's the source/detail-type its EventBridge rule pattern-matches on.
+# Must match infra/stacks/agentcore_stack.py's GOAL_EVENT_SOURCE/GOAL_SUBMITTED_DETAIL_TYPE/
+# GOAL_MESSAGE_RECEIVED_DETAIL_TYPE — those are the source/detail-types its EventBridge rules
+# pattern-match on.
 GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
+GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
@@ -428,6 +440,213 @@ def create_goal(event: dict[str, Any]) -> dict[str, Any]:
     return _response(202, {"goalId": goal_id, "status": "Intake"})
 
 
+def _generate_download_url(s3_key: str) -> str:
+    """Short-lived presigned GET url for a Media record's s3_key — never stored/reused, same
+    posture as the upload URL. Shared by getGoalDetail (PA-03) and OB-03's plant-photo AC rather
+    than duplicated."""
+    return _get_s3().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": MEDIA_BUCKET_NAME, "Key": s3_key},
+        ExpiresIn=900,
+    )
+
+
+def _goal_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    goal = {
+        "goalId": item["goal_id"],
+        "description": item["description"],
+        "type": item.get("type", "diagnosis"),
+        "status": item.get("status", "Intake"),
+    }
+    if item.get("media_ids"):
+        goal["mediaIds"] = item["media_ids"]
+    return goal
+
+
+def list_goals(event: dict[str, Any]) -> dict[str, Any]:
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with("GOAL#")
+        )
+    except Exception:
+        logger.exception("Failed to list goals for garden %s", garden_id)
+        return _error(500, "could not list goals")
+
+    return _response(200, [_goal_from_item(item) for item in resp.get("Items", [])])
+
+
+def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
+    path_params = event.get("pathParameters") or {}
+    garden_id = path_params.get("gardenId")
+    goal_id = path_params.get("goalId")
+    if not garden_id or not goal_id:
+        return _error(400, "gardenId and goalId are required")
+
+    table = _get_table()
+    try:
+        goal_item = table.get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{goal_id}"}).get(
+            "Item"
+        )
+    except Exception:
+        logger.exception("Failed to read goal %s for garden %s", goal_id, garden_id)
+        return _error(500, "could not read goal")
+    if not goal_item:
+        return _error(404, "goal not found")
+
+    try:
+        plan_item = table.get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLAN#{goal_id}"}).get(
+            "Item"
+        )
+        tasks_resp = table.query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(f"TASK#{goal_id}#")
+        )
+        messages_resp = table.query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(f"GOALMSG#{goal_id}#")
+        )
+    except Exception:
+        logger.exception("Failed to read plan/tasks/messages for goal %s", goal_id)
+        return _error(500, "could not read goal detail")
+
+    tasks = [
+        {
+            "taskId": t["task_id"],
+            "title": t["title"],
+            "detail": t["detail"],
+            "scope": t.get("scope", "plant"),
+            "status": t.get("status", "pending"),
+        }
+        for t in tasks_resp.get("Items", [])
+    ]
+
+    # sk (GOALMSG#{goalId}#{iso_timestamp}#{messageId}) sorts chronologically already —
+    # explicit sort here just guards against a fake/non-ordering table in tests.
+    messages = [
+        {"role": m["role"], "content": m["content"], "createdAt": m["created_at"]}
+        for m in sorted(messages_resp.get("Items", []), key=lambda m: m["sk"])
+    ]
+
+    media = []
+    for media_id in goal_item.get("media_ids") or []:
+        media_item = table.get_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}
+        ).get("Item")
+        if media_item:
+            media.append(
+                {"mediaId": media_id, "downloadUrl": _generate_download_url(media_item["s3_key"])}
+            )
+
+    detail: dict[str, Any] = {
+        "goal": _goal_from_item(goal_item),
+        "tasks": tasks,
+        "media": media,
+        "messages": messages,
+    }
+    if plan_item:
+        detail["plan"] = {
+            "planId": plan_item["plan_id"],
+            "goalId": plan_item["goal_id"],
+            "successCriteria": plan_item["success_criteria"],
+            "status": plan_item["status"],
+        }
+    return _response(200, detail)
+
+
+def post_goal_message(event: dict[str, Any]) -> dict[str, Any]:
+    path_params = event.get("pathParameters") or {}
+    garden_id = path_params.get("gardenId")
+    goal_id = path_params.get("goalId")
+    if not garden_id or not goal_id:
+        return _error(400, "gardenId and goalId are required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return _error(400, "content is required")
+
+    message_id = str(uuid.uuid4())
+    created_at = datetime.now(UTC).isoformat()
+
+    try:
+        _get_table().put_item(
+            Item={
+                "pk": f"GARDEN#{garden_id}",
+                "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
+                "message_id": message_id,
+                "goal_id": goal_id,
+                "role": "user",
+                "content": content,
+                "created_at": created_at,
+            }
+        )
+        _get_events().put_events(
+            Entries=[
+                {
+                    "Source": GOAL_EVENT_SOURCE,
+                    "DetailType": GOAL_MESSAGE_RECEIVED_DETAIL_TYPE,
+                    "Detail": json.dumps({"gardenId": garden_id, "goalId": goal_id}),
+                }
+            ]
+        )
+    except Exception:
+        logger.exception("Failed to send message for goal %s", goal_id)
+        return _error(500, "could not send message")
+
+    return {"statusCode": 202, "headers": {"Access-Control-Allow-Origin": "*"}, "body": ""}
+
+
+def approve_plan(event: dict[str, Any]) -> dict[str, Any]:
+    path_params = event.get("pathParameters") or {}
+    garden_id = path_params.get("gardenId")
+    plan_id = path_params.get("planId")
+    if not garden_id or not plan_id:
+        return _error(400, "gardenId and planId are required")
+
+    table = _get_table()
+    try:
+        # plan_id == goal_id (Plan is always 1:1 with its Goal, data-architecture.md §2) — no
+        # separate lookup needed to find the Goal record this Plan belongs to.
+        plan_item = table.get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLAN#{plan_id}"}).get(
+            "Item"
+        )
+    except Exception:
+        logger.exception("Failed to read plan %s for garden %s", plan_id, garden_id)
+        return _error(500, "could not read plan")
+    if not plan_item:
+        return _error(404, "plan not found")
+
+    try:
+        table.update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLAN#{plan_id}"},
+            UpdateExpression="SET #status = :status",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={":status": "Approved"},
+        )
+        table.update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{plan_id}"},
+            UpdateExpression="SET #status = :status",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={":status": "Approved"},
+        )
+    except Exception:
+        logger.exception("Failed to approve plan %s for garden %s", plan_id, garden_id)
+        return _error(500, "could not approve plan")
+
+    return _response(200, {"planId": plan_id, "status": "Approved"})
+
+
 def get_garden(event: dict[str, Any]) -> dict[str, Any]:
     garden_id = (event.get("pathParameters") or {}).get("gardenId")
     if not garden_id:
@@ -484,6 +703,14 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return delete_plant(event)
         if method == "POST" and resource == "/gardens/{gardenId}/goals":
             return create_goal(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/goals":
+            return list_goals(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/goals/{goalId}":
+            return get_goal_detail(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/goals/{goalId}/messages":
+            return post_goal_message(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/plans/{planId}/approve":
+            return approve_plan(event)
         return _error(404, f"no route for {method} {resource}")
     except Exception:
         logger.exception("Unhandled error for %s %s", method, resource)

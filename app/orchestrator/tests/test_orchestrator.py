@@ -1,4 +1,4 @@
-"""Unit tests for the orchestrator Lambda (WS-04).
+"""Unit tests for the orchestrator Lambda (WS-04, PA-01/PA-02).
 
 No live AgentCore/Bedrock calls — `invoke_agent_runtime` is monkeypatched via a fake
 bedrock-agentcore client (mirroring app/api/tests' fake-boto3-client convention), and
@@ -10,6 +10,7 @@ import io
 import json
 
 import orchestrator as handler
+import pytest
 
 
 class FakeAgentCoreClient:
@@ -26,10 +27,14 @@ class FakeAgentCoreClient:
 
 
 class FakeTable:
-    def __init__(self, get_item_response=None, responses_by_sk=None):
+    def __init__(self, get_item_response=None, responses_by_sk=None, query_response=None):
         self._get_item_response = get_item_response if get_item_response is not None else {}
         self._responses_by_sk = responses_by_sk or {}
+        self._query_response = query_response if query_response is not None else {"Items": []}
         self.update_calls: list[dict] = []
+        self.put_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
+        self.query_calls: list[dict] = []
 
     def get_item(self, Key):
         if Key.get("sk") in self._responses_by_sk:
@@ -38,6 +43,16 @@ class FakeTable:
 
     def update_item(self, **kwargs):
         self.update_calls.append(kwargs)
+
+    def put_item(self, Item):
+        self.put_calls.append(Item)
+
+    def delete_item(self, Key):
+        self.delete_calls.append(Key)
+
+    def query(self, **kwargs):
+        self.query_calls.append(kwargs)
+        return self._query_response
 
 
 class FakeS3:
@@ -51,24 +66,53 @@ class FakeS3:
         return f"https://example-bucket.s3.amazonaws.com/{Params['Key']}?presigned=1"
 
 
+class _FakeResult:
+    def __init__(self, text=None, structured_output=None):
+        self._text = text
+        self.structured_output = structured_output
+
+    def __str__(self):
+        return self._text or ""
+
+
 class FakeAgent:
-    """Stands in for strands.Agent — records construction kwargs, returns a canned result."""
+    """Stands in for strands.Agent. `_run_turn` calls it twice — once normally (tool-calling
+    happens for real, `Agent`/tools are still real code) and once with
+    `structured_output_model=...` (no new prompt) to extract structure — so this fake supports
+    both call shapes. Configure via class attributes (set them in the test) since production
+    code constructs `Agent(...)` itself, leaving no room to inject per-test behavior via kwargs.
+    """
 
     last_kwargs: dict | None = None
+    last_prompt: str | None = None
+    free_text = "orchestrator summary"
+    structured_output = None  # a ChatTurnResult, or None to simulate no/failed structuring
+    raise_on_structured = False
+    raise_on_call: Exception | None = None  # set to make the first (tool-calling) call raise
 
     def __init__(self, **kwargs):
         FakeAgent.last_kwargs = kwargs
 
-    def __call__(self, text):
-        return "orchestrator summary"
+    def __call__(self, prompt=None, *, structured_output_model=None, **kwargs):
+        if structured_output_model is not None:
+            if FakeAgent.raise_on_structured:
+                raise RuntimeError("structured output failed")
+            return _FakeResult(structured_output=FakeAgent.structured_output)
+        if FakeAgent.raise_on_call:
+            raise FakeAgent.raise_on_call
+        FakeAgent.last_prompt = prompt
+        return _FakeResult(text=FakeAgent.free_text)
 
 
-class FakeFailingAgent:
-    def __init__(self, **kwargs):
-        pass
-
-    def __call__(self, text):
-        raise RuntimeError("model unreachable")
+@pytest.fixture(autouse=True)
+def _reset_fake_agent():
+    FakeAgent.last_kwargs = None
+    FakeAgent.last_prompt = None
+    FakeAgent.free_text = "orchestrator summary"
+    FakeAgent.structured_output = None
+    FakeAgent.raise_on_structured = False
+    FakeAgent.raise_on_call = None
+    yield
 
 
 # --- _make_specialist_tool / _build_tools (real InvokeAgentRuntime-calling code path) ------
@@ -215,6 +259,112 @@ def test_resolve_image_returns_presigned_url_and_format(monkeypatch):
     }
 
 
+# --- _run_turn (PA-01/PA-02: structured-output extraction + fail-open fallback) ------------
+
+
+def test_run_turn_returns_structured_output_when_model_provides_it(monkeypatch):
+    plan = handler.PlanProposal(
+        success_criteria="Leaves green again",
+        tasks=[handler.TaskProposal(title="Water deeply", detail="Soak the soil", scope="plant")],
+    )
+    FakeAgent.free_text = "here's what I think"
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Water more.", updated_plan=plan)
+
+    result = handler._run_turn(FakeAgent(), "help my plant", synthesize_fallback_plan=True)
+
+    assert result.reply == "Water more."
+    assert result.updated_plan is plan
+
+
+def test_run_turn_returns_no_plan_when_model_asks_a_question(monkeypatch):
+    # A legitimate structured response with updated_plan=None (the model asked a clarifying
+    # question instead of proposing yet) must NOT trigger the fallback-plan synthesis path.
+    FakeAgent.structured_output = handler.ChatTurnResult(
+        reply="How many hours of direct sun does it get?", updated_plan=None
+    )
+
+    result = handler._run_turn(FakeAgent(), "my plant looks sad", synthesize_fallback_plan=True)
+
+    assert result.updated_plan is None
+    assert "sun" in result.reply
+
+
+def test_run_turn_falls_back_to_one_task_when_structuring_fails_and_no_plan_exists():
+    FakeAgent.free_text = "Water it more and check the soil."
+    FakeAgent.raise_on_structured = True
+
+    result = handler._run_turn(FakeAgent(), "help", synthesize_fallback_plan=True)
+
+    assert result.reply == "Water it more and check the soil."
+    assert result.updated_plan is not None
+    assert len(result.updated_plan.tasks) == 1
+    assert result.updated_plan.tasks[0].detail == "Water it more and check the soil."
+
+
+def test_run_turn_does_not_clobber_existing_plan_when_structuring_fails():
+    # synthesize_fallback_plan=False: a Plan already exists for this goal — a transient
+    # structuring failure must relay the reply without touching it, never overwrite it.
+    FakeAgent.free_text = "Sure, that sounds reasonable."
+    FakeAgent.raise_on_structured = True
+
+    result = handler._run_turn(
+        FakeAgent(), "does that sound right?", synthesize_fallback_plan=False
+    )
+
+    assert result.reply == "Sure, that sounds reasonable."
+    assert result.updated_plan is None
+
+
+# --- _load_plan / _load_tasks / _load_messages / _write_plan_and_tasks (PA-01/PA-02) -------
+
+
+def test_load_plan_returns_none_when_absent(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    assert handler._load_plan("g1", "goal-1") is None
+
+
+def test_load_tasks_queries_by_goal_scoped_prefix(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": [{"task_id": "t1"}]})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    tasks = handler._load_tasks("g1", "goal-1")
+
+    assert tasks == [{"task_id": "t1"}]
+
+
+def test_write_plan_and_tasks_clears_previous_tasks_then_writes_fresh_set(monkeypatch):
+    fake_table = FakeTable(
+        query_response={"Items": [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#old-task"}]}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    plan = handler.PlanProposal(
+        success_criteria="Healthy again",
+        tasks=[
+            handler.TaskProposal(title="Water", detail="Deeply", scope="plant"),
+            handler.TaskProposal(title="Mulch", detail="Around base", scope="plant"),
+        ],
+    )
+    handler._write_plan_and_tasks("g1", "goal-1", plan)
+
+    assert fake_table.delete_calls == [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#old-task"}]
+    plan_items = [i for i in fake_table.put_calls if i["sk"] == "PLAN#goal-1"]
+    assert plan_items == [
+        {
+            "pk": "GARDEN#g1",
+            "sk": "PLAN#goal-1",
+            "plan_id": "goal-1",
+            "goal_id": "goal-1",
+            "success_criteria": "Healthy again",
+            "status": "PlanProposed",
+        }
+    ]
+    task_items = [i for i in fake_table.put_calls if i["sk"] != "PLAN#goal-1"]
+    assert len(task_items) == 2
+    assert all(i["sk"].startswith("TASK#goal-1#") for i in task_items)
+    assert {i["title"] for i in task_items} == {"Water", "Mulch"}
+
+
 # --- handle_goal_submitted (agent-loop wiring; Agent/BedrockModel mocked) ------------------
 
 
@@ -225,13 +375,22 @@ def test_handle_goal_submitted_happy_path(monkeypatch):
     monkeypatch.setattr(handler, "_table", fake_table)
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
     monkeypatch.setattr(handler, "Agent", FakeAgent)
+    plan = handler.PlanProposal(
+        success_criteria="Fixed", tasks=[handler.TaskProposal(title="Water", detail="d")]
+    )
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Water more.", updated_plan=plan)
 
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
 
     statuses = [c["ExpressionAttributeValues"][":status"] for c in fake_table.update_calls]
     assert statuses == ["Decomposing", "PlanProposed"]
-    final_call = fake_table.update_calls[-1]
-    assert final_call["ExpressionAttributeValues"][":orchestrator_result"] == "orchestrator summary"
+    # A user Message (the goal description) and an assistant Message (the reply) were written.
+    message_items = [i for i in fake_table.put_calls if i["sk"].startswith("GOALMSG#goal-1#")]
+    assert [m["role"] for m in message_items] == ["user", "assistant"]
+    assert message_items[0]["content"] == "help"
+    assert message_items[1]["content"] == "Water more."
+    # The Plan itself was written too.
+    assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
 
 
 def test_handle_goal_submitted_with_photo_passes_image_url_to_tools(monkeypatch):
@@ -258,21 +417,11 @@ def test_handle_goal_submitted_with_photo_passes_image_url_to_tools(monkeypatch)
     )
     monkeypatch.setattr(handler, "_agentcore", FakeAgentCoreClient())
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
-
-    captured_tools = {}
-
-    class CapturingAgent:
-        def __init__(self, **kwargs):
-            captured_tools["tools"] = kwargs["tools"]
-
-        def __call__(self, text):
-            return "orchestrator summary"
-
-    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
 
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
 
-    (vision_tool,) = captured_tools["tools"]
+    (vision_tool,) = FakeAgent.last_kwargs["tools"]
     fake_client = FakeAgentCoreClient()
     monkeypatch.setattr(handler, "_agentcore", fake_client)
     vision_tool("what plant is this?")
@@ -304,24 +453,13 @@ def test_handle_goal_submitted_tells_agent_a_photo_is_attached(monkeypatch):
     monkeypatch.setattr(handler, "_s3", FakeS3())
     monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
-
-    captured = {}
-
-    class CapturingAgent:
-        def __init__(self, **kwargs):
-            pass
-
-        def __call__(self, text):
-            captured["text"] = text
-            return "orchestrator summary"
-
-    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
 
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
 
-    assert "leaves not healthy" in captured["text"]
-    assert "photo" in captured["text"].lower()
-    assert "attached" in captured["text"].lower()
+    assert "leaves not healthy" in FakeAgent.last_prompt
+    assert "photo" in FakeAgent.last_prompt.lower()
+    assert "attached" in FakeAgent.last_prompt.lower()
 
 
 def test_handle_goal_submitted_omits_photo_note_when_no_media(monkeypatch):
@@ -330,22 +468,11 @@ def test_handle_goal_submitted_omits_photo_note_when_no_media(monkeypatch):
     )
     monkeypatch.setattr(handler, "_table", fake_table)
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
-
-    captured = {}
-
-    class CapturingAgent:
-        def __init__(self, **kwargs):
-            pass
-
-        def __call__(self, text):
-            captured["text"] = text
-            return "orchestrator summary"
-
-    monkeypatch.setattr(handler, "Agent", CapturingAgent)
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
 
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
 
-    assert captured["text"] == "help"
+    assert FakeAgent.last_prompt == "help"
 
 
 def test_handle_goal_submitted_goal_not_found(monkeypatch):
@@ -363,7 +490,8 @@ def test_handle_goal_submitted_agent_failure_reverts_to_intake(monkeypatch):
     )
     monkeypatch.setattr(handler, "_table", fake_table)
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
-    monkeypatch.setattr(handler, "Agent", FakeFailingAgent)
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.raise_on_call = RuntimeError("model unreachable")
 
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
 
@@ -371,6 +499,98 @@ def test_handle_goal_submitted_agent_failure_reverts_to_intake(monkeypatch):
     assert statuses == ["Decomposing", "Intake"]
     final_call = fake_table.update_calls[-1]
     assert "model unreachable" in final_call["ExpressionAttributeValues"][":orchestrator_error"]
+
+
+# --- handle_goal_message_received (PA-02: conversational plan approval, no live session) ---
+
+
+def test_handle_goal_message_received_revises_plan(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "leaves yellow"}
+            },
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green",
+                    "status": "PlanProposed",
+                }
+            },
+        },
+        query_response={"Items": []},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    revised_plan = handler.PlanProposal(
+        success_criteria="Leaves green",
+        tasks=[handler.TaskProposal(title="Water less", detail="Every 3 days")],
+    )
+    FakeAgent.structured_output = handler.ChatTurnResult(
+        reply="Sure, I've reduced the watering frequency.", updated_plan=revised_plan
+    )
+
+    handler.handle_goal_message_received({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert "leaves yellow" in FakeAgent.last_prompt
+    assert "Leaves green" in FakeAgent.last_prompt
+    assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
+    statuses = [c["ExpressionAttributeValues"][":status"] for c in fake_table.update_calls]
+    assert statuses == ["PlanProposed"]
+
+
+def test_handle_goal_message_received_asks_a_question_without_touching_the_plan(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "leaves yellow"}
+            },
+            # No "PLAN#goal-1" entry — falls through to the default {} (no "Item" key), matching
+            # real DynamoDB's actual "no such item" response shape.
+        },
+        query_response={"Items": []},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.structured_output = handler.ChatTurnResult(
+        reply="How much sun does it get?", updated_plan=None
+    )
+
+    handler.handle_goal_message_received({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert not any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
+    message_items = [i for i in fake_table.put_calls if "GOALMSG#" in i["sk"]]
+    assert message_items[-1]["content"] == "How much sun does it get?"
+
+
+def test_handle_goal_message_received_goal_not_found(monkeypatch):
+    fake_table = FakeTable(get_item_response={})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_goal_message_received({"gardenId": "g1", "goalId": "missing"})
+
+    assert fake_table.put_calls == []
+    assert fake_table.update_calls == []
+
+
+def test_handle_goal_message_received_failure_writes_apologetic_message(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}},
+        query_response={"Items": []},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.raise_on_call = RuntimeError("model unreachable")
+
+    handler.handle_goal_message_received({"gardenId": "g1", "goalId": "goal-1"})
+
+    message_items = [i for i in fake_table.put_calls if "GOALMSG#" in i["sk"]]
+    assert len(message_items) == 1
+    assert "model unreachable" in message_items[0]["content"]
 
 
 # --- handler() routing ----------------------------------------------------------------------
@@ -389,6 +609,26 @@ def test_handler_routes_goal_submitted(monkeypatch):
     )
 
     assert len(fake_table.update_calls) == 2
+
+
+def test_handler_routes_goal_message_received(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}},
+        query_response={"Items": []},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+
+    handler.handler(
+        {
+            "detail-type": "goal.message.received",
+            "detail": {"gardenId": "g1", "goalId": "goal-1"},
+        },
+        None,
+    )
+
+    assert any("GOALMSG#" in i["sk"] for i in fake_table.put_calls)
 
 
 def test_handler_ignores_unknown_detail_type(monkeypatch):
