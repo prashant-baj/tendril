@@ -294,7 +294,11 @@ class AgentCoreStack(Stack):
         if (memory_config or {}).get("enabled"):
             role.add_to_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock:Retrieve"],
+                    # GetKnowledgeBase: the store calls this once at agent-construction time to
+                    # detect the KB's type (confirmed via a real AccessDeniedException — missed
+                    # on the first pass since it's an internal `initialize()` call, not one this
+                    # code calls directly).
+                    actions=["bedrock:Retrieve", "bedrock:GetKnowledgeBase"],
                     resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
                 )
             )

@@ -356,16 +356,33 @@ def build_memory_manager(garden_id: str | None) -> MemoryManager | None:
         return None
 
 
-@app.entrypoint
-def invoke(payload: dict) -> dict:
-    content = resolve_content(payload)
-    agent = Agent(
+def _build_agent(memory_manager: MemoryManager | None) -> Agent:
+    return Agent(
         model=_get_model(),
         system_prompt=_get_system_prompt(),
         tools=build_tools(),
-        memory_manager=build_memory_manager(payload.get("gardenId")),
+        memory_manager=memory_manager,
         context_manager="auto",
     )
+
+
+@app.entrypoint
+def invoke(payload: dict) -> dict:
+    content = resolve_content(payload)
+    memory_manager = build_memory_manager(payload.get("gardenId"))
+    try:
+        agent = _build_agent(memory_manager)
+    except Exception as e:
+        # build_memory_manager()'s own try/except only covers resolving the KB/data-source ids —
+        # BedrockKnowledgeBaseStore.initialize() (detecting the KB's type) runs later, as a
+        # plugin hook fired from inside Agent(...)'s constructor, and raises by design on
+        # failure (confirmed via a real AccessDeniedException that crashed the whole turn here).
+        # Actually delivering the "memory never fails the turn" promise means catching it here
+        # too, not just at resolution time.
+        if memory_manager is None:
+            raise
+        logger.warning("Agent init failed with memory attached (%s); retrying without memory.", e)
+        agent = _build_agent(None)
     result = agent(content)
     text = str(result)
     logger.info("invoke returning %d chars: %s", len(text), text[:500])

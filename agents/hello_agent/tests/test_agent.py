@@ -217,6 +217,41 @@ def test_invoke_returns_typed_result(monkeypatch):
     assert out == {"result": "echo: hello there"}
 
 
+def test_invoke_retries_without_memory_when_agent_init_fails(monkeypatch):
+    # Regression: BedrockKnowledgeBaseStore.initialize() runs as a plugin hook inside
+    # Agent(...)'s own constructor and raises by design on failure (e.g. a permission gap) —
+    # a real AccessDeniedException crashed the whole turn here before this retry existed.
+    monkeypatch.setattr(agent, "_get_model", lambda: object())
+    monkeypatch.setattr(agent, "_get_system_prompt", lambda: "system")
+    monkeypatch.setattr(agent, "build_memory_manager", lambda garden_id: object())
+
+    class FlakyAgent:
+        def __init__(self, **kwargs):
+            if kwargs.get("memory_manager") is not None:
+                raise RuntimeError("AccessDeniedException: GetKnowledgeBase")
+
+        def __call__(self, message):
+            return f"echo: {message}"
+
+    monkeypatch.setattr(agent, "Agent", FlakyAgent)
+    out = agent.invoke({"prompt": "hello there", "gardenId": "g1"})
+    assert out == {"result": "echo: hello there"}
+
+
+def test_invoke_reraises_when_failure_is_unrelated_to_memory(monkeypatch):
+    monkeypatch.setattr(agent, "_get_model", lambda: object())
+    monkeypatch.setattr(agent, "_get_system_prompt", lambda: "system")
+    monkeypatch.setattr(agent, "build_memory_manager", lambda garden_id: None)
+
+    class BrokenAgent:
+        def __init__(self, **_):
+            raise RuntimeError("something unrelated to memory")
+
+    monkeypatch.setattr(agent, "Agent", BrokenAgent)
+    with pytest.raises(RuntimeError, match="unrelated to memory"):
+        agent.invoke({"prompt": "hello there"})
+
+
 # --- tool binding (AF-03) -----------------------------------------------------
 
 
