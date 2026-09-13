@@ -28,6 +28,11 @@ cross-stack-name-predictable either. Each specialist gets **its own** execution 
 role shared by every runtime) so `lambda:InvokeFunctionUrl` can be granted only for the tools its
 own registry entry declares — the per-specialist IAM scoping AF-01 deferred until a real tool
 existed to scope against.
+
+Per AF-05, a registry entry's `memory` block (`{"enabled": true, "scope": "..."}`) grants that
+same per-specialist role read/write access to `MemoryStack`'s Bedrock Knowledge Base — resolved
+by stable name at runtime (`KNOWLEDGE_BASE_NAME`/`MEMORY_DATA_SOURCE_NAME`), same posture as
+prompts/guardrails, never a cross-stack reference to the (separately deployed) memory stack.
 """
 
 import json
@@ -126,6 +131,7 @@ class AgentCoreStack(Stack):
                 prompt_name=f"{prefix}-{entry['prompt_name']}",  # stable name; owned by PromptsStack
                 guardrail_name=f"{prefix}-{entry['guardrail_name']}",  # owned by GuardrailsStack
                 tool_names=entry.get("tools") or [],
+                memory_config=entry.get("memory") or {},
             )
 
         for name, runtime in self.runtimes.items():
@@ -220,7 +226,9 @@ class AgentCoreStack(Stack):
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 
-    def _make_agent_role(self, name: str, tool_names: list[str]) -> iam.Role:
+    def _make_agent_role(
+        self, name: str, tool_names: list[str], memory_config: dict | None = None
+    ) -> iam.Role:
         """One execution role per specialist (not one shared by every runtime) so
         `lambda:InvokeFunctionUrl` can be granted only for the tools *this* specialist's
         registry entry declares (AF-03) — a specialist can't invoke a tool it didn't ask for."""
@@ -273,6 +281,29 @@ class AgentCoreStack(Stack):
             tool = self.tools.get(tool_name)
             if tool:
                 tool["function"].grant_invoke_url(role)
+        # AF-05: grant memory access only when this specialist's registry entry opts in
+        # (`memory.enabled: true`). Wildcarded to the knowledge-base resource type, not a
+        # specific id — MemoryStack deploys independently, so its real id isn't known here at
+        # synth time (same posture as the prompt/guardrail wildcards above).
+        if (memory_config or {}).get("enabled"):
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["bedrock-agent-runtime:Retrieve"],
+                    resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
+                )
+            )
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["bedrock-agent:IngestKnowledgeBaseDocuments"],
+                    resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
+                )
+            )
+            role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["bedrock-agent:ListKnowledgeBases", "bedrock-agent:ListDataSources"],
+                    resources=["*"],  # ListX actions have no ARN resource type to scope to
+                )
+            )
         return role
 
     def _agent_runtime(
@@ -286,6 +317,7 @@ class AgentCoreStack(Stack):
         prompt_name: str,
         guardrail_name: str,
         tool_names: list[str],
+        memory_config: dict | None = None,
     ) -> agentcore.Runtime:
         if image_uri:
             artifact = agentcore.AgentRuntimeArtifact.from_image_uri(image_uri)
@@ -295,7 +327,7 @@ class AgentCoreStack(Stack):
                 file="Dockerfile",
                 platform=ecr_assets.Platform.LINUX_ARM64,
             )
-        role = self._make_agent_role(name, tool_names)
+        role = self._make_agent_role(name, tool_names, memory_config)
         # Only the endpoints for tools THIS specialist declares — matches the IAM grant above,
         # so the template agent never even sees a URL it has no permission to call.
         tool_endpoints = {
@@ -303,20 +335,27 @@ class AgentCoreStack(Stack):
             for tool_name in tool_names
             if tool_name in self.tools
         }
+        memory_config = memory_config or {}
+        environment_variables = {
+            "MODEL_ID": model_id,
+            "LOG_LEVEL": "INFO",
+            "PROMPT_NAME": prompt_name,
+            "GUARDRAIL_NAME": guardrail_name,
+            "TOOLS": self.to_json_string(tool_names),
+            "TOOL_ENDPOINTS": self.to_json_string(tool_endpoints),
+        }
+        if memory_config.get("enabled"):
+            environment_variables["MEMORY_ENABLED"] = "true"
+            environment_variables["KNOWLEDGE_BASE_NAME"] = f"{self._prefix}-memory"
+            environment_variables["MEMORY_DATA_SOURCE_NAME"] = f"{self._prefix}-memory-datasource"
+            environment_variables["MEMORY_SCOPE"] = memory_config.get("scope") or "garden"
         return agentcore.Runtime(
             self,
             f"{name.capitalize()}Runtime",
             runtime_name=f"tendril_{env_name}_{name}",  # [a-zA-Z0-9_] only
             agent_runtime_artifact=artifact,
             execution_role=role,
-            environment_variables={
-                "MODEL_ID": model_id,
-                "LOG_LEVEL": "INFO",
-                "PROMPT_NAME": prompt_name,
-                "GUARDRAIL_NAME": guardrail_name,
-                "TOOLS": self.to_json_string(tool_names),
-                "TOOL_ENDPOINTS": self.to_json_string(tool_endpoints),
-            },
+            environment_variables=environment_variables,
             network_configuration=agentcore.RuntimeNetworkConfiguration.using_public_network(),
             # Managed trace delivery requires the account's X-Ray trace segment
             # destination to be CloudWatch Logs:

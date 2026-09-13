@@ -92,6 +92,7 @@ def _make_specialist_tool(
     name: str,
     arn: str,
     description: str,
+    garden_id: str,
     image_url: str | None = None,
     image_format: str | None = None,
 ):
@@ -102,7 +103,10 @@ def _make_specialist_tool(
         # AgentCore requires 33-256 chars; two concatenated UUIDs comfortably clears that.
         session_id = uuid.uuid4().hex + uuid.uuid4().hex
         started = time.monotonic()
-        payload: dict[str, Any] = {"prompt": prompt}
+        # gardenId (AF-05): the specialist's own memory scope key — every specialist can receive
+        # it uniformly; only ones with memory.enabled actually use it (config-driven, not
+        # specialist-specific code, same posture as imageUrl/imageFormat above).
+        payload: dict[str, Any] = {"prompt": prompt, "gardenId": garden_id}
         if image_url and image_format:
             payload["imageUrl"] = image_url
             payload["imageFormat"] = image_format
@@ -130,9 +134,13 @@ def _make_specialist_tool(
     return call_specialist
 
 
-def _build_tools(image_url: str | None = None, image_format: str | None = None) -> list:
+def _build_tools(
+    garden_id: str, image_url: str | None = None, image_format: str | None = None
+) -> list:
     return [
-        _make_specialist_tool(name, entry["arn"], entry["description"], image_url, image_format)
+        _make_specialist_tool(
+            name, entry["arn"], entry["description"], garden_id, image_url, image_format
+        )
         for name, entry in AGENT_MANIFEST.items()
     ]
 
@@ -194,7 +202,7 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
             "photo is available, prefer a specialist that can inspect it — then summarize "
             "what you learned in one or two sentences."
         ),
-        tools=_build_tools(image_url, image_format),
+        tools=_build_tools(garden_id, image_url, image_format),
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},
     )
 

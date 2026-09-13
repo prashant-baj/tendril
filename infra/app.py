@@ -13,6 +13,7 @@ from stacks.client_api_stack import ClientApiStack
 from stacks.foundation_stack import FoundationStack
 from stacks.frontend_stack import FrontendStack
 from stacks.guardrails_stack import GuardrailsStack
+from stacks.memory_stack import MemoryStack
 from stacks.pipeline_stack import PipelineStack
 from stacks.prompts_stack import PromptsStack
 
@@ -27,6 +28,7 @@ env = cdk.Environment(
 FoundationStack(app, f"tendril-{env_name}-foundation", env_name=env_name, env=env)
 PromptsStack(app, f"tendril-{env_name}-prompts", env_name=env_name, env=env)
 GuardrailsStack(app, f"tendril-{env_name}-guardrails", env_name=env_name, env=env)
+MemoryStack(app, f"tendril-{env_name}-memory", env_name=env_name, env=env)
 AgentCoreStack(app, f"tendril-{env_name}-agentcore", env_name=env_name, env=env)
 ClientApiStack(app, f"tendril-{env_name}-client-api", env_name=env_name, env=env)
 FrontendStack(app, f"tendril-{env_name}-frontend", env_name=env_name, env=env)

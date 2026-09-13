@@ -23,9 +23,12 @@ declares:
                                        // this is how it knows when to reach for this specialist
   "tools": ["weather"],               // names of Lambda-backed Tool APIs (§4.2, docs/stories/agent-factory.md)
                                        // this specialist may call — bound into Strands tools at cold start
-  "memory": {                         // Strands Memory / context-management config (ADR-0001 Appendix A)
+  "memory": {                         // Strands Memory config, resolved against MemoryStack's
+                                       // Bedrock Knowledge Base (ADR-0001 action item 6, AF-05)
     "enabled": true,
-    "scope": "user_garden"            // multi-tenant isolation key — see agent-factory.md AF-05
+    "scope": "garden"                 // multi-tenant isolation prefix — actual scope key is
+                                       // "{scope}:{gardenId}"; "garden" (not "user_garden") since
+                                       // there's no user/auth concept yet — see agent-factory.md AF-05
   }
 }
 ```
@@ -53,4 +56,7 @@ specialist existed — decommissioned once `vision` took over that role). Renami
 schema doesn't change. `model_id` is left `""` on entries that want "use the
 `--context model_id=...` CDK override" (unchanged deploy-time behavior); a non-empty value takes
 precedence once a specialist genuinely needs a different model than the deploy-time default.
-`memory` isn't set on any entry yet — that field lands with AF-05.
+`vision.json` is the first entry with `memory` set (`{"enabled": true, "scope": "garden"}`,
+AF-05) — `AgentCoreStack` resolves `MemoryStack`'s Knowledge Base by stable name and grants that
+specialist's own execution role read/write access to it, the same per-specialist scoping
+established for `tools`.

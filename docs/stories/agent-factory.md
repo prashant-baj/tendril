@@ -229,32 +229,69 @@ and stays within its context window over Tendril's long-running engagement (ADR-
 items 6 & 8, Appendix A).
 
 **Acceptance Criteria**
-- [ ] The template initializes a Strands `MemoryManager` (Bedrock KB backend) when a registry
-  entry's `memory.enabled` is `true`; store keys are scoped per **user + garden** — a test with
-  two distinct user/garden scopes proves no cross-tenant recall.
-- [ ] A `SummarizingConversationManager` (+ `ContextOffloader` for large tool results) bounds
-  context growth; the garden's vision and current success criteria are **pinned** — never
-  summarized away (ADR-0001 Appendix A).
-- [ ] Memory/context settings are per-agent config (the `memory` block already reflected in
-  `agents/registry/README.md`) — an agent with `memory.enabled: false` runs with no memory
-  overhead, proving this is opt-in, not hardwired.
-- [ ] IAM grants only the Bedrock Knowledge Bases actions actually needed, scoped to this
-  account/region — no wildcard.
-- [ ] Unit tests: memory scoping (two tenants never see each other's recall), context pinning
-  (vision/success-criteria survive summarization), and the opt-out path.
+- [x] The template initializes a Strands `MemoryManager` (Bedrock KB backend) when a registry
+  entry's `memory.enabled` is `true`; store keys are scoped per **garden** — a test with two
+  distinct garden scopes proves no cross-tenant recall. **Deviation from the AC's literal
+  wording:** scoped per-**garden**, not per-**user + garden** — Tendril has no user/auth concept
+  yet (Cognito is still future work per the "Carried forward" list), so `user_id` doesn't exist
+  to scope by. `MEMORY_SCOPE` (default `"garden"`) is a registry-configurable prefix, so this
+  narrows to per-user once auth lands, without a code change.
+- [x] `context_manager="auto"` (Strands' composed `SummarizingConversationManager` +
+  `ContextOffloader`) bounds context growth from large tool results. **Not done: pinning the
+  garden's vision/success-criteria via `ContextInjector`.** This was a deliberate scope cut, not
+  an oversight — pinning protects content from being summarized away *across many turns of one
+  long conversation*, but every specialist `invoke()` is still a fresh, stateless one-shot call
+  (no `SessionManager`/cross-invocation resume yet — a separate, not-yet-built item per
+  `strands-capability-mapping.md`). There is no accumulating history yet for anything to be
+  summarized away *from*, so wiring `ContextInjector` now would inject static content on every
+  call with nothing to protect — real work once session continuity exists, not before.
+- [x] Memory/context settings are per-agent config (the `memory` block, `agents/registry/README.md`)
+  — `vision.json` is the only entry with `memory.enabled: true`; an agent without the block (or
+  `enabled: false`) runs with zero memory overhead (`build_memory_manager` returns `None`,
+  `Agent(memory_manager=None)`), proving this is opt-in.
+- [x] IAM grants only the Bedrock Knowledge Bases actions actually needed
+  (`bedrock-agent-runtime:Retrieve`, `bedrock-agent:IngestKnowledgeBaseDocuments`,
+  `bedrock-agent:ListKnowledgeBases`/`ListDataSources`), and — closing the same per-specialist
+  scoping AF-03 established for tools — granted **only** to specialists whose registry entry sets
+  `memory.enabled` (verified: `test_memory_iam_scoped_to_the_specialist_that_enables_it`, a
+  fixture specialist without the block gets none of these grants).
+- [x] Unit tests: memory scoping (`test_build_memory_manager_scopes_per_garden` — two garden ids
+  produce two different, non-colliding scope strings), the opt-out path
+  (`test_build_memory_manager_none_when_disabled`/`_when_no_garden_id`), and fail-open resolution
+  (KB/data-source not found, or any exception, degrades to no-memory rather than a failed turn).
+  Context pinning has no test since it isn't built (see above).
 - [ ] One manual smoke test recorded: a specialist recalls a prior turn correctly for the same
-  user/garden, and recalls nothing for a different one.
+  garden, and recalls nothing for a different one. **Not yet run** — needs `cdk deploy
+  tendril-dev-memory` + `tendril-dev-agentcore` first.
+
+**Vector store, a real architectural choice not in the AC's original wording:** Bedrock Knowledge
+Bases need a vector store backend; the common default (OpenSearch Serverless) bills a continuous
+minimum cost even idle — this project's first resource that would work that way, since everything
+else (Lambda, DynamoDB on-demand, S3, EventBridge) is pay-per-use. Confirmed **S3 Vectors**
+(`aws_s3vectors`, pay-per-request) is supported by Bedrock KB as a storage type and available in
+this account/region via a live `s3vectors list-vector-buckets` call, and chose it to keep the
+whole project's pay-per-use posture intact — confirmed with the project owner before building.
 
 **Tasks**
-- [ ] Wire `MemoryManager` (Bedrock KB backend) into the template, scoped by user/garden key.
-- [ ] Wire `SummarizingConversationManager` + `ContextOffloader`, with vision/success-criteria
-  pinning.
-- [ ] Thread the `memory` registry block through `AgentCoreStack`'s env-var injection.
-- [ ] IAM scoping for Bedrock Knowledge Bases actions.
-- [ ] Unit tests for scoping, pinning, and opt-out; document the manual smoke test.
+- [x] Wire `MemoryManager` (Bedrock KB backend, `BedrockKnowledgeBaseStore`) into the template,
+  scoped by garden key (`agents/hello_agent/agent.py`'s `build_memory_manager`).
+- [ ] Wire `SummarizingConversationManager` + `ContextOffloader` with vision/success-criteria
+  pinning — **partially done**: `context_manager="auto"` composes both; pinning deliberately
+  deferred (see AC above).
+- [x] Thread the `memory` registry block through `AgentCoreStack`'s env-var injection
+  (`MEMORY_ENABLED`/`KNOWLEDGE_BASE_NAME`/`MEMORY_DATA_SOURCE_NAME`/`MEMORY_SCOPE`) and per-agent
+  IAM (`_make_agent_role`).
+- [x] IAM scoping for Bedrock Knowledge Bases actions (per-specialist, see AC above).
+- [x] Unit tests for scoping and opt-out (see AC above); the manual smoke test is written up but
+  not yet run — needs a deploy.
+- [x] New `infra/stacks/memory_stack.py` (not originally listed as its own task): S3 Vector
+  bucket + index, the Knowledge Base, a `CUSTOM` data source, and the KB's own service role —
+  deployed independently, resolved by stable name (same posture as prompts/guardrails).
 
-**Dependencies:** AF-02, ADR-0001 Appendix A, ADR-0002 (context & durable state).
-**Status:** ☐ to do.
+**Dependencies:** AF-02 (skipped — see AF-02's row; built directly on AF-01/AF-03 instead),
+ADR-0001 Appendix A, ADR-0002 (context & durable state).
+**Status:** ◐ done in substance — memory + per-specialist IAM scoping are real and tested;
+context pinning and the manual dev smoke test are the two genuinely open pieces.
 
 ---
 

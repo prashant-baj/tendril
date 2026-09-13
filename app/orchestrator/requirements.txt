@@ -1,2 +1,2 @@
-strands-agents
+strands-agents==1.55.1
 boto3

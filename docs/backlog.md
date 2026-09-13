@@ -26,7 +26,20 @@ Function URL, real Open-Meteo forecast), a tool-agnostic HTTP-tool binding in th
 (`agents/hello_agent/agent.py`'s `build_tools`/`make_tool`/`call_tool_endpoint`, SigV4-signed),
 and — closing AF-01's deferred AC — **per-specialist IAM execution roles** (was one shared role)
 so tool-invoke grants are scoped to only the tools each registry entry declares; `vision.json` now
-declares `tools: ["weather"]` as the proof)
+declares `tools: ["weather"]` as the proof; fixed a real quality bug the weather tool surfaced —
+`vision` was crediting unrelated weather conditions (light drizzle/humidity) for symptoms that
+don't match (dry, curling leaves), so `vision-system.md` now treats weather as corroborating
+evidence only, never the primary explanation; then built **AF-05** (Memory & Context) directly on
+AF-01/AF-03: a new `infra/stacks/memory_stack.py` (Bedrock Knowledge Base on **S3 Vectors**, a
+deliberate choice over OpenSearch Serverless to avoid this project's first continuously-billed
+resource — confirmed with the project owner), per-garden `MemoryManager`/`BedrockKnowledgeBaseStore`
+scoping in the shared template, `context_manager="auto"` for context-window bounding, and the same
+per-specialist IAM scoping pattern AF-03 established, now for memory access too; `vision.json`
+declares `memory.enabled: true`. Context pinning (vision/success-criteria) and the manual smoke
+test are the two pieces genuinely left open, both requiring a deploy or session-continuity work
+not yet built. Also upgraded `strands-agents` from an unpinned, locally-stale 1.5.0 to a pinned
+1.55.1 — the version gap had hidden that `MemoryManager`/`ContextInjector`/etc. didn't exist
+locally at all)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
@@ -60,7 +73,7 @@ immediate next thing.
 | 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | — | AF-01 | **Skipped (2026-09-13):** pure rename (`hello_agent/` → `template_agent/`), no new capability — the "one codebase, many specialists" proof already happened via `vision.json`. AF-03 built directly on AF-01 instead. |
 | 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ◐ | AF-01 | `app/tools/weather/` (Lambda + IAM Function URL, real Open-Meteo forecast) + tool-agnostic HTTP binding in `agents/hello_agent/agent.py` (SigV4-signed) + per-specialist IAM execution roles (`_make_agent_role`, replacing one shared role). `vision.json` declares `tools: ["weather"]`. Unit + CDK tests green; real `cdk synth` confirms scoped IAM. Only gap: manual dev smoke test not yet run (needs deploy). |
 | 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ☐ | AF-01 | Real agronomy-specific denied topics/PII policy, replacing AF-01's placeholder stub. `vision_guardrail.json` (rank 8) reuses `hello`'s topics verbatim — the domain-tuning + eval-scenario work this story calls for is still genuinely open. |
-| 12 | AF | AF-05 | Memory & Context: per-user/per-garden memory for every specialist | ☐ | AF-02 | Strands Memory (Bedrock KB) + context management, scoped per tenant, opt-in per agent — fulfills ADR-0001 action items 6 & 8. |
+| 12 | AF | AF-05 | Memory & Context: per-garden memory for every specialist | ◐ | AF-01, AF-03 | `infra/stacks/memory_stack.py` (Bedrock KB on S3 Vectors — pay-per-use, not OpenSearch Serverless) + per-garden `MemoryManager`/`BedrockKnowledgeBaseStore` in the template + `context_manager="auto"` + per-specialist IAM (mirrors AF-03). Scoped per-garden not per-user (no auth yet). Open: context pinning (needs session continuity, not yet built) and the manual dev smoke test. |
 | 13 | — | — | *(not yet storied)* Plan approval via UI (HITL) | ☐ | WS-04 | `docs/roadmap.md` Phase 5 — wires the existing "Review plan" button to `POST /plans/{id}/approve` + orchestrator interrupt/resume. Write the story once Phase 4 ships. |
 | 14 | — | — | *(not yet storied)* Tasks & Activity on real data | ☐ | WS-04 | `docs/roadmap.md` Phase 6 — replaces `MockTaskApi`/`MockActivityApi`. Write the story once Phase 5 ships. |
 | 15 | PG | PG-07 | Verify: eval scenarios for prompt & guardrail | ◐ | PG-02, PG-04, PG-05 | Eval script built; live run **4/6 pass**. Open: (a) commit + redeploy the retuned `UnsafeChemicalUse` topic, then re-verify the safe-IPM case no longer over-blocks; (b) **PII returned `action=NONE`** — run `eval_guardrail.py --debug` and diagnose (region/feature vs input-vs-output masking). |

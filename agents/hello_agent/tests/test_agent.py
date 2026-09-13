@@ -291,3 +291,103 @@ def test_call_tool_endpoint_signs_request_and_parses_json_response(monkeypatch):
     assert result == {"temperatureC": 21.5}
     assert "lat=12.9" in captured["url"]
     assert "authorization" in captured["headers"]
+
+
+# --- memory (AF-05) -----------------------------------------------------------
+
+
+def test_build_memory_manager_none_when_disabled(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", False)
+    assert agent.build_memory_manager("g1") is None
+
+
+def test_build_memory_manager_none_when_no_garden_id(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", True)
+    assert agent.build_memory_manager(None) is None
+
+
+def test_build_memory_manager_none_when_knowledge_base_not_found(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(agent, "KNOWLEDGE_BASE_NAME", "tendril-dev-memory")
+
+    class FakeClient:
+        def list_knowledge_bases(self, **_):
+            return {"knowledgeBaseSummaries": []}
+
+    monkeypatch.setattr(agent.boto3, "client", lambda *a, **k: FakeClient())
+    assert agent.build_memory_manager("g1") is None
+
+
+def test_build_memory_manager_none_when_data_source_not_found(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(agent, "KNOWLEDGE_BASE_NAME", "tendril-dev-memory")
+    monkeypatch.setattr(agent, "MEMORY_DATA_SOURCE_NAME", "tendril-dev-memory-datasource")
+
+    class FakeClient:
+        def list_knowledge_bases(self, **_):
+            return {
+                "knowledgeBaseSummaries": [{"name": "tendril-dev-memory", "knowledgeBaseId": "KB1"}]
+            }
+
+        def list_data_sources(self, **_):
+            return {"dataSourceSummaries": []}
+
+    monkeypatch.setattr(agent.boto3, "client", lambda *a, **k: FakeClient())
+    assert agent.build_memory_manager("g1") is None
+
+
+def test_build_memory_manager_fail_open_on_exception(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", True)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no AWS")
+
+    monkeypatch.setattr(agent.boto3, "client", boom)
+    assert agent.build_memory_manager("g1") is None
+
+
+def test_build_memory_manager_scopes_per_garden(monkeypatch):
+    monkeypatch.setattr(agent, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(agent, "KNOWLEDGE_BASE_NAME", "tendril-dev-memory")
+    monkeypatch.setattr(agent, "MEMORY_DATA_SOURCE_NAME", "tendril-dev-memory-datasource")
+    monkeypatch.setattr(agent, "MEMORY_SCOPE", "garden")
+
+    class FakeClient:
+        def list_knowledge_bases(self, **_):
+            return {
+                "knowledgeBaseSummaries": [{"name": "tendril-dev-memory", "knowledgeBaseId": "KB1"}]
+            }
+
+        def list_data_sources(self, **_):
+            return {
+                "dataSourceSummaries": [
+                    {"name": "tendril-dev-memory-datasource", "dataSourceId": "DS1"}
+                ]
+            }
+
+    monkeypatch.setattr(agent.boto3, "client", lambda *a, **k: FakeClient())
+
+    captured_store_kwargs = []
+
+    class FakeStore:
+        def __init__(self, **kwargs):
+            captured_store_kwargs.append(kwargs)
+
+    captured_manager_stores = []
+
+    class FakeMemoryManager:
+        def __init__(self, stores):
+            captured_manager_stores.append(stores)
+
+    monkeypatch.setattr(agent, "BedrockKnowledgeBaseStore", FakeStore)
+    monkeypatch.setattr(agent, "MemoryManager", FakeMemoryManager)
+
+    manager_g1 = agent.build_memory_manager("garden-1")
+    manager_g2 = agent.build_memory_manager("garden-2")
+
+    assert manager_g1 is not None
+    assert manager_g2 is not None
+    assert captured_store_kwargs[0]["scope"] == "garden:garden-1"
+    assert captured_store_kwargs[1]["scope"] == "garden:garden-2"
+    # Two different gardens never share a scope string — the actual isolation mechanism.
+    assert captured_store_kwargs[0]["scope"] != captured_store_kwargs[1]["scope"]

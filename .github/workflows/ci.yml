@@ -102,11 +102,11 @@ jobs:
       - name: Install CDK + deps
         run: npm install -g aws-cdk && pip install -r infra/requirements.txt
       # Deploy the app stacks. Order matters on a cold environment: foundation (the DynamoDB
-      # table) must exist before client-api, which resolves it by stable name; prompts and
-      # guardrails must exist before the agent runtime, which resolves them by name at cold
-      # start; frontend must exist (bucket created) before the sync step below. CDK no-ops any
-      # stack whose template is unchanged, so listing all six is safe regardless of which
-      # folder triggered the run.
+      # table) must exist before client-api, which resolves it by stable name; prompts,
+      # guardrails, and memory (AF-05's Knowledge Base) must exist before the agent runtime,
+      # which resolves all three by name at cold start; frontend must exist (bucket created)
+      # before the sync step below. CDK no-ops any stack whose template is unchanged, so listing
+      # all seven is safe regardless of which folder triggered the run.
       - name: Deploy dev (app stacks)
         run: >-
           cd infra && cdk deploy
@@ -114,6 +114,7 @@ jobs:
           tendril-dev-client-api
           tendril-dev-prompts
           tendril-dev-guardrails
+          tendril-dev-memory
           tendril-dev-agentcore
           tendril-dev-frontend
           --context env_name=dev --require-approval never

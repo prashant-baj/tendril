@@ -26,6 +26,27 @@ execution role is likewise scoped to only those). Every Tool API is a Lambda Fun
 role credentials, the same posture as calling any other AWS API — never a shared secret/API key.
 The binding is tool-agnostic: adding a second tool is a new `app/tools/<name>/` Lambda + registry
 declaration, never new code here.
+
+Memory (AF-05, ADR-0001 action item 6): when a registry entry's `memory.enabled` is true,
+`MEMORY_ENABLED`/`KNOWLEDGE_BASE_NAME`/`MEMORY_DATA_SOURCE_NAME`/`MEMORY_SCOPE` are injected the
+same stable-name way as `PROMPT_NAME`/`GUARDRAIL_NAME` — resolved to a real Bedrock Knowledge
+Base + data source id at runtime via `bedrock-agent:ListKnowledgeBases`/`ListDataSources`, never
+hardcoded. `build_memory_manager()` scopes a `BedrockKnowledgeBaseStore` to
+`f"{MEMORY_SCOPE}:{garden_id}"` (`gardenId` arrives in the payload from the orchestrator,
+uniformly like `imageUrl` — every specialist can receive it, only ones with `memory.enabled` use
+it) — this *is* the multi-tenant isolation mechanism (a different garden's scope string never
+matches, so its documents never come back), not a bespoke scheme. Fail-open, like prompt/guardrail
+resolution: a memory problem degrades to "no memory this turn," never a failed turn.
+
+`context_manager="auto"` (Strands' composed `SummarizingConversationManager` +
+`ContextOffloader`) bounds context growth from large tool results within a single turn.
+**Not yet wired: pinning a garden's "vision"/success-criteria via `ContextInjector`.** That
+guards pinned content against summarization *across many turns of one long conversation* — but
+each `invoke()` here is still a fresh, stateless one-shot call (no `SessionManager` yet; that's
+`strands-capability-mapping.md`'s separate, not-yet-built cross-invocation-resume item), so there
+is no accumulating history yet for anything to be summarized away *from*. Wiring `ContextInjector`
+now would inject the same content every single call with nothing to protect it from — real work,
+not a checkbox, once session continuity exists.
 """
 
 import json
@@ -39,7 +60,9 @@ from bedrock_agentcore import BedrockAgentCoreApp
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from strands import Agent, tool
+from strands.memory import MemoryManager
 from strands.models import BedrockModel
+from strands.vended_memory_stores.bedrock_knowledge_base import BedrockKnowledgeBaseStore
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("tendril.hello_agent")
@@ -48,6 +71,10 @@ MODEL_ID = os.getenv("MODEL_ID")  # provided per-environment; never hardcoded
 PROMPT_NAME = os.getenv("PROMPT_NAME")  # stable name owned by the prompts stack
 GUARDRAIL_NAME = os.getenv("GUARDRAIL_NAME")  # stable name owned by the guardrails stack
 AWS_REGION = os.getenv("AWS_REGION")
+MEMORY_ENABLED = os.getenv("MEMORY_ENABLED") == "true"
+KNOWLEDGE_BASE_NAME = os.getenv("KNOWLEDGE_BASE_NAME")  # stable name owned by MemoryStack
+MEMORY_DATA_SOURCE_NAME = os.getenv("MEMORY_DATA_SOURCE_NAME")  # stable name owned by MemoryStack
+MEMORY_SCOPE = os.getenv("MEMORY_SCOPE") or "garden"
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Tendril's hello agent. Confirm the runtime is alive and, if asked a "
@@ -261,10 +288,84 @@ def build_tools() -> list:
     return [make_tool(name, endpoints[name]) for name in tool_names if name in endpoints]
 
 
+def _resolve_knowledge_base_id(client, name: str) -> str | None:
+    """Find a knowledge base's id by its stable name (paginating ListKnowledgeBases)."""
+    token = None
+    while True:
+        resp = client.list_knowledge_bases(**({"nextToken": token} if token else {}))
+        for summary in resp.get("knowledgeBaseSummaries", []):
+            if summary.get("name") == name:
+                return summary.get("knowledgeBaseId")
+        token = resp.get("nextToken")
+        if not token:
+            return None
+
+
+def _resolve_data_source_id(client, knowledge_base_id: str, name: str) -> str | None:
+    """Find a data source's id by its stable name within one knowledge base."""
+    token = None
+    while True:
+        kwargs = {"knowledgeBaseId": knowledge_base_id}
+        if token:
+            kwargs["nextToken"] = token
+        resp = client.list_data_sources(**kwargs)
+        for summary in resp.get("dataSourceSummaries", []):
+            if summary.get("name") == name:
+                return summary.get("dataSourceId")
+        token = resp.get("nextToken")
+        if not token:
+            return None
+
+
+def build_memory_manager(garden_id: str | None) -> MemoryManager | None:
+    """Builds a MemoryManager scoped to this garden (AF-05), or None when memory isn't enabled
+    for this specialist, no garden_id was supplied, or resolution fails. Fail-open, like
+    prompt/guardrail resolution: a memory problem degrades the turn, never fails it."""
+    if not MEMORY_ENABLED or not garden_id:
+        return None
+    try:
+        client = boto3.client("bedrock-agent", region_name=AWS_REGION)
+        kb_id = _resolve_knowledge_base_id(client, KNOWLEDGE_BASE_NAME)
+        if not kb_id:
+            logger.warning(
+                "Knowledge base %s not found; running without memory.", KNOWLEDGE_BASE_NAME
+            )
+            return None
+        data_source_id = _resolve_data_source_id(client, kb_id, MEMORY_DATA_SOURCE_NAME)
+        if not data_source_id:
+            logger.warning(
+                "Data source %s not found; running without memory.", MEMORY_DATA_SOURCE_NAME
+            )
+            return None
+        store = BedrockKnowledgeBaseStore(
+            name="garden-memory",
+            config={
+                "knowledge_base_id": kb_id,
+                "data_source_type": "CUSTOM",
+                "data_source_id": data_source_id,
+                "region_name": AWS_REGION,
+            },
+            scope=f"{MEMORY_SCOPE}:{garden_id}",
+            writable=True,
+            extraction=True,
+        )
+        logger.info("Attached memory for scope '%s:%s'.", MEMORY_SCOPE, garden_id)
+        return MemoryManager(stores=[store])
+    except Exception as e:
+        logger.warning("Could not build memory manager (%s); running without memory.", e)
+        return None
+
+
 @app.entrypoint
 def invoke(payload: dict) -> dict:
     content = resolve_content(payload)
-    agent = Agent(model=_get_model(), system_prompt=_get_system_prompt(), tools=build_tools())
+    agent = Agent(
+        model=_get_model(),
+        system_prompt=_get_system_prompt(),
+        tools=build_tools(),
+        memory_manager=build_memory_manager(payload.get("gardenId")),
+        context_manager="auto",
+    )
     result = agent(content)
     text = str(result)
     logger.info("invoke returning %d chars: %s", len(text), text[:500])

@@ -15,6 +15,7 @@ from stacks.client_api_stack import ClientApiStack  # noqa: E402
 from stacks.foundation_stack import FoundationStack  # noqa: E402
 from stacks.frontend_stack import FrontendStack  # noqa: E402
 from stacks.guardrails_stack import GuardrailsStack  # noqa: E402
+from stacks.memory_stack import MemoryStack  # noqa: E402
 from stacks.pipeline_stack import PipelineStack  # noqa: E402
 from stacks.prompts_stack import PromptsStack  # noqa: E402
 
@@ -101,6 +102,41 @@ def test_prompt_uses_file_text():
                 ),
             }
         ),
+    )
+
+
+# --- memory (AF-05: Bedrock Knowledge Base on S3 Vectors) --------------------
+
+
+def test_memory_stack_provisions_knowledge_base_on_s3_vectors():
+    app = _app()
+    tpl = Template.from_stack(MemoryStack(app, "mem", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Bedrock::KnowledgeBase",
+        Match.object_like(
+            {
+                "Name": "tendril-dev-memory",
+                "KnowledgeBaseConfiguration": Match.object_like({"Type": "VECTOR"}),
+                "StorageConfiguration": Match.object_like({"Type": "S3_VECTORS"}),
+            }
+        ),
+    )
+    tpl.has_resource_properties(
+        "AWS::Bedrock::DataSource",
+        Match.object_like(
+            {
+                "Name": "tendril-dev-memory-datasource",
+                "DataSourceConfiguration": Match.object_like({"Type": "CUSTOM"}),
+            }
+        ),
+    )
+    # S3 Vectors (pay-per-request), never OpenSearch Serverless (continuous cost) — the
+    # project's other resources are all pay-per-use, and this was a deliberate choice to match.
+    tpl.resource_count_is("AWS::S3Vectors::VectorBucket", 1)
+    tpl.has_resource_properties(
+        "AWS::S3Vectors::Index",
+        Match.object_like({"Dimension": 1024, "DistanceMetric": "cosine"}),
     )
 
 
@@ -258,6 +294,75 @@ def test_tool_iam_scoped_to_the_specialist_that_declares_it():
         )
         assert not any("Fixturenotools" in lid for lid in granted_on), (
             "a specialist that doesn't declare the tool must not get the grant"
+        )
+    finally:
+        fixture.unlink()
+
+
+# --- Memory: per-specialist Bedrock Knowledge Base access (AF-05) ------------
+
+
+def test_specialist_with_memory_enabled_receives_env_vars():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac9", env_name="dev", env=ENV))
+
+    # vision.json declares memory.enabled: true — its runtime resolves the KB by stable name.
+    tpl.has_resource_properties(
+        "AWS::BedrockAgentCore::Runtime",
+        Match.object_like(
+            {
+                "EnvironmentVariables": Match.object_like(
+                    {
+                        "MEMORY_ENABLED": "true",
+                        "KNOWLEDGE_BASE_NAME": "tendril-dev-memory",
+                        "MEMORY_DATA_SOURCE_NAME": "tendril-dev-memory-datasource",
+                        "MEMORY_SCOPE": "garden",
+                    }
+                )
+            }
+        ),
+    )
+
+
+def test_memory_iam_scoped_to_the_specialist_that_enables_it():
+    import json
+    from pathlib import Path
+
+    # A fixture specialist without a memory block — proves the grant is per-specialist, not
+    # handed to every runtime, mirroring AF-03's tool-scoping test.
+    registry_dir = Path(__file__).resolve().parents[2] / "agents" / "registry"
+    fixture = registry_dir / "_test_fixture_no_memory_agent.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "name": "fixturenomemory",
+                "template": "hello_agent",
+                "model_id": "",
+                "prompt_name": "vision-system",
+                "guardrail_name": "vision-guardrail",
+                "description": "test fixture without memory enabled",
+                "tools": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        app = _app()
+        tpl = Template.from_stack(AgentCoreStack(app, "ac10", env_name="dev", env=ENV))
+
+        granted_on = []
+        for logical_id, res in tpl.find_resources("AWS::IAM::Policy").items():
+            for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+                act = stmt["Action"]
+                actions = act if isinstance(act, list) else [act]
+                if "bedrock-agent-runtime:Retrieve" in actions:
+                    granted_on.append(logical_id)
+
+        assert any("Vision" in lid for lid in granted_on), (
+            "vision (memory.enabled) should have bedrock-agent-runtime:Retrieve"
+        )
+        assert not any("Fixturenomemory" in lid for lid in granted_on), (
+            "a specialist without memory.enabled must not get the grant"
         )
     finally:
         fixture.unlink()

@@ -78,7 +78,9 @@ def test_specialist_tool_calls_invoke_agent_runtime(monkeypatch):
     fake_client = FakeAgentCoreClient(response_body={"result": "hello there"})
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
-    tool_fn = handler._make_specialist_tool("hello", "arn:aws:bedrock-agentcore:hello", "desc")
+    tool_fn = handler._make_specialist_tool(
+        "hello", "arn:aws:bedrock-agentcore:hello", "desc", "g1"
+    )
     result = tool_fn("what's wrong with my tomato?")
 
     assert result == "hello there"
@@ -86,14 +88,17 @@ def test_specialist_tool_calls_invoke_agent_runtime(monkeypatch):
     call = fake_client.calls[0]
     assert call["agentRuntimeArn"] == "arn:aws:bedrock-agentcore:hello"
     assert len(call["runtimeSessionId"]) >= 33
-    assert json.loads(call["payload"]) == {"prompt": "what's wrong with my tomato?"}
+    assert json.loads(call["payload"]) == {
+        "prompt": "what's wrong with my tomato?",
+        "gardenId": "g1",
+    }
 
 
 def test_specialist_tool_propagates_errors(monkeypatch):
     fake_client = FakeAgentCoreClient(raise_on_invoke=RuntimeError("unreachable"))
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
-    tool_fn = handler._make_specialist_tool("hello", "arn:x", "desc")
+    tool_fn = handler._make_specialist_tool("hello", "arn:x", "desc", "g1")
     try:
         tool_fn("prompt")
         raised = False
@@ -111,7 +116,7 @@ def test_build_tools_one_per_manifest_entry(monkeypatch):
             "other": {"arn": "arn:o", "description": "d2"},
         },
     )
-    tools = handler._build_tools()
+    tools = handler._build_tools("g1")
     assert len(tools) == 2
 
 
@@ -120,13 +125,19 @@ def test_specialist_tool_includes_image_in_payload_when_provided(monkeypatch):
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
     tool_fn = handler._make_specialist_tool(
-        "vision", "arn:vision", "desc", image_url="https://s3.example/photo", image_format="jpeg"
+        "vision",
+        "arn:vision",
+        "desc",
+        "g1",
+        image_url="https://s3.example/photo",
+        image_format="jpeg",
     )
     tool_fn("what plant is this?")
 
     payload = json.loads(fake_client.calls[0]["payload"])
     assert payload == {
         "prompt": "what plant is this?",
+        "gardenId": "g1",
         "imageUrl": "https://s3.example/photo",
         "imageFormat": "jpeg",
     }
@@ -136,11 +147,11 @@ def test_specialist_tool_omits_image_when_not_provided(monkeypatch):
     fake_client = FakeAgentCoreClient()
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
-    tool_fn = handler._make_specialist_tool("hello", "arn:hello", "desc")
+    tool_fn = handler._make_specialist_tool("hello", "arn:hello", "desc", "g1")
     tool_fn("hi")
 
     payload = json.loads(fake_client.calls[0]["payload"])
-    assert payload == {"prompt": "hi"}
+    assert payload == {"prompt": "hi", "gardenId": "g1"}
 
 
 def test_build_tools_passes_image_to_every_tool(monkeypatch):
@@ -150,7 +161,7 @@ def test_build_tools_passes_image_to_every_tool(monkeypatch):
     fake_client = FakeAgentCoreClient()
     monkeypatch.setattr(handler, "_agentcore", fake_client)
 
-    (tool_fn,) = handler._build_tools("https://s3.example/photo", "jpeg")
+    (tool_fn,) = handler._build_tools("g1", "https://s3.example/photo", "jpeg")
     tool_fn("prompt")
 
     payload = json.loads(fake_client.calls[0]["payload"])
