@@ -3,7 +3,6 @@ import { RouterLink } from '@angular/router';
 import { IconComponent } from '../icon/icon.component';
 import { ChipComponent, ChipTone } from '../chip/chip.component';
 import { Goal } from '../../../core/models/goal.model';
-import { MockGoalApi } from '../../../core/services/goal.service';
 
 /** A goal-in-progress card on the Home screen's "Goals in progress" grid. */
 @Component({
@@ -17,8 +16,9 @@ import { MockGoalApi } from '../../../core/services/goal.service';
 export class GoalCardComponent {
   @Input({ required: true }) goal!: Goal;
 
-  // Every goal card links to the same mocked detail screen — see GoalApi's doc comment.
-  readonly detailRoute = ['/goals', MockGoalApi.PRIMARY_GOAL_ID];
+  get detailRoute(): string[] {
+    return ['/goals', this.goal.goalId];
+  }
 
   get statusTone(): ChipTone {
     return this.goal.status === 'completed' ? 'green' : 'amber';

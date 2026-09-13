@@ -22,12 +22,11 @@ describe('HomeComponent', () => {
     fixture.detectChanges();
   });
 
-  it('renders the proposal banner, today tasks, goals, and plants', () => {
+  it('renders without error when tasks, goals, and plants are all empty', () => {
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-    expect(text).toContain('Waiting on you');
-    expect(text).toContain('Hand-pollinate tomato flowers');
-    expect(text).toContain('Get Tomato #2 setting fruit within 3 weeks');
-    expect(text).toContain('Tomato #2');
+    expect(text).toContain('Today');
+    expect(text).toContain('Goals in progress');
+    expect(text).toContain('Plants');
   });
 
   it('toggling a today task delegates to TaskApi', () => {

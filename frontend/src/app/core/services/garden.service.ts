@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
-import { BehaviorSubject, Observable, combineLatest, of } from 'rxjs';
-import { map, tap } from 'rxjs/operators';
+import { Observable, of } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { CLIENT_API_BASE_URL } from '../config/client-api.config';
 import { CreateGardenRequest, Garden, GardenFact } from '../models/garden.model';
 import { CreateGoalRequest } from '../models/goal.model';
@@ -16,10 +16,14 @@ import { MediaUploadRequest, MediaUploadResponse } from '../models/media.model';
 export abstract class GardenApi {
   abstract getGarden(): Observable<Garden>;
   abstract getGardenFacts(): Observable<GardenFact[]>;
-  /** Short list for the Home screen's horizontally-scrolling plant strip. */
-  abstract getPlantsSummary(): Observable<Plant[]>;
-  /** Full list for the Garden screen. */
-  abstract getPlants(): Observable<Plant[]>;
+  /**
+   * Short list for the Home screen's horizontally-scrolling plant strip, and the full list for
+   * the Garden screen. `gardenId` is `null` for the pre-onboarding demo state (no garden created
+   * yet) — implementations fall back to fixture data in that case, matching
+   * `CurrentGardenService.garden$`'s existing pre-onboarding fallback.
+   */
+  abstract getPlantsSummary(gardenId: string | null): Observable<Plant[]>;
+  abstract getPlants(gardenId: string | null): Observable<Plant[]>;
   /** OB-01: `POST /gardens`. */
   abstract createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }>;
   /** OB-01: `GET /gardens/{gardenId}`. */
@@ -36,6 +40,8 @@ export abstract class GardenApi {
     gardenId: string,
     request: CreatePlantRequest,
   ): Observable<{ plantId: string }>;
+  /** Plant lifecycle: `DELETE /gardens/{gardenId}/plants/{plantId}`. */
+  abstract deletePlant(gardenId: string, plantId: string): Observable<void>;
   /** WS-03/WS-05: `POST /gardens/{gardenId}/goals` — 202, async orchestration (ADR-0012). */
   abstract createGoal(
     gardenId: string,
@@ -53,12 +59,8 @@ export class MockGardenApi extends GardenApi {
     climateZone: 'Kharif, week 11',
   };
 
-  private readonly gardenFacts: GardenFact[] = [
-    { icon: 'location_on', label: 'Pune, 18.52°N' },
-    { icon: 'sunny', label: '~5 hrs direct sun' },
-    { icon: 'yard', label: 'Containers only' },
-    { icon: 'calendar_month', label: 'Kharif, week 11' },
-  ];
+  // No garden-facts read endpoint exists yet — blank until that backend work is done.
+  private readonly gardenFacts: GardenFact[] = [];
 
   private readonly plantsSummary: Plant[] = [
     { plantId: 'tomato-2', name: 'Tomato #2', species: 'Tomato', variety: 'Pusa Ruby', stage: 'fruiting', icon: 'potted_plant', healthState: 'needs-care', meta: '' },
@@ -85,11 +87,11 @@ export class MockGardenApi extends GardenApi {
     return of(this.gardenFacts);
   }
 
-  getPlantsSummary(): Observable<Plant[]> {
+  getPlantsSummary(_gardenId: string | null): Observable<Plant[]> {
     return of(this.plantsSummary);
   }
 
-  getPlants(): Observable<Plant[]> {
+  getPlants(_gardenId: string | null): Observable<Plant[]> {
     return of(this.plants);
   }
 
@@ -144,6 +146,16 @@ export class MockGardenApi extends GardenApi {
     return of({ plantId });
   }
 
+  deletePlant(_gardenId: string, plantId: string): Observable<void> {
+    for (const list of [this.plants, this.plantsSummary]) {
+      const index = list.findIndex((p) => p.plantId === plantId);
+      if (index !== -1) {
+        list.splice(index, 1);
+      }
+    }
+    return of(undefined);
+  }
+
   createGoal(
     _gardenId: string,
     _request: CreateGoalRequest,
@@ -161,22 +173,39 @@ interface GardenDto {
   createdAt: string;
 }
 
+/** Shape returned by `GET /gardens/{gardenId}/plants` (app/api/openapi.yaml's `Plant` schema). */
+interface PlantDto {
+  plantId: string;
+  species: string;
+  variety?: string;
+  stage: string;
+}
+
+function plantFromDto(dto: PlantDto): Plant {
+  return {
+    plantId: dto.plantId,
+    name: dto.species,
+    species: dto.species,
+    variety: dto.variety ?? '',
+    stage: dto.stage,
+    // No real health-tracking or per-plant photo backend yet — a generic icon/healthy state
+    // for every real plant until those stories land (OB-03 tracks the real-photo follow-up).
+    icon: 'eco',
+    healthState: 'healthy',
+    meta: dto.variety ?? '',
+  };
+}
+
 /**
- * Real Client API implementation of `createGarden`/`getGardenById` (OB-01). Every other method
- * still has no backend yet, so it delegates to an internal `MockGardenApi` — swapping the
- * `app.config.ts` binding to this class doesn't regress the still-mocked screens.
+ * Real Client API implementation of `createGarden`/`getGardenById` (OB-01) and the full Plant
+ * lifecycle (create/list/delete). `getGarden`/`getGardenFacts` still have no backend (no story
+ * has added `climateZone`/facts to the API yet) and delegate to an internal `MockGardenApi`.
  */
 @Injectable({ providedIn: 'root' })
 export class HttpGardenApi extends GardenApi {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = inject(CLIENT_API_BASE_URL);
   private readonly mock = new MockGardenApi();
-
-  // OB-02: there's no GET-list-plants operation yet (not in openapi.yaml — only create), so
-  // "reflects real data immediately after adding one" is done by prepending each created plant
-  // onto the still-mocked base list client-side, rather than re-fetching from a real endpoint
-  // that doesn't exist. A real list read is a later story once one is actually needed.
-  private readonly addedPlants = new BehaviorSubject<Plant[]>([]);
 
   getGarden(): Observable<Garden> {
     return this.mock.getGarden();
@@ -186,16 +215,18 @@ export class HttpGardenApi extends GardenApi {
     return this.mock.getGardenFacts();
   }
 
-  getPlantsSummary(): Observable<Plant[]> {
-    return combineLatest([this.mock.getPlantsSummary(), this.addedPlants]).pipe(
-      map(([base, added]) => [...added, ...base]),
-    );
+  getPlantsSummary(gardenId: string | null): Observable<Plant[]> {
+    return this.getPlants(gardenId);
   }
 
-  getPlants(): Observable<Plant[]> {
-    return combineLatest([this.mock.getPlants(), this.addedPlants]).pipe(
-      map(([base, added]) => [...added, ...base]),
-    );
+  getPlants(gardenId: string | null): Observable<Plant[]> {
+    // No garden created yet (pre-onboarding demo state) — nothing real to list.
+    if (!gardenId) {
+      return this.mock.getPlants(gardenId);
+    }
+    return this.http
+      .get<PlantDto[]>(`${this.baseUrl}/gardens/${gardenId}/plants`)
+      .pipe(map((dtos) => dtos.map(plantFromDto)));
   }
 
   createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }> {
@@ -235,23 +266,11 @@ export class HttpGardenApi extends GardenApi {
   }
 
   createPlant(gardenId: string, request: CreatePlantRequest): Observable<{ plantId: string }> {
-    return this.http
-      .post<{ plantId: string }>(`${this.baseUrl}/gardens/${gardenId}/plants`, request)
-      .pipe(
-        tap(({ plantId }) => {
-          const plant: Plant = {
-            plantId,
-            name: request.species,
-            species: request.species,
-            variety: request.variety ?? '',
-            stage: 'new',
-            icon: 'eco',
-            healthState: 'healthy',
-            meta: request.variety ?? '',
-          };
-          this.addedPlants.next([plant, ...this.addedPlants.value]);
-        }),
-      );
+    return this.http.post<{ plantId: string }>(`${this.baseUrl}/gardens/${gardenId}/plants`, request);
+  }
+
+  deletePlant(gardenId: string, plantId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/gardens/${gardenId}/plants/${plantId}`);
   }
 
   createGoal(

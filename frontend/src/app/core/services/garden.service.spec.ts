@@ -125,7 +125,7 @@ describe('HttpGardenApi', () => {
     expect(completed).toBe(true);
   });
 
-  it('createPlant() POSTs to /gardens/{id}/plants and prepends the result onto getPlants()', (done) => {
+  it('createPlant() POSTs to /gardens/{id}/plants', () => {
     let result: { plantId: string } | undefined;
     api.createPlant('g-1', { species: 'Tomato', variety: 'Pusa Ruby' }).subscribe((r) => {
       result = r;
@@ -137,13 +137,43 @@ describe('HttpGardenApi', () => {
     req.flush({ plantId: 'p-1' });
 
     expect(result).toEqual({ plantId: 'p-1' });
+  });
 
-    api.getPlants().subscribe((plants) => {
-      expect(plants[0]).toEqual(
-        jasmine.objectContaining({ plantId: 'p-1', species: 'Tomato', variety: 'Pusa Ruby' }),
-      );
+  it('getPlants(gardenId) GETs /gardens/{id}/plants and maps each Plant DTO', () => {
+    let result: unknown;
+    api.getPlants('g-1').subscribe((plants) => (result = plants));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    expect(req.request.method).toBe('GET');
+    req.flush([{ plantId: 'p-1', species: 'Tomato', variety: 'Pusa Ruby', stage: 'fruiting' }]);
+
+    expect(result).toEqual([
+      jasmine.objectContaining({
+        plantId: 'p-1',
+        name: 'Tomato',
+        species: 'Tomato',
+        variety: 'Pusa Ruby',
+        stage: 'fruiting',
+      }),
+    ]);
+  });
+
+  it('getPlants(null) falls back to the mock fixture (no garden created yet)', (done) => {
+    api.getPlants(null).subscribe((plants) => {
+      expect(plants.length).toBeGreaterThan(0);
       done();
     });
+  });
+
+  it('deletePlant() DELETEs /gardens/{id}/plants/{plantId}', () => {
+    let completed = false;
+    api.deletePlant('g-1', 'p-1').subscribe(() => (completed = true));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants/p-1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush(null);
+
+    expect(completed).toBe(true);
   });
 
   it('createGoal() POSTs to /gardens/{id}/goals', () => {

@@ -16,6 +16,7 @@ import { plantHealthIcon, plantHealthLabel, plantHealthTone } from '../plant-hea
 export class PlantRowComponent {
   @Input({ required: true }) plant!: Plant;
   @Output() activate = new EventEmitter<void>();
+  @Output() delete = new EventEmitter<void>();
 
   get healthLabel(): string {
     return plantHealthLabel(this.plant.healthState);

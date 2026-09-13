@@ -14,9 +14,7 @@ describe('ActivityComponent', () => {
     fixture.detectChanges();
   });
 
-  it('renders the timeline including the quoted WhatsApp message', () => {
-    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-    expect(text).toContain('Reminder sent on WhatsApp');
-    expect(text).toContain('Good morning Meera');
+  it('renders without error when there is no activity yet', () => {
+    expect(fixture.nativeElement).toBeTruthy();
   });
 });

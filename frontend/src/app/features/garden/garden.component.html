@@ -21,7 +21,11 @@
       </div>
       <div class="card list">
         @for (plant of plants(); track plant.plantId) {
-          <td-plant-row [plant]="plant" (activate)="openCapture()" />
+          <td-plant-row
+            [plant]="plant"
+            (activate)="openCapture()"
+            (delete)="deletePlant(plant.plantId)"
+          />
         }
       </div>
     </section>

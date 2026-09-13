@@ -64,7 +64,7 @@ paths:
             statusCode: "200"
             responseParameters:
               method.response.header.Access-Control-Allow-Origin: "'*'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id'"
 
   /gardens/{gardenId}:
@@ -161,6 +161,48 @@ paths:
         httpMethod: POST
         uri: "__LAMBDA_INTEGRATION_URI__"
         passthroughBehavior: when_no_match
+    get:
+      operationId: listPlants
+      summary: List every plant in a garden
+      responses:
+        "200":
+          description: The garden's plants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Plant"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants/{plantId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/PlantId"
+    delete:
+      operationId: deletePlant
+      summary: Remove a plant from a garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: Plant deleted (idempotent — also returned if it didn't exist)
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
     options: *cors-preflight
 
   /gardens/{gardenId}/goals:
@@ -204,6 +246,13 @@ components:
   parameters:
     GardenId:
       name: gardenId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    PlantId:
+      name: plantId
       in: path
       required: true
       schema:
@@ -309,6 +358,19 @@ components:
       required: [plantId]
       properties:
         plantId:
+          type: string
+
+    Plant:
+      type: object
+      required: [plantId, species, stage]
+      properties:
+        plantId:
+          type: string
+        species:
+          type: string
+        variety:
+          type: string
+        stage:
           type: string
 
     GoalCreateRequest:

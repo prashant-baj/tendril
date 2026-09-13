@@ -14,6 +14,12 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
   `mediaId` from a prior `createMediaUpload` call is given, atomically links that Media record
   to this plant (`plant_id` set via the same transaction) — so a Plant is never left pointing at
   a Media record that doesn't actually exist.
+- `listPlants`/`deletePlant`: complete the Plant lifecycle so the frontend can stop hardcoding
+  plant data. `listPlants` queries every `PLANT#*` item under the garden's partition (a single
+  `Query`, not a table `Scan` — cheap even as a garden's item count grows). `deletePlant` removes
+  the Plant item only; it deliberately does **not** cascade-delete the Plant's linked Media/S3
+  object — that photo may still be referenced elsewhere (data-architecture.md's Media records
+  are independently keyed), and no story has asked for real cleanup semantics yet.
 - `createGoal` (WS-03): persists a `Goal` record (status `Intake`) and publishes a
   `goal.submitted` EventBridge event — `AgentCoreStack`'s rule routes it to the orchestrator
   Lambda asynchronously (ADR-0004/ADR-0012). **Known trade-off:** the DynamoDB write and the
@@ -38,6 +44,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 # force=True: the standard Lambda Python runtime pre-attaches its own handler to the root
 # logger before user code runs, and basicConfig() is a documented no-op once handlers already
@@ -311,6 +318,58 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
     return _response(201, {"plantId": plant_id})
 
 
+def list_plants(event: dict[str, Any]) -> dict[str, Any]:
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with("PLANT#")
+        )
+    except Exception:
+        logger.exception("Failed to list plants for garden %s", garden_id)
+        return _error(500, "could not list plants")
+
+    plants = [
+        {
+            "plantId": item["plant_id"],
+            "species": item["species"],
+            "variety": item.get("variety", ""),
+            "stage": item.get("stage", "new"),
+        }
+        for item in resp.get("Items", [])
+    ]
+    return _response(200, plants)
+
+
+def delete_plant(event: dict[str, Any]) -> dict[str, Any]:
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    path_params = event.get("pathParameters") or {}
+    garden_id = path_params.get("gardenId")
+    plant_id = path_params.get("plantId")
+    if not garden_id or not plant_id:
+        return _error(400, "gardenId and plantId are required")
+
+    try:
+        # Deliberately does not cascade-delete the Plant's linked Media/S3 object — see the
+        # module docstring's note on why.
+        _get_table().delete_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"})
+    except Exception:
+        logger.exception("Failed to delete plant %s for garden %s", plant_id, garden_id)
+        return _error(500, "could not delete plant")
+
+    return {
+        "statusCode": 204,
+        "headers": {"Access-Control-Allow-Origin": "*"},
+        "body": "",
+    }
+
+
 def create_goal(event: dict[str, Any]) -> dict[str, Any]:
     user_id = _get_header(event.get("headers"), "X-User-Id")
     if not user_id:
@@ -419,6 +478,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return create_media_upload(event)
         if method == "POST" and resource == "/gardens/{gardenId}/plants":
             return create_plant(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/plants":
+            return list_plants(event)
+        if method == "DELETE" and resource == "/gardens/{gardenId}/plants/{plantId}":
+            return delete_plant(event)
         if method == "POST" and resource == "/gardens/{gardenId}/goals":
             return create_goal(event)
         return _error(404, f"no route for {method} {resource}")

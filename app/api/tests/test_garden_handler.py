@@ -32,11 +32,23 @@ class FakeClient:
 
 
 class FakeTable:
-    def __init__(self, get_item_response=None, raise_on_get=None, raise_on_put=None):
+    def __init__(
+        self,
+        get_item_response=None,
+        raise_on_get=None,
+        raise_on_put=None,
+        query_response=None,
+        raise_on_query=None,
+        raise_on_delete=None,
+    ):
         self._get_item_response = get_item_response or {}
         self.raise_on_get = raise_on_get
         self.raise_on_put = raise_on_put
         self.put_calls: list[dict] = []
+        self._query_response = query_response or {"Items": []}
+        self.raise_on_query = raise_on_query
+        self.raise_on_delete = raise_on_delete
+        self.delete_calls: list[dict] = []
 
     def get_item(self, Key):
         if self.raise_on_get:
@@ -47,6 +59,16 @@ class FakeTable:
         if self.raise_on_put:
             raise self.raise_on_put
         self.put_calls.append(Item)
+
+    def query(self, KeyConditionExpression):
+        if self.raise_on_query:
+            raise self.raise_on_query
+        return self._query_response
+
+    def delete_item(self, Key):
+        if self.raise_on_delete:
+            raise self.raise_on_delete
+        self.delete_calls.append(Key)
 
 
 class FakeS3:
@@ -431,6 +453,120 @@ def test_create_plant_media_link_failure_returns_500(monkeypatch):
     assert resp["statusCode"] == 500
 
 
+# --- list_plants -----------------------------------------------------------------
+
+
+def test_list_plants_happy_path(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "PLANT#p1",
+                    "plant_id": "p1",
+                    "species": "Tomato",
+                    "variety": "Pusa Ruby",
+                    "stage": "fruiting",
+                },
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "PLANT#p2",
+                    "plant_id": "p2",
+                    "species": "Chilli",
+                    "stage": "new",
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.list_plants(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert body == [
+        {"plantId": "p1", "species": "Tomato", "variety": "Pusa Ruby", "stage": "fruiting"},
+        {"plantId": "p2", "species": "Chilli", "variety": "", "stage": "new"},
+    ]
+
+
+def test_list_plants_empty(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.list_plants(event)
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == []
+
+
+def test_list_plants_missing_garden_id(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params=None)
+    resp = handler.list_plants(event)
+    assert resp["statusCode"] == 400
+
+
+def test_list_plants_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_query=RuntimeError("boom")))
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.list_plants(event)
+    assert resp["statusCode"] == 500
+
+
+# --- delete_plant ------------------------------------------------------------------
+
+
+def test_delete_plant_happy_path(monkeypatch):
+    fake_table = FakeTable()
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1", "plantId": "p1"},
+    )
+    resp = handler.delete_plant(event)
+
+    assert resp["statusCode"] == 204
+    assert len(fake_table.delete_calls) == 1
+    assert fake_table.delete_calls[0] == {"pk": "GARDEN#g1", "sk": "PLANT#p1"}
+
+
+def test_delete_plant_missing_user_id_header(monkeypatch):
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={},
+        path_params={"gardenId": "g1", "plantId": "p1"},
+    )
+    resp = handler.delete_plant(event)
+    assert resp["statusCode"] == 400
+
+
+def test_delete_plant_missing_path_params(monkeypatch):
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={"X-User-Id": "u"},
+        path_params=None,
+    )
+    resp = handler.delete_plant(event)
+    assert resp["statusCode"] == 400
+
+
+def test_delete_plant_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_delete=RuntimeError("boom")))
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1", "plantId": "p1"},
+    )
+    resp = handler.delete_plant(event)
+    assert resp["statusCode"] == 500
+
+
 # --- create_goal (WS-03) --------------------------------------------------------
 
 
@@ -617,6 +753,35 @@ def test_create_garden_response_conforms_to_openapi_schema(monkeypatch):
     validate(instance=body, schema=schema)
 
 
+def test_list_plants_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(
+            query_response={
+                "Items": [
+                    {"plant_id": "p1", "species": "Tomato", "variety": "Pusa Ruby", "stage": "new"}
+                ]
+            }
+        ),
+    )
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.list_plants(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = {
+        "type": "array",
+        "items": spec["components"]["schemas"]["Plant"],
+    }
+    validate(instance=body, schema=schema)
+
+
 # --- handler() routing ---------------------------------------------------------
 
 
@@ -675,6 +840,25 @@ def test_handler_routes_post_plants(monkeypatch):
     )
     resp = handler.handler(event, None)
     assert resp["statusCode"] == 201
+
+
+def test_handler_routes_get_plants(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
+def test_handler_routes_delete_plant(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1", "plantId": "p1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 204
 
 
 def test_handler_routes_post_goals(monkeypatch):

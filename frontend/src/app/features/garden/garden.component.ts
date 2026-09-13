@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
+import { toObservable, toSignal } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
+import { BehaviorSubject, combineLatest } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { PlantRowComponent } from '../../shared/components/plant-row/plant-row.component';
 import { GardenApi } from '../../core/services/garden.service';
@@ -19,12 +21,21 @@ export class GardenComponent {
   private readonly currentGarden = inject(CurrentGardenService);
   private readonly router = inject(Router);
 
-  // The real created garden (name/geolocation/vision). `plants()` reflects real plants added
-  // via OB-02 (prepended onto the still-mocked base list, HttpGardenApi.createPlant) —
-  // `gardenFacts` (sun hours, container type, etc.) stays mocked; no story computes those yet.
+  // Bumped after a delete so plants() re-fetches — there's no push/websocket channel for this
+  // yet, so a manual refresh trigger is the simplest way to reflect a mutation immediately.
+  private readonly refresh$ = new BehaviorSubject<void>(undefined);
+
+  // The real created garden (name/geolocation/vision). `plants()` now reads real plants from
+  // `GET /gardens/{gardenId}/plants` — `gardenFacts` (sun hours, container type, etc.) stays
+  // mocked; no story computes those yet.
   readonly garden = toSignal(this.currentGarden.garden$, { initialValue: undefined });
   readonly gardenFacts = toSignal(this.gardenApi.getGardenFacts(), { initialValue: [] });
-  readonly plants = toSignal(this.gardenApi.getPlants(), { initialValue: [] });
+  readonly plants = toSignal(
+    combineLatest([toObservable(this.currentGarden.gardenId), this.refresh$]).pipe(
+      switchMap(([gardenId]) => this.gardenApi.getPlants(gardenId)),
+    ),
+    { initialValue: [] },
+  );
 
   // No per-plant detail screen yet — matches the mockup, which sends every plant row into
   // the capture flow rather than a dedicated plant page.
@@ -34,5 +45,13 @@ export class GardenComponent {
 
   openAddPlant(): void {
     this.router.navigateByUrl('/add-plant');
+  }
+
+  deletePlant(plantId: string): void {
+    const gardenId = this.currentGarden.gardenId();
+    if (!gardenId) {
+      return;
+    }
+    this.gardenApi.deletePlant(gardenId, plantId).subscribe(() => this.refresh$.next());
   }
 }

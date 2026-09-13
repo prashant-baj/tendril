@@ -10,22 +10,13 @@ interface TaskDef {
   tone: TaskTone;
 }
 
-const TODAY: TaskDef[] = [
-  { taskId: 't1', label: 'Hand-pollinate tomato flowers', meta: 'Tomato #2 · 7:00 AM', metaIcon: 'potted_plant', chip: '7:00 AM', tone: 'due' },
-  { taskId: 't2', label: 'Move chilli pots to the morning-sun corner', meta: 'Whole garden', metaIcon: 'yard', chip: 'Today', tone: 'soon' },
-  { taskId: 't3', label: 'Photo check-in: tomato lower leaves', meta: 'Tendril will re-read this', metaIcon: 'photo_camera', chip: '6:00 PM', tone: 'due' },
-];
-const THIS_WEEK: TaskDef[] = [
-  { taskId: 'w1', label: 'Switch to a bloom & fruit feed, half dose', meta: 'Tomato #2, Chilli #1 · Wed', metaIcon: 'science', chip: 'Wed', tone: 'soon' },
-  { taskId: 'w2', label: 'Mulch the tomato pots', meta: 'Heat spell ends Thursday · Thu', metaIcon: 'thermostat', chip: 'Thu', tone: 'soon' },
-  { taskId: 'w3', label: 'Neem spray, evening only', meta: 'Waiting on a dry window · Sat', metaIcon: 'rainy', chip: 'Weather-gated', tone: 'gated' },
-];
-const LATER: TaskDef[] = [
-  { taskId: 'l1', label: 'Re-assess fruit set against the goal', meta: 'Front Rose Bed excluded · 12 Oct', metaIcon: 'flag', chip: '12 Oct', tone: 'soon' },
-];
+// No task read/write endpoint exists yet (ADR-0004 defines one; not implemented) — blank
+// until that backend work is done.
+const TODAY: TaskDef[] = [];
+const THIS_WEEK: TaskDef[] = [];
+const LATER: TaskDef[] = [];
 
-/** t1 starts pre-completed — matches the mockup's initial `state.done` fixture exactly. */
-const INITIAL_DONE = new Set(['t1']);
+const INITIAL_DONE = new Set<string>();
 
 /**
  * Plant- and garden-level tasks (TASK entity, architecture.md §2). Shaped after
