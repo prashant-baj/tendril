@@ -69,26 +69,35 @@ class MemoryStack(Stack):
             assumed_by=iam.ServicePrincipal("bedrock.amazonaws.com"),
             description="Service role for Tendril's per-garden memory Knowledge Base",
         )
-        kb_role.add_to_policy(
-            iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=[embedding_model_arn])
-        )
-        kb_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["s3vectors:GetIndex", "s3vectors:GetVectorBucket"],
-                resources=[vector_bucket.attr_vector_bucket_arn, vector_index.attr_index_arn],
-            )
-        )
-        kb_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "s3vectors:PutVectors",
-                    "s3vectors:GetVectors",
-                    "s3vectors:QueryVectors",
-                    "s3vectors:ListVectors",
-                    "s3vectors:DeleteVectors",
-                ],
-                resources=[vector_index.attr_index_arn],
-            )
+        # An explicit standalone Policy (not role.add_to_policy) so the KB below can declare a
+        # real CloudFormation dependency on it. The KB only *references* role_arn, which CDK
+        # turns into a dependency on the ROLE resource, not on this separate inline-policy
+        # resource — confirmed via a real CREATE_FAILED: the KB's own creation-time validation
+        # call raced ahead of the policy actually attaching, 403'ing on s3vectors:QueryVectors
+        # even though the grant was already correct.
+        kb_role_policy = iam.Policy(
+            self,
+            "MemoryKnowledgeBaseRolePolicy",
+            roles=[kb_role],
+            statements=[
+                iam.PolicyStatement(
+                    actions=["bedrock:InvokeModel"], resources=[embedding_model_arn]
+                ),
+                iam.PolicyStatement(
+                    actions=["s3vectors:GetIndex", "s3vectors:GetVectorBucket"],
+                    resources=[vector_bucket.attr_vector_bucket_arn, vector_index.attr_index_arn],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "s3vectors:PutVectors",
+                        "s3vectors:GetVectors",
+                        "s3vectors:QueryVectors",
+                        "s3vectors:ListVectors",
+                        "s3vectors:DeleteVectors",
+                    ],
+                    resources=[vector_index.attr_index_arn],
+                ),
+            ],
         )
 
         knowledge_base = bedrock.CfnKnowledgeBase(
@@ -112,6 +121,7 @@ class MemoryStack(Stack):
             ),
         )
         knowledge_base.add_resource_dependency(vector_index)
+        knowledge_base.node.add_dependency(kb_role_policy)
 
         data_source = bedrock.CfnDataSource(
             self,
