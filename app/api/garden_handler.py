@@ -39,7 +39,12 @@ from typing import Any
 
 import boto3
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# force=True: the standard Lambda Python runtime pre-attaches its own handler to the root
+# logger before user code runs, and basicConfig() is a documented no-op once handlers already
+# exist — the same silent-logging bug confirmed live in app/orchestrator/orchestrator.py, which
+# is the same plain-Lambda base image (ADR-0014). force=True replaces that handler instead of
+# being ignored by it.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), force=True)
 logger = logging.getLogger("tendril.api.garden_handler")
 
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by ClientApiStack; never hardcoded

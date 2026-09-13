@@ -45,7 +45,13 @@ import boto3
 from strands import Agent, tool
 from strands.models import BedrockModel
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# force=True: the standard Lambda Python runtime (this is a plain Lambda, not an AgentCore
+# runtime) pre-attaches its own handler to the root logger before user code even runs, and
+# basicConfig() is a documented no-op once handlers already exist — confirmed live: every
+# logger.info() call here was being silently dropped, while Strands' own print()-based output
+# (which bypasses the logging module entirely) always showed up. force=True replaces Lambda's
+# handler with this one instead of being ignored by it.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), force=True)
 logger = logging.getLogger("tendril.orchestrator")
 
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by AgentCoreStack; never hardcoded

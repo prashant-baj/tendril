@@ -22,7 +22,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# force=True: the standard Lambda Python runtime pre-attaches its own handler to the root
+# logger before user code runs, and basicConfig() is a documented no-op once handlers already
+# exist — the same silent-logging bug confirmed live in app/orchestrator/orchestrator.py, which
+# is the same plain-Lambda base image (ADR-0014). force=True replaces that handler instead of
+# being ignored by it.
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), force=True)
 logger = logging.getLogger("tendril.tools.weather")
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
