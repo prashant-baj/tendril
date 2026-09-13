@@ -304,7 +304,16 @@ class AgentCoreStack(Stack):
             )
             role.add_to_policy(
                 iam.PolicyStatement(
-                    actions=["bedrock:IngestKnowledgeBaseDocuments"],
+                    # StartIngestionJob/GetIngestionJob: confirmed via a real AccessDeniedException
+                    # that IngestKnowledgeBaseDocuments (even for a CUSTOM/inline-text data source,
+                    # no S3 sync involved) is enforced against the underlying ingestion-job actions,
+                    # not just its own API-level action name — another instance of the action-name
+                    # vs. IAM-permission mismatch already seen with ListKnowledgeBases/GetKnowledgeBase.
+                    actions=[
+                        "bedrock:IngestKnowledgeBaseDocuments",
+                        "bedrock:StartIngestionJob",
+                        "bedrock:GetIngestionJob",
+                    ],
                     resources=[f"arn:aws:bedrock:{self.region}:{self.account}:knowledge-base/*"],
                 )
             )
