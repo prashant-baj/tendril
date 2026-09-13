@@ -245,9 +245,10 @@ specialist actually invoked — is proven end-to-end before real domain speciali
 - [x] Unit tests with a mocked AgentCore call.
 - [x] Document the manual dev smoke test (above) — including the real bug it found.
 
-**Dependencies:** WS-02, WS-03. **Status:** ◐ partially done — implemented, unit-tested, and
-smoke-tested against `dev`; a real IAM gap the smoke test found is fixed and awaiting a redeploy
-+ one more confirmation run before this flips to ✅.
+**Dependencies:** WS-02, WS-03. **Status:** ✅ done — the redeploy + confirmation run this entry
+was waiting on has since happened: multiple live smoke tests since (most recently 2026-09-13,
+after a gardener deleted old plants and reported a real issue on a new one) show the specialist
+tool call succeeding cleanly with no IAM error, no retry, and a correct diagnosis.
 
 ---
 

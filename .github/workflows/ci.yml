@@ -1,8 +1,12 @@
 name: CI
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
   push:
     branches: [main, dev]
+    paths-ignore:
+      - 'docs/**'
 permissions:
   id-token: write   # OIDC federation to AWS (no static keys)
   contents: read
