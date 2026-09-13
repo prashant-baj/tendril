@@ -191,6 +191,15 @@ lives in `agents/hello_agent/agent.py` today, same file AF-02 would still reloca
 > verbatim rather than the domain-specific tuning + eval-scenario work this story actually
 > calls for below. **Still genuinely open**, just for whichever specialist picks it up next
 > (Agronomy or a vision-specific tuning pass) — this story's AC/Tasks are otherwise unchanged.
+>
+> **Update (2026-09-13):** `guardrails/agronomy_guardrail.json` (and `irrigation`/`pest_disease`/
+> `pruning`'s) now exist, each with domain-reworded `UnsafeChemicalUse` definitions/examples (not
+> copy-pasted) — see the "Four new specialists" section above. This is real progress on this
+> story's AC, but **not yet closed**: a live smoke test confirmed `pest_disease`'s
+> `UnsafeChemicalUse` topic over-blocks a legitimate, safe, label-compliant treatment answer
+> (self-healed via the orchestrator's own retry, not a hard failure) — the eval-scenario proof
+> this story's AC calls for ("safe advice is not over-blocked") is still genuinely undone, and is
+> now confirmed necessary, not hypothetical.
 
 **As a** safety/domain reviewer, **I want** `guardrails/agronomy_guardrail.json` authored with
 real agronomy-specific policy — not AF-01's placeholder stub — **so that** the second real
@@ -295,6 +304,103 @@ context pinning and the manual dev smoke test are the two genuinely open pieces.
 
 ---
 
+## Four new specialists configured and deployed (2026-09-13)
+
+Ahead of PA-01 (structured plan proposal) — per direct instruction, the specialists needed to
+exist and be smoke-tested first — **agronomy**, **irrigation**, **pest_disease**, and **pruning**
+were added to `agents/registry/*.json` (matching `vision`'s exact pattern: own prompt, own
+guardrail, per-specialist IAM via AF-03's mechanism), with real prompts (`prompts/*-system.md`)
+and guardrails (`guardrails/*_guardrail.json`, same content-filter/PII baseline as `vision`,
+`NonGardeningAdvice` similarly disabled pending retune). `PROMPT_CATALOG` in
+`infra/stacks/prompts_stack.py` and the two hardcoded resource counts in
+`infra/tests/test_stacks.py` were updated (1 → 5). The orchestrator's own system prompt
+(`app/orchestrator/orchestrator.py`) was also updated to explicitly encourage consulting more
+than one specialist per goal and chaining a vision identification into the others, rather than
+assuming a single specialist call.
+
+**Real bug found and fixed before deploy:** `agents/registry/*.json`'s `name` field feeds directly
+into the AgentCore `runtime_name` (`f"tendril_{env_name}_{name}"`), which only allows
+`[a-zA-Z0-9_]` — the originally-chosen name `"pest-disease"` failed `cdk synth` with `Runtime
+name must start with a letter and contain only letters, numbers, and underscores`. Fixed by using
+`"pest_disease"` (underscore) for the registry `name`/tool-call name specifically, while its
+`prompt_name`/`guardrail_name` stay hyphenated (`pest-disease-system`/`pest-disease-guardrail`) —
+those go through `CfnPrompt`/`CfnGuardrail`, which do allow hyphens (proven by `vision-system`).
+
+**Deployed to `dev`** (`tendril-dev-prompts` → `tendril-dev-guardrails` → `tendril-dev-agentcore`,
+cold-start order) and smoke-tested with two real goals against the existing curry-leaf plant:
+(1) a watering-vs-feeding question correctly consulted **both** `irrigation` and `agronomy`,
+synthesizing one coherent, correctly-prioritized answer; (2) a pest+pruning question correctly
+consulted **both** `pest_disease` and `pruning`. Both real, useful, safe (label-compliant)
+answers, no crashes, no IAM errors.
+
+**Real guardrail false-positive found, same class as vision's known `NonGardeningAdvice` issue
+(AF-04):** `pest_disease`'s first call in test (2) was blocked on **output** by its own guardrail
+(`blockedOutputsMessaging` returned instead of the real answer) despite the answer being on-topic,
+safe, label-compliant pest treatment advice (neem oil / insecticidal soap) — almost certainly
+`UnsafeChemicalUse` over-triggering on any mention of pesticide/chemical treatment, not just unsafe
+ones (its definition wasn't given a contrasting "safe use is fine" example, unlike the vision
+policy's more specific unsafe-only wording). The orchestrator's own model retried the tool call and
+got a real answer the second time (Strands treats a blocked-guardrail tool response the same as any
+other tool result, not a hard failure) — so the pipe self-healed and the final answer was correct,
+but this **is** a confirmed over-block, not a hypothetical one. Unlike `NonGardeningAdvice`
+(disabled outright, `inputAction`/`outputAction: NONE`), `UnsafeChemicalUse` is genuinely
+load-bearing for this specialist's domain (safe vs. unsafe pesticide advice is the core safety
+concern), so disabling it isn't the right fix — it needs the real retune-with-eval-scenarios work
+AF-04 already scopes, now confirmed needed for `pest_disease` too, not just `vision`/`agronomy`.
+
+## AF-06 — External data-source tools for specialists (researched, deliberately deferred)
+
+**As a** developer, **I want** a recorded, evaluated shortlist of real external data sources each
+future specialist *could* call as a tool — instead of relying only on the foundation model's own
+training knowledge — **so that** the option is captured and ready to pick up once there's an
+actual specialist and a working plan-proposal loop to test it against, rather than either
+forgotten or built speculatively ahead of need.
+
+**Context:** researched 2026-09-13, prompted by "for each agent are there any external resources
+they can use to enhance the results?" Candidates found and their real (not assumed) current
+status:
+
+| Specialist | Resource | Status found |
+|---|---|---|
+| Vision | [Pl@ntNet API](https://my.plantnet.org/) — species ID from a photo, as a cross-check | Real, free tier 500 IDs/day, needs an API key signup |
+| Vision | [Perenual API](https://perenual.com/docs/api) — care-guide/disease data once species is known | Real but thin free tier: 100 req/day, species data capped at the first 3,000 of 10,000+ |
+| Pest & Disease | [Plantix Crop Health API](https://plantix.net/en/plantix-intelligence/api-toolkit/) — India-focused, 780+ diseases, returns diagnosis **+ treatment plan** as structured JSON | Real and the strongest fit found (matches the specialist-proposes-structured-tasks design, `plan-approval.md`'s PA-01/02) — but looks commercial/business-tier; no public free-tier pricing found |
+| Agronomy | [SoilGrids (ISRIC) REST API](https://rest.isric.org/) — soil properties by geolocation | Real, but ISRIC's own docs currently flag the v2.0 REST API as having had stability issues; fair-use is a tight 5 calls/minute — **re-verify it's actually up before building against it** |
+| Beautification/Landscaping | [Agmarknet](https://agmarknet.gov.in/) / [data.gov.in](https://www.data.gov.in/catalog/current-daily-price-various-commodities-various-markets-mandi) — India government commodity/mandi prices, rough stand-in for "Nursery/Market" | Real, free, government-run — but commodity/wholesale-shaped data, not retail-nursery pricing; **no real public API for Indian nursery/plant retail pricing was found** — that gap likely needs a small curated dataset, not an integration |
+
+**Explicit decision (2026-09-13): defer all of these.** Every specialist built so far (`vision`)
+and every one on the near-term roster (Agronomy, Irrigation, Pest & Disease, Pruning) relies on
+the foundation model's own reasoning alone, plus the already-built **Weather** tool — no new
+external resource is being integrated yet. This keeps each new specialist to AF-01's proven
+"one registry file + one prompt + one guardrail" pattern, without also taking on API-key
+management, a commercial-terms negotiation (Plantix), or a currently-flagged-unstable upstream
+(SoilGrids) as a dependency before there's even a working structured-plan loop
+([`plan-approval.md`](./plan-approval.md)'s PA-01/02) to test whether foundation-model-only
+reasoning is actually insufficient in practice.
+
+**Acceptance Criteria**
+- [ ] Not picked up until at least PA-01 (structured plan output) and 1-2 real specialists beyond
+  `vision` (e.g. Agronomy, Pest & Disease) are live and smoke-tested — the trigger for adopting an
+  external resource should be an observed gap in foundation-model-only reasoning, not a proactive
+  integration ahead of evidence.
+- [ ] Before writing any code against a candidate above, re-verify its current terms (Plantix's
+  actual pricing/access — likely needs a business inquiry, not public signup) and live status
+  (SoilGrids' reported instability) — this table is a 2026-09-13 snapshot, not a standing
+  guarantee.
+- [ ] Whichever resource is adopted first follows AF-03's Tool API pattern exactly — its own
+  `app/tools/<name>/` folder, its own OpenAPI contract, an IAM-authenticated Function URL — and
+  the specialist declares it in its own registry `tools` list, same as `weather`.
+- [ ] No resource is adopted whose pricing/ToS is unconfirmed at the time it's actually built.
+
+**Tasks:** none scheduled — this story exists to record the research and the deferral decision,
+not to start work.
+
+**Dependencies:** AF-03 (Tool API pattern to reuse), PA-01 (a working structured-plan loop to
+actually test against), whichever specialist stories eventually pick a candidate up.
+**Status:** ☐ to do — deliberately deferred; relying on the foundation model alone for now.
+
+---
+
 ### Definition of Done (applies to every story)
 
 Per [`../engineering-best-practices.md`](../engineering-best-practices.md): CI green (lint +
@@ -308,6 +414,8 @@ The remaining seven specialist agents (pest, disease, irrigation, fertilizer, pr
 weather-impact, beautification/landscaping — `project-context.md` §7) and the remaining four
 tools (Plant-ID/Vision, Nursery/Market, Notification, Knowledge search) — each is a near-copy of
 AF-01/AF-04's pattern (a registry entry + prompt + guardrail) or AF-03's pattern (a new Lambda +
-API), not respecified here. Also carried forward: Cedar policy-based authorization and the wider
+API), not respecified here. **AF-06** now records a researched, evaluated shortlist of real
+external data sources for several of these (Pl@ntNet, Plantix, SoilGrids, Agmarknet) — deliberately
+deferred, not built. Also carried forward: Cedar policy-based authorization and the wider
 Interventions/HITL handlers (`deny`/`guide`/`confirm`/`transform`) beyond the base template
 (ADR-0001 Appendix A); per-region guardrail tuning.

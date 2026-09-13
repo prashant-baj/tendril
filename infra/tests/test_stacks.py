@@ -46,10 +46,10 @@ def _app() -> App:
 def test_guardrail_resource_and_policies():
     app = _app()
     tpl = Template.from_stack(GuardrailsStack(app, "gr", env_name="dev", env=ENV))
-    # One per guardrails/*.json (AF-01: vision, WS-04's vision specialist; hello was
-    # decommissioned once vision took over as the orchestrator's proof specialist).
-    tpl.resource_count_is("AWS::Bedrock::Guardrail", 1)
-    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 1)
+    # One per guardrails/*.json: vision (WS-04) + agronomy/irrigation/pest-disease/pruning
+    # (configured 2026-09-13, ahead of PA-01's structured plan proposal).
+    tpl.resource_count_is("AWS::Bedrock::Guardrail", 5)
+    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 5)
     tpl.has_resource_properties(
         "AWS::Bedrock::Guardrail",
         {
@@ -81,9 +81,9 @@ def test_guardrail_resource_and_policies():
 def test_prompt_uses_file_text():
     app = _app()
     tpl = Template.from_stack(PromptsStack(app, "pr", env_name="dev", env=ENV))
-    # One per PROMPT_CATALOG entry (vision, WS-04's vision specialist; hello was decommissioned
-    # once vision took over as the orchestrator's proof specialist).
-    tpl.resource_count_is("AWS::Bedrock::Prompt", 1)
+    # One per PROMPT_CATALOG entry: vision (WS-04) + agronomy/irrigation/pest-disease/pruning
+    # (configured 2026-09-13, ahead of PA-01's structured plan proposal).
+    tpl.resource_count_is("AWS::Bedrock::Prompt", 5)
     tpl.has_resource_properties(
         "AWS::Bedrock::Prompt",
         Match.object_like(

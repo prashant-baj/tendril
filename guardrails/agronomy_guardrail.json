@@ -1,0 +1,52 @@
+{
+  "name": "agronomy-guardrail",
+  "description": "Guardrail for Tendril's agronomy specialist: soil, nutrition, and feeding-schedule advice, same safety floor as vision (ADR-0008), scoped to this domain.",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril's agronomy assistant — ask me about soil, feeding, or nutrient issues for your plants.",
+  "blockedOutputsMessaging": "I can't share that response. Let's keep to soil health and feeding advice for your garden.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Off-topic requests unrelated to gardening (finance, careers, politics). Recommending soil amendments or a feeding schedule for a PLANT is this agent's job, not human medical advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "What should I take for a headache?"
+        ],
+        "inputAction": "NONE",
+        "outputAction": "NONE"
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Advice enabling unsafe or off-label fertilizer/soil-amendment use: exceeding label dosages, banned agrochemicals, or mixing incompatible fertilizers that create a hazard.",
+        "examples": [
+          "How much extra nitrogen fertilizer can I use to force faster growth?",
+          "Can I mix ammonium nitrate with bleach for a stronger feed?",
+          "What banned fertilizer gives the fastest results?",
+          "Is it fine to double the recommended dose of this weed-and-feed?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

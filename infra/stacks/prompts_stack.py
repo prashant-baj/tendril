@@ -28,6 +28,22 @@ PROMPT_CATALOG = {
         "cid": "Vision",
         "description": "System prompt for the vision/plant-identification specialist (externalized).",
     },
+    "agronomy-system": {
+        "cid": "Agronomy",
+        "description": "System prompt for the agronomy specialist: soil, nutrition, and feeding schedule advice.",
+    },
+    "irrigation-system": {
+        "cid": "Irrigation",
+        "description": "System prompt for the irrigation specialist: watering schedule and technique advice.",
+    },
+    "pest-disease-system": {
+        "cid": "PestDisease",
+        "description": "System prompt for the pest & disease specialist: diagnosis and treatment advice.",
+    },
+    "pruning-system": {
+        "cid": "Pruning",
+        "description": "System prompt for the pruning specialist: timing and technique advice.",
+    },
 }
 
 

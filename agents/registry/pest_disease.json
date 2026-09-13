@@ -1,0 +1,10 @@
+{
+  "name": "pest_disease",
+  "template": "hello_agent",
+  "model_id": "",
+  "prompt_name": "pest-disease-system",
+  "guardrail_name": "pest-disease-guardrail",
+  "description": "Diagnoses pest damage and plant disease and recommends safe, specific treatment. Call this when a goal describes visible pests, chewed/holed leaves, fungal spots, wilting that spreads, or other symptoms that look like an active infestation or infection rather than a care-practice issue.",
+  "tools": [],
+  "memory": { "enabled": true, "scope": "garden" }
+}

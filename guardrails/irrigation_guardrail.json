@@ -1,0 +1,52 @@
+{
+  "name": "irrigation-guardrail",
+  "description": "Guardrail for Tendril's irrigation specialist: watering schedule and technique advice, same safety floor as vision (ADR-0008), scoped to this domain.",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril's irrigation assistant — ask me about watering schedules or techniques for your plants.",
+  "blockedOutputsMessaging": "I can't share that response. Let's keep to watering advice for your garden.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Off-topic requests unrelated to gardening (finance, careers, politics). Recommending a watering schedule or technique for a PLANT is this agent's job, not human medical advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "What should I take for a headache?"
+        ],
+        "inputAction": "NONE",
+        "outputAction": "NONE"
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Advice enabling unsafe chemical additions to irrigation water or systems: dangerous pesticide/algaecide concentrations, or mixing incompatible chemicals in a watering reservoir or line.",
+        "examples": [
+          "Can I add strong bleach to my drip irrigation to kill root rot fast?",
+          "What's the maximum pesticide concentration I can mix into my watering can?",
+          "Can I use industrial drain cleaner to clear my irrigation lines?",
+          "Is it safe to mix ammonia and chlorine bleach in my watering tank?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

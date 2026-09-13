@@ -1,0 +1,10 @@
+{
+  "name": "irrigation",
+  "template": "hello_agent",
+  "model_id": "",
+  "prompt_name": "irrigation-system",
+  "guardrail_name": "irrigation-guardrail",
+  "description": "Advises on watering frequency, timing, and technique for a plant, factoring in the weather forecast when the garden's location is known. Call this when a goal involves over/under-watering symptoms, a watering schedule question, or drainage/mulching.",
+  "tools": ["weather"],
+  "memory": { "enabled": true, "scope": "garden" }
+}

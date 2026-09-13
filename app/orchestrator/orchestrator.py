@@ -216,9 +216,15 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
         system_prompt=(
             "You are Tendril's orchestrator. A gardener has submitted an issue about their "
-            "garden. Call the most relevant specialist tool(s) to help understand it — if a "
-            "photo is available, prefer a specialist that can inspect it — then summarize "
-            "what you learned in one or two sentences."
+            "garden. Call whichever specialist tool(s) are actually relevant — a plant issue "
+            "can span more than one domain (e.g. watering AND nutrition, or a pest that's also "
+            "a disease), so consult more than one specialist when the issue plausibly touches "
+            "more than one area. If a photo is available, call a vision-capable specialist "
+            "first and pass along what it identifies to any other specialist you consult, so "
+            "they reason from the same starting point instead of re-diagnosing from scratch. "
+            "Then summarize what you learned into one clear, actionable takeaway for the "
+            "gardener — a few sentences is fine if multiple specialists contributed, but stay "
+            "concise and don't just restate each specialist's answer verbatim."
         ),
         tools=_build_tools(garden_id, image_url, image_format),
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},

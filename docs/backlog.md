@@ -4,7 +4,27 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-13 (a live gardener test — delete old plants, add one real plant + issue
+**Last updated:** 2026-09-13, later still (configured + deployed four new specialists —
+**agronomy, irrigation, pest_disease, pruning** — each with a real prompt/guardrail/registry
+entry matching `vision`'s pattern, ahead of PA-01 per direct instruction. Found + fixed a real
+`cdk synth` bug (AgentCore `runtime_name` rejects hyphens — `"pest-disease"` → `"pest_disease"`).
+Deployed to dev (`prompts` → `guardrails` → `agentcore`) and smoke-tested live with two real goals:
+one correctly consulted both irrigation+agronomy, one correctly consulted both
+pest_disease+pruning, both producing real, safe, useful multi-specialist-synthesized answers.
+Also updated the orchestrator's own system prompt to explicitly encourage consulting more than one
+specialist per goal. **Found a real guardrail false-positive**: `pest_disease`'s
+`UnsafeChemicalUse` topic blocked its own legitimate output once (self-healed via the
+orchestrator's retry) — extends AF-04's already-open scope from vision/agronomy to also cover
+pest_disease. See `stories/agent-factory.md`.)
+
+**Earlier, 2026-09-13:** researched real external data sources — Pl@ntNet,
+Plantix, SoilGrids, Agmarknet/data.gov.in — each specialist could call as a tool; recorded as
+**AF-06** in `stories/agent-factory.md`, explicitly deferred: every specialist relies on the
+foundation model's own reasoning alone for now, revisit once PA-01 + a couple of real specialists
+are live and an actual gap shows up. Added at rank 18, below the two new-epic placeholders it
+depends on; ranks 18-34 below shifted down by one to make room.)
+
+**Earlier, 2026-09-13:** a live gardener test — delete old plants, add one real plant + issue
 report — re-confirmed the pipe works end-to-end with no errors and a correct diagnosis; wrote a
 new epic, **`stories/plan-approval.md`** (PA-01/02/03), storying the previously-placeholder
 Phases 4.5/5 and adding a new Phase 4.6 (photo display), per a direct request to flesh out "propose
@@ -59,8 +79,9 @@ locally at all)
 
 **Active development plan:** [`docs/roadmap.md`](./roadmap.md) sequences OB → WS → AF → PA as a
 UI-first, incremental feature track (2026-09-12, extended 2026-09-13) — ranks 1-17 below reflect
-that plan. The pre-existing `TF`/`PG` housekeeping (ranks 18+) is still real, open work; it's just
-no longer the immediate next thing.
+that plan; rank 18 (AF-06) is a deliberately-deferred research note, not active work. The
+pre-existing `TF`/`PG` housekeeping (ranks 19+) is still real, open work; it's just no longer the
+immediate next thing.
 
 ## Story board (at a glance)
 
@@ -72,12 +93,13 @@ eye whenever a Status cell changes below.
 OB-01 · OB-02 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PG-06 · PG-05 · TF-02 · TF-03 ·
 TF-04 · PG-01 · PG-03 · PG-04
 
-**◐ In progress (9)**
-AF-03 (tools — manual dev smoke test pending) · AF-05 (memory — context pinning + smoke test
-pending) · PG-07 (guardrail eval — 4/6 pass) · TF-05 (`.mcp.json` missing on disk) · TF-01
-(`.pre-commit-config.yaml` missing on disk) · TF-08 (pre-commit gitleaks missing) · PG-02 (prompt
-scope/refusal framing not yet added) · TF-07 (no prod deploy path yet) · TF-06 (frontend has no
-formal per-screen stories)
+**◐ In progress (10)**
+AF-03 (tools — manual dev smoke test pending) · AF-04 (real guardrail content now exists for 4
+specialists; confirmed `pest_disease` over-block still needs the eval-scenario retune) · AF-05
+(memory — context pinning + smoke test pending) · PG-07 (guardrail eval — 4/6 pass) · TF-05
+(`.mcp.json` missing on disk) · TF-01 (`.pre-commit-config.yaml` missing on disk) · TF-08
+(pre-commit gitleaks missing) · PG-02 (prompt scope/refusal framing not yet added) · TF-07 (no
+prod deploy path yet) · TF-06 (frontend has no formal per-screen stories)
 
 **☐ Backlog (7, ranked)**
 1. **PA-01** — orchestrator proposes a structured Plan (rank 13, next up)
@@ -85,8 +107,8 @@ formal per-screen stories)
 3. **PA-02** — conversational plan approval, chat + explicit Approve (rank 15)
 4. *(not yet storied)* Tasks & Activity on real data (rank 16)
 5. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 17)
-6. **AF-04** — Agronomy specialist's real guardrail policy (rank 11)
-7. **OB-03** — real plant photo, narrowed scope (rank 33)
+6. **AF-06** — external data-source tools for specialists, researched but deferred (rank 18)
+7. **OB-03** — real plant photo, narrowed scope (rank 34)
 
 **Not on the board:** AF-02 (rank 9) — deliberately **skipped**, not backlog: a pure rename with
 no new capability, superseded by `vision.json` already proving the "one codebase, many
@@ -115,29 +137,30 @@ specialists" pattern.
 | 8 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ✅ | WS-02 | All three stacks loop over their data folders; second real specialist (**vision**) deploys with zero stack-code changes (same built image, verified via `cdk synth`). Per-specialist tool IAM scoping (the AC that was deferred) is now done — see AF-03. |
 | 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | — | AF-01 | **Skipped (2026-09-13):** pure rename (`hello_agent/` → `template_agent/`), no new capability — the "one codebase, many specialists" proof already happened via `vision.json`. AF-03 built directly on AF-01 instead. |
 | 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ◐ | AF-01 | `app/tools/weather/` (Lambda + IAM Function URL, real Open-Meteo forecast) + tool-agnostic HTTP binding in `agents/hello_agent/agent.py` (SigV4-signed) + per-specialist IAM execution roles (`_make_agent_role`, replacing one shared role). `vision.json` declares `tools: ["weather"]`. Unit + CDK tests green; real `cdk synth` confirms scoped IAM. Only gap: manual dev smoke test not yet run (needs deploy). |
-| 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ☐ | AF-01 | Real agronomy-specific denied topics/PII policy, replacing AF-01's placeholder stub. `vision_guardrail.json` (rank 8) reuses `hello`'s topics verbatim — the domain-tuning + eval-scenario work this story calls for is still genuinely open. |
+| 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ◐ | AF-01 | Real, domain-reworded (not copy-pasted) denied-topic policies now exist for agronomy/irrigation/pest_disease/pruning (2026-09-13). **Confirmed still open:** a live smoke test found `pest_disease`'s `UnsafeChemicalUse` topic over-blocking a legitimate, safe answer — the eval-scenario proof this story calls for ("safe advice isn't over-blocked") is real, necessary follow-up work, not hypothetical. |
 | 12 | AF | AF-05 | Memory & Context: per-garden memory for every specialist | ◐ | AF-01, AF-03 | `infra/stacks/memory_stack.py` (Bedrock KB on S3 Vectors — pay-per-use, not OpenSearch Serverless) + per-garden `MemoryManager`/`BedrockKnowledgeBaseStore` in the template + `context_manager="auto"` + per-specialist IAM (mirrors AF-03). Scoped per-garden not per-user (no auth yet). Open: context pinning (needs session continuity, not yet built) and the manual dev smoke test. |
 | 13 | PA | PA-01 | The orchestrator proposes a structured Plan | ☐ | WS-04 | `docs/roadmap.md` Phase 4.5. `stories/plan-approval.md`. Replaces today's free-text `orchestrator_result` with real `Plan`/`Task` DynamoDB entities + `GET /gardens/{id}/goals[/{goalId}]` read endpoints; riskiest part is making the model's output reliably structured (fail-open to a single raw-text task if it doesn't parse). |
-| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ☐ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media (never a public bucket). Shares its `generate_download_url` helper with OB-03 (rank 33) rather than duplicating it — whichever ships first extracts it. |
+| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ☐ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media (never a public bucket). Shares its `generate_download_url` helper with OB-03 (rank 34) rather than duplicating it — whichever ships first extracts it. |
 | 15 | PA | PA-02 | Conversational plan approval (chat + explicit Approve) | ☐ | PA-01 | `docs/roadmap.md` Phase 5. `stories/plan-approval.md`. New chat (`Message` entity) + explicit, deterministic `POST /plans/{id}/approve` (approval is never inferred from free text). **Real, documented scope call:** does *not* build `SnapshotSessionManager`/`AgentStateBucket` session-resume yet — each chat turn is a fresh, stateless orchestrator invocation instead; true session-resume is deferred to rank 17 below. Approved goals surface under Home's "Goals in progress"; a real (not fictitious) "Waiting on you" indicator covers goals still awaiting approval. |
 | 16 | — | — | *(not yet storied)* Tasks & Activity on real data | ☐ | WS-04 | `docs/roadmap.md` Phase 6 — replaces `MockTaskApi`/`MockActivityApi`. Write the story once Phase 5 ships. |
 | 17 | — | — | *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` follow-ups | ☐ | AF-05, PA-02 | `docs/roadmap.md` Phase 7.5+ — builds the `SnapshotSessionManager`/`AgentStateBucket` design PA-02 deliberately deferred, plus the tracker/scheduler Lambda (`app/tracker/`, not yet scaffolded) and `TasksDueIndex` GSI (`data-architecture.md` §2/§9). Prerequisite for using photos to compare progress over time (see "Carried forward" below). |
-| 18 | PG | PG-07 | Verify: eval scenarios for prompt & guardrail | ◐ | PG-02, PG-04, PG-05 | Eval script built; live run **4/6 pass**. Open: (a) commit + redeploy the retuned `UnsafeChemicalUse` topic, then re-verify the safe-IPM case no longer over-blocks; (b) **PII returned `action=NONE`** — run `eval_guardrail.py --debug` and diagnose (region/feature vs input-vs-output masking). |
-| 19 | TF | TF-05 | Build with AI setup (Strands MCP + rules) | ◐ | TF-01 | `llms.txt` present, `CLAUDE.md` references it. **Gap:** `.mcp.json` (`uvx strands-agents-mcp-server`) is **missing on disk** — MCP docs server not actually wired. Re-add it. |
-| 20 | TF | TF-01 | Repository & monorepo structure | ◐ | — | Structure/config/LICENSE/README present. **Gap:** `.pre-commit-config.yaml` is **missing on disk** — local format/lint/gitleaks hooks not installed. Re-add it. |
-| 21 | TF | TF-08 | Secrets & configuration baseline | ◐ | TF-01, TF-03 | gitleaks in **CI** ✅; `.env.example`, `config.get_secret`, CDK context ✅. **Gap:** pre-commit gitleaks missing (same missing file as TF-01). |
-| 22 | PG | PG-02 | Prompt-layer safety: scope & refusal guidance | ◐ | PG-01 | Prompt exists; add explicit scope + first-line refusal framing mirroring guardrail denied topics; publish new version. |
-| 23 | TF | TF-07 | CI/CD & selective deploy (GitOps) | ◐ | TF-03 | PR lint/test/gitleaks + OIDC + path deploy to dev all working; prompts/guardrails wiring done (PG-06). **Gaps:** no prod deploy path (tag/approval gate); branch protection account-side. |
-| 24 | TF | TF-06 | Local development environment | ◐ | TF-01 | Pinned Python/Node, `tasks.ps1`, per-component requirements, setup guides present. `frontend/` is now a scaffolded Angular 19 PWA (design implemented, ADR-0010 deploys it to S3) — no formal feature stories written yet for the individual screens (see `frontend/README.md`). |
-| 25 | PG | PG-06 | Decoupled deploy & CI for prompts and guardrails | ✅ | PG-03, TF-07 | `ci.yml` has `prompts/**`+`guardrails/**` filters and deploys `foundation → prompts → guardrails → agentcore` (cold-start order). Committed + pushed; prompts & guardrails deployed standalone. |
-| 26 | PG | PG-05 | Deterministic floor: schema validation & fail-safe | ✅ | PG-01, PG-04 | `resolve_user_message` payload validation + lazy init in `agent.py`; 13 unit tests + 7 policy-limit tests + 3 CDK tests, all green. Committed. |
-| 27 | TF | TF-02 | AWS account & CLI setup (dev/prod) | ✅ | — | `verify-aws.*` + `developer-setup.md`; account-side items proven by successful deploys + Bedrock responses. |
-| 28 | TF | TF-03 | CDK bootstrap & IaC baseline | ✅ | TF-02 | `env_name`-parameterized, env-prefixed stacks, no hardcoded account IDs, synth/deploy succeed. |
-| 29 | TF | TF-04 | AgentCore CLI & runtime prerequisites | ✅ | TF-02, TF-03 | Strands + bedrock-agentcore, ARM64 Dockerfile, exec role, OTel; hello agent deployed and returned a greeting. |
-| 30 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
-| 31 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
-| 32 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
-| 33 | OB | OB-03 | Show the real plant photo (not a generic icon) | ☐ | OB-02 | Explicitly deprioritized ("will do later") — not blocking Phase 3. **Narrowed scope (2026-09-13):** its list-plants AC is already done (built during the unstoried plant-lifecycle work); remaining work is just adding a presigned **GET** `photoUrl` to `createPlant`/`listPlants` responses, sharing a `generate_download_url` helper with PA-03 (rank 14) rather than duplicating it. |
+| 18 | AF | AF-06 | External data-source tools for specialists (researched, deferred) | ☐ | AF-03, PA-01 | `stories/agent-factory.md`. Researched real candidates (Pl@ntNet, Plantix, SoilGrids, Agmarknet/data.gov.in) 2026-09-13 — **deliberately not built**; every specialist relies on the foundation model's own reasoning alone until PA-01 + a couple of real specialists surface an actual gap. Re-verify each candidate's live status/terms before picking it up (Plantix looks commercial; SoilGrids' own docs flag instability). |
+| 19 | PG | PG-07 | Verify: eval scenarios for prompt & guardrail | ◐ | PG-02, PG-04, PG-05 | Eval script built; live run **4/6 pass**. Open: (a) commit + redeploy the retuned `UnsafeChemicalUse` topic, then re-verify the safe-IPM case no longer over-blocks; (b) **PII returned `action=NONE`** — run `eval_guardrail.py --debug` and diagnose (region/feature vs input-vs-output masking). |
+| 20 | TF | TF-05 | Build with AI setup (Strands MCP + rules) | ◐ | TF-01 | `llms.txt` present, `CLAUDE.md` references it. **Gap:** `.mcp.json` (`uvx strands-agents-mcp-server`) is **missing on disk** — MCP docs server not actually wired. Re-add it. |
+| 21 | TF | TF-01 | Repository & monorepo structure | ◐ | — | Structure/config/LICENSE/README present. **Gap:** `.pre-commit-config.yaml` is **missing on disk** — local format/lint/gitleaks hooks not installed. Re-add it. |
+| 22 | TF | TF-08 | Secrets & configuration baseline | ◐ | TF-01, TF-03 | gitleaks in **CI** ✅; `.env.example`, `config.get_secret`, CDK context ✅. **Gap:** pre-commit gitleaks missing (same missing file as TF-01). |
+| 23 | PG | PG-02 | Prompt-layer safety: scope & refusal guidance | ◐ | PG-01 | Prompt exists; add explicit scope + first-line refusal framing mirroring guardrail denied topics; publish new version. |
+| 24 | TF | TF-07 | CI/CD & selective deploy (GitOps) | ◐ | TF-03 | PR lint/test/gitleaks + OIDC + path deploy to dev all working; prompts/guardrails wiring done (PG-06). **Gaps:** no prod deploy path (tag/approval gate); branch protection account-side. |
+| 25 | TF | TF-06 | Local development environment | ◐ | TF-01 | Pinned Python/Node, `tasks.ps1`, per-component requirements, setup guides present. `frontend/` is now a scaffolded Angular 19 PWA (design implemented, ADR-0010 deploys it to S3) — no formal feature stories written yet for the individual screens (see `frontend/README.md`). |
+| 26 | PG | PG-06 | Decoupled deploy & CI for prompts and guardrails | ✅ | PG-03, TF-07 | `ci.yml` has `prompts/**`+`guardrails/**` filters and deploys `foundation → prompts → guardrails → agentcore` (cold-start order). Committed + pushed; prompts & guardrails deployed standalone. |
+| 27 | PG | PG-05 | Deterministic floor: schema validation & fail-safe | ✅ | PG-01, PG-04 | `resolve_user_message` payload validation + lazy init in `agent.py`; 13 unit tests + 7 policy-limit tests + 3 CDK tests, all green. Committed. |
+| 28 | TF | TF-02 | AWS account & CLI setup (dev/prod) | ✅ | — | `verify-aws.*` + `developer-setup.md`; account-side items proven by successful deploys + Bedrock responses. |
+| 29 | TF | TF-03 | CDK bootstrap & IaC baseline | ✅ | TF-02 | `env_name`-parameterized, env-prefixed stacks, no hardcoded account IDs, synth/deploy succeed. |
+| 30 | TF | TF-04 | AgentCore CLI & runtime prerequisites | ✅ | TF-02, TF-03 | Strands + bedrock-agentcore, ARM64 Dockerfile, exec role, OTel; hello agent deployed and returned a greeting. |
+| 31 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
+| 32 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
+| 33 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
+| 34 | OB | OB-03 | Show the real plant photo (not a generic icon) | ☐ | OB-02 | Explicitly deprioritized ("will do later") — not blocking Phase 3. **Narrowed scope (2026-09-13):** its list-plants AC is already done (built during the unstoried plant-lifecycle work); remaining work is just adding a presigned **GET** `photoUrl` to `createPlant`/`listPlants` responses, sharing a `generate_download_url` helper with PA-03 (rank 14) rather than duplicating it. |
 
 ## Carried forward (future epics — not yet storied)
 
