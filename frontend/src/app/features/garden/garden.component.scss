@@ -22,6 +22,31 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px 0; color: var(--td-colo
   text-wrap: pretty;
 }
 
+// Photo-backed hero banner (a beautiful faded background when the garden has a photo) — falls
+// back to the plain card styling above when no photoUrl is set.
+.intro.has-photo {
+  padding: 24px 16px;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background-size: cover;
+  background-position: center;
+
+  h2 {
+    color: #fff;
+  }
+
+  .fact {
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+    backdrop-filter: blur(2px);
+  }
+}
+.intro.has-photo p {
+  color: rgba(255, 255, 255, 0.9);
+}
+
 .facts {
   display: flex;
   flex-wrap: wrap;

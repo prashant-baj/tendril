@@ -4,7 +4,7 @@ export const routes: Routes = [
   { path: '', pathMatch: 'full', redirectTo: 'home' },
   {
     path: 'home',
-    data: { title: 'Good morning, Meera' },
+    data: { title: 'Good morning, Mitali' },
     loadComponent: () => import('./features/home/home.component').then((m) => m.HomeComponent),
   },
   {

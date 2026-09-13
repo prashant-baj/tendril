@@ -6,7 +6,18 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
 
 - `createGarden`/`getGarden` (OB-01): both DynamoDB records a Garden needs written in one
   transaction (data-architecture.md §2) — canonical `GARDEN#{id}/METADATA` + the
-  `USER#{user_id}/GARDEN#{id}` ownership index, never one without the other.
+  `USER#{user_id}/GARDEN#{id}` ownership index, never one without the other. Accepts an optional
+  client-supplied `gardenId` — the only entity whose id can come from the frontend, needed
+  because a garden *photo* has to be uploaded (`createMediaUpload`, needs an existing `gardenId`)
+  before the garden itself exists; also accepts an optional `mediaId`, mirroring `Plant`/
+  `Task.media_id`. `getGarden` resolves a fresh presigned `photoUrl` when one is set.
+- `listGardens`: every garden the caller owns (multi-garden switcher) — one cheap `Query` on
+  that same ownership index, no GSI/scan.
+- `getGardenWeather`: real current weather for a garden's own location — geocodes the Garden's
+  free-text `geolocation` via Open-Meteo's free Geocoding API (a Garden never stores lat/lon),
+  then calls the same forecast API `app/tools/weather/handler.py` already uses for specialists
+  (duplicated, not imported — separate deployable units). Deliberately UI-agnostic (raw
+  `temperatureC`/`weatherCode`) — the frontend maps `weatherCode` to presentation.
 - `createMediaUpload` (OB-02): issues a presigned S3 PUT URL against `FoundationStack`'s media
   bucket and writes the `Media` record immediately (`GARDEN#{id}/MEDIA#{media_id}`) — this is
   the only step with the `s3_key`/`content_type` needed to write it (data-architecture.md §4).
@@ -52,6 +63,17 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
 - `approvePlan` (PA-02): a synchronous, deterministic status flip (`Plan`/`Goal` → `Approved`) —
   approving a plan needs no model reasoning, so this never goes through the orchestrator/
   EventBridge at all, unlike `postGoalMessage`.
+- `listTasks`/`listActivity` (Phase 6): `listTasks` returns every task across every goal in a
+  garden — one cheap `Query` on the shared `TASK#*` prefix, same partition-scoped pattern as
+  `listPlants` (no GSI needed; real due-date scheduling is Phase 7+ tracker work, out of scope
+  here). `listActivity` reads the new `Event` entity (`data-architecture.md` §2, reserved since
+  the original design but never implemented until now) — `_write_event` is a best-effort helper
+  (own try/except at every call site) writing one at `createGoal` (`goal.submitted`),
+  `approvePlan` (`plan.approved`), `postTaskCheckin` (`task.checkin`), and
+  `app/orchestrator/orchestrator.py`'s `_write_plan_and_tasks` (`plan.updated`) — deliberately
+  duplicated in both Lambda packages rather than shared, since they're separate deployable units
+  (no cross-package Python imports in this monorepo). `Event` is intentionally UI-agnostic (no
+  icon/tone/title baked in server-side) — the frontend maps `type` to presentation.
 
 No auth yet (ADR-0004's seam is still open): `X-User-Id` is a per-browser anonymous identifier
 the frontend generates and persists (garden-onboarding.md's stories), not a verified identity.
@@ -63,6 +85,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -88,6 +113,13 @@ GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
 GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
 TASK_CHECKIN_RECEIVED_DETAIL_TYPE = "task.checkin.received"
+
+# Same free, keyless Open-Meteo endpoints app/tools/weather/handler.py already calls for
+# specialists — duplicated here (not shared) since app/api and app/tools/weather are separate
+# deployable units, no cross-package Python imports in this monorepo.
+GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_REQUEST_TIMEOUT_SECONDS = 8
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
@@ -171,14 +203,24 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     name = payload.get("name")
     geolocation = payload.get("geolocation")
     vision = payload.get("vision")
+    client_garden_id = payload.get("gardenId")
+    media_id = payload.get("mediaId")
     if not isinstance(name, str) or not name.strip():
         return _error(400, "name is required")
     if not isinstance(geolocation, str) or not geolocation.strip():
         return _error(400, "geolocation is required")
     if vision is not None and not isinstance(vision, str):
         return _error(400, "vision must be a string if provided")
+    if client_garden_id is not None and not isinstance(client_garden_id, str):
+        return _error(400, "gardenId must be a string if provided")
+    if media_id is not None and not isinstance(media_id, str):
+        return _error(400, "mediaId must be a string if provided")
 
-    garden_id = str(uuid.uuid4())
+    # A garden photo (if any) has to be uploaded to `POST /gardens/{gardenId}/media` *before*
+    # this call even happens (that endpoint needs an existing gardenId) — the frontend generates
+    # one client-side up front for that case and passes it back here. No photo -> unchanged,
+    # server generates the id exactly as before.
+    garden_id = client_garden_id or str(uuid.uuid4())
     created_at = datetime.now(UTC).isoformat()
     garden_item = {
         "pk": f"GARDEN#{garden_id}",
@@ -191,6 +233,8 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     }
     if vision:
         garden_item["vision"] = vision
+    if media_id:
+        garden_item["media_id"] = media_id
     ownership_item = {
         "pk": f"USER#{user_id}",
         "sk": f"GARDEN#{garden_id}",
@@ -201,7 +245,15 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     try:
         _get_client().transact_write_items(
             TransactItems=[
-                {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(garden_item)}},
+                {
+                    "Put": {
+                        "TableName": APP_TABLE_NAME,
+                        "Item": _to_dynamo(garden_item),
+                        # Only meaningful for a client-supplied id (a fresh uuid4 never
+                        # collides) — guards against a colliding client-generated gardenId.
+                        "ConditionExpression": "attribute_not_exists(pk)",
+                    }
+                },
                 {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(ownership_item)}},
             ]
         )
@@ -219,6 +271,29 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
         return _error(500, "could not create garden")
 
     return _response(201, {"gardenId": garden_id})
+
+
+def list_gardens(event: dict[str, Any]) -> dict[str, Any]:
+    """Every garden the caller owns (multi-garden switcher) — one cheap Query on the
+    `USER#{user_id}/GARDEN#{garden_id}` ownership index `create_garden` already writes, no
+    GSI/scan needed (data-architecture.md §2's stated purpose for that index record)."""
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("pk").eq(f"USER#{user_id}")
+            & Key("sk").begins_with("GARDEN#")
+        )
+    except Exception:
+        logger.exception("Failed to list gardens for user %s", user_id)
+        return _error(500, "could not list gardens")
+
+    gardens = [
+        {"gardenId": item["garden_id"], "name": item["name"]} for item in resp.get("Items", [])
+    ]
+    return _response(200, gardens)
 
 
 def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
@@ -509,6 +584,11 @@ def create_goal(event: dict[str, Any]) -> dict[str, Any]:
         logger.exception("Failed to submit goal for garden %s", garden_id)
         return _error(500, "could not submit goal")
 
+    try:
+        _write_event(garden_id, "goal.submitted", {"goalId": goal_id, "description": description})
+    except Exception:
+        logger.exception("Failed to write goal.submitted event for goal %s", goal_id)
+
     return _response(202, {"goalId": goal_id, "status": "Intake"})
 
 
@@ -554,6 +634,105 @@ def list_goals(event: dict[str, Any]) -> dict[str, Any]:
     return _response(200, [_goal_from_item(item) for item in resp.get("Items", [])])
 
 
+def _task_from_item(table, garden_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Shapes one Task item for the API response — shared by `getGoalDetail` (goal-scoped) and
+    `listTasks` (cross-goal, Phase 6) so the media/feedback resolution logic isn't duplicated."""
+    task: dict[str, Any] = {
+        "taskId": item["task_id"],
+        "goalId": item["goal_id"],
+        "title": item["title"],
+        "detail": item["detail"],
+        "scope": item.get("scope", "plant"),
+        "status": item.get("status", "pending"),
+    }
+    if item.get("plant_id"):
+        task["plantId"] = item["plant_id"]
+    if item.get("media_id"):
+        task_media_item = table.get_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{item['media_id']}"}
+        ).get("Item")
+        if task_media_item:
+            task["media"] = {
+                "mediaId": item["media_id"],
+                "downloadUrl": _generate_download_url(task_media_item["s3_key"]),
+            }
+    if item.get("feedback"):
+        task["feedback"] = item["feedback"]
+    return task
+
+
+def list_tasks(event: dict[str, Any]) -> dict[str, Any]:
+    """Every task across every goal in a garden (Phase 6) — one cheap Query on the shared
+    `TASK#*` sk prefix under the garden's partition, no GSI needed for this read-only,
+    ungrouped-by-date list (real due-date scheduling is Phase 7+ tracker work)."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    table = _get_table()
+    try:
+        resp = table.query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with("TASK#")
+        )
+    except Exception:
+        logger.exception("Failed to list tasks for garden %s", garden_id)
+        return _error(500, "could not list tasks")
+
+    tasks = [_task_from_item(table, garden_id, item) for item in resp.get("Items", [])]
+    return _response(200, tasks)
+
+
+def list_activity(event: dict[str, Any]) -> dict[str, Any]:
+    """The garden's event timeline (Phase 6) — newest first. `Event` (data-architecture.md §2)
+    is intentionally UI-agnostic: no icon/tone/title baked in server-side, same posture as
+    OB-03/PA-05's specialist-icon choice living in the frontend, not the API."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with("EVENT#"),
+            ScanIndexForward=False,
+        )
+    except Exception:
+        logger.exception("Failed to list activity for garden %s", garden_id)
+        return _error(500, "could not list activity")
+
+    events = []
+    for item in resp.get("Items", []):
+        entry: dict[str, Any] = {
+            "type": item["type"],
+            "payload": item.get("payload", {}),
+            "createdAt": item["created_at"],
+        }
+        if item.get("payload", {}).get("goalId"):
+            entry["goalId"] = item["payload"]["goalId"]
+        events.append(entry)
+    return _response(200, events)
+
+
+def _write_event(garden_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    """Best-effort — an Event is an audit-log entry for the Activity screen (Phase 6), never
+    something a request's success should depend on. Callers wrap this in their own try/except
+    (or accept that a failure here is swallowed) so a logging hiccup never turns an otherwise
+    successful write into a 500."""
+    event_id = uuid.uuid4().hex
+    created_at = datetime.now(UTC).isoformat()
+    _get_table().put_item(
+        Item={
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"EVENT#{created_at}#{event_id}",
+            "event_id": event_id,
+            "type": event_type,
+            "payload": payload,
+            "created_at": created_at,
+        }
+    )
+
+
 def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
     path_params = event.get("pathParameters") or {}
     garden_id = path_params.get("gardenId")
@@ -588,29 +767,7 @@ def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
         logger.exception("Failed to read plan/tasks/messages for goal %s", goal_id)
         return _error(500, "could not read goal detail")
 
-    tasks = []
-    for t in tasks_resp.get("Items", []):
-        task: dict[str, Any] = {
-            "taskId": t["task_id"],
-            "title": t["title"],
-            "detail": t["detail"],
-            "scope": t.get("scope", "plant"),
-            "status": t.get("status", "pending"),
-        }
-        if t.get("plant_id"):
-            task["plantId"] = t["plant_id"]
-        if t.get("media_id"):
-            task_media_item = table.get_item(
-                Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{t['media_id']}"}
-            ).get("Item")
-            if task_media_item:
-                task["media"] = {
-                    "mediaId": t["media_id"],
-                    "downloadUrl": _generate_download_url(task_media_item["s3_key"]),
-                }
-        if t.get("feedback"):
-            task["feedback"] = t["feedback"]
-        tasks.append(task)
+    tasks = [_task_from_item(table, garden_id, t) for t in tasks_resp.get("Items", [])]
 
     # sk (GOALMSG#{goalId}#{iso_timestamp}#{messageId}) sorts chronologically already —
     # explicit sort here just guards against a fake/non-ordering table in tests.
@@ -744,6 +901,12 @@ def approve_plan(event: dict[str, Any]) -> dict[str, Any]:
         logger.exception("Failed to approve plan %s for garden %s", plan_id, garden_id)
         return _error(500, "could not approve plan")
 
+    try:
+        # plan_id == goal_id (data-architecture.md §2) — reused as-is for the event's goalId.
+        _write_event(garden_id, "plan.approved", {"goalId": plan_id, "planId": plan_id})
+    except Exception:
+        logger.exception("Failed to write plan.approved event for plan %s", plan_id)
+
     return _response(200, {"planId": plan_id, "status": "Approved"})
 
 
@@ -845,6 +1008,15 @@ def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
             "Failed to publish task.checkin.received for task %s garden %s", task_id, garden_id
         )
 
+    try:
+        _write_event(
+            garden_id,
+            "task.checkin",
+            {"goalId": goal_id, "taskId": task_id, "taskTitle": task_item.get("title", "")},
+        )
+    except Exception:
+        logger.exception("Failed to write task.checkin event for task %s", task_id)
+
     return _response(200, {"taskId": task_id, "status": "done"})
 
 
@@ -853,8 +1025,9 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
     if not garden_id:
         return _error(400, "gardenId is required")
 
+    table = _get_table()
     try:
-        resp = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"})
+        resp = table.get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"})
     except Exception:
         logger.exception("Failed to read garden %s", garden_id)
         return _error(500, "could not read garden")
@@ -863,17 +1036,86 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
     if not item:
         return _error(404, "garden not found")
 
-    return _response(
-        200,
-        {
-            "gardenId": item["garden_id"],
-            "name": item["name"],
-            "geolocation": item["geolocation"],
-            "vision": item.get("vision", ""),
-            "ownerUserId": item["owner_user_id"],
-            "createdAt": item["created_at"],
-        },
+    result: dict[str, Any] = {
+        "gardenId": item["garden_id"],
+        "name": item["name"],
+        "geolocation": item["geolocation"],
+        "vision": item.get("vision", ""),
+        "ownerUserId": item["owner_user_id"],
+        "createdAt": item["created_at"],
+    }
+    if item.get("media_id"):
+        media_item = table.get_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{item['media_id']}"}
+        ).get("Item")
+        if media_item:
+            result["photoUrl"] = _generate_download_url(media_item["s3_key"])
+    return _response(200, result)
+
+
+def _geocode(query: str) -> tuple[float, float] | None:
+    """Resolves a free-text location (e.g. "Pune, India") to (lat, lon) — a Garden only ever
+    stores that free-text string, never coordinates, so this runs on every weather request
+    rather than needing a new Garden field. Returns None if nothing matched."""
+    url = f"{GEOCODING_URL}?{urllib.parse.urlencode({'name': query, 'count': 1})}"
+    with urllib.request.urlopen(url, timeout=WEATHER_REQUEST_TIMEOUT_SECONDS) as resp:  # noqa: S310
+        data = json.loads(resp.read())
+    results = data.get("results") or []
+    if not results:
+        return None
+    return results[0]["latitude"], results[0]["longitude"]
+
+
+def _fetch_forecast(lat: float, lon: float) -> dict[str, Any]:
+    """Same call app/tools/weather/handler.py's fetch_forecast makes for specialists —
+    duplicated, not imported (separate deployable units)."""
+    url = (
+        f"{FORECAST_URL}?latitude={lat}&longitude={lon}"
+        "&current=temperature_2m,precipitation,weather_code"
+        "&forecast_days=1"
     )
+    with urllib.request.urlopen(url, timeout=WEATHER_REQUEST_TIMEOUT_SECONDS) as resp:  # noqa: S310
+        data = json.loads(resp.read())
+    current = data.get("current", {})
+    return {
+        "temperatureC": current.get("temperature_2m"),
+        "weatherCode": current.get("weather_code"),
+    }
+
+
+def get_garden_weather(event: dict[str, Any]) -> dict[str, Any]:
+    """Real current weather for a garden's own location (deliberately UI-agnostic — no
+    icon/label baked in server-side, the frontend maps `weatherCode` to presentation, mirroring
+    PA-05/Phase 6's specialist-icon/activity-presentation precedent)."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        item = (
+            _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"}).get("Item")
+        )
+    except Exception:
+        logger.exception("Failed to read garden %s for weather", garden_id)
+        return _error(500, "could not read garden")
+    if not item:
+        return _error(404, "garden not found")
+
+    try:
+        coords = _geocode(item["geolocation"])
+    except urllib.error.URLError:
+        logger.exception("weather_geocode_failed garden_id=%s", garden_id)
+        return _error(502, "upstream geocoding service unavailable")
+    if not coords:
+        return _error(404, "could not resolve this garden's location")
+
+    try:
+        forecast = _fetch_forecast(*coords)
+    except urllib.error.URLError:
+        logger.exception("weather_forecast_failed garden_id=%s", garden_id)
+        return _error(502, "upstream weather service unavailable")
+
+    return _response(200, forecast)
 
 
 def _to_dynamo(item: dict[str, Any]) -> dict[str, Any]:
@@ -892,8 +1134,12 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     try:
         if method == "POST" and resource == "/gardens":
             return create_garden(event)
+        if method == "GET" and resource == "/gardens":
+            return list_gardens(event)
         if method == "GET" and resource == "/gardens/{gardenId}":
             return get_garden(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/weather":
+            return get_garden_weather(event)
         if method == "POST" and resource == "/gardens/{gardenId}/media":
             return create_media_upload(event)
         if method == "POST" and resource == "/gardens/{gardenId}/plants":
@@ -917,6 +1163,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return post_task_checkin(event)
         if method == "POST" and resource == "/gardens/{gardenId}/plans/{planId}/approve":
             return approve_plan(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/tasks":
+            return list_tasks(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/activity":
+            return list_activity(event)
         return _error(404, f"no route for {method} {resource}")
     except Exception:
         logger.exception("Unhandled error for %s %s", method, resource)

@@ -1,40 +1,48 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { TaskRowComponent } from './task-row.component';
-import { TaskItem } from '../../../core/models/task.model';
+import { GardenTaskItem } from '../../../core/models/task.model';
 
 describe('TaskRowComponent', () => {
   let fixture: ComponentFixture<TaskRowComponent>;
-  const task: TaskItem = {
+  const task: GardenTaskItem = {
     taskId: 't1',
-    label: 'Hand-pollinate tomato flowers',
-    meta: 'Tomato #2 · 7:00 AM',
-    metaIcon: 'potted_plant',
-    chip: '7:00 AM',
-    tone: 'due',
-    done: false,
+    goalId: 'goal-1',
+    title: 'Water deeply',
+    detail: 'Soak the soil until drainage runs clear',
+    scope: 'plant',
+    status: 'pending',
   };
 
   beforeEach(async () => {
-    await TestBed.configureTestingModule({ imports: [TaskRowComponent] }).compileComponents();
+    await TestBed.configureTestingModule({
+      imports: [TaskRowComponent],
+      providers: [provideRouter([])],
+    }).compileComponents();
     fixture = TestBed.createComponent(TaskRowComponent);
     fixture.componentRef.setInput('task', task);
     fixture.detectChanges();
   });
 
-  it('renders the task label', () => {
+  it('renders the task title and detail', () => {
     const el: HTMLElement = fixture.nativeElement;
-    expect(el.textContent).toContain('Hand-pollinate tomato flowers');
+    expect(el.textContent).toContain('Water deeply');
+    expect(el.textContent).toContain('Soak the soil until drainage runs clear');
   });
 
-  it('emits toggle with the task id when clicked', () => {
-    const emitted: string[] = [];
-    fixture.componentInstance.toggle.subscribe((id: string) => emitted.push(id));
-    (fixture.nativeElement as HTMLElement).querySelector('button')!.click();
-    expect(emitted).toEqual(['t1']);
+  it('shows the scope as a chip when pending, no "Done" text', () => {
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.textContent).toContain('plant');
+    expect(el.textContent).not.toContain('Done');
   });
 
-  it('shows a strikethrough label and a green "Done" chip once completed', () => {
-    fixture.componentRef.setInput('task', { ...task, done: true, chip: 'Done' });
+  it('links to the task\'s own goal', () => {
+    const anchor: HTMLAnchorElement = fixture.nativeElement.querySelector('a');
+    expect(anchor.getAttribute('href')).toBe('/goals/goal-1');
+  });
+
+  it('shows a strikethrough label and a "Done" chip once completed', () => {
+    fixture.componentRef.setInput('task', { ...task, status: 'done' });
     fixture.detectChanges();
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.label.done')).toBeTruthy();

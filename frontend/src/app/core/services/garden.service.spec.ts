@@ -27,10 +27,38 @@ describe('MockGardenApi', () => {
     });
   });
 
+  it('createGarden() honors a client-supplied gardenId (photo-upload flow)', (done) => {
+    api
+      .createGarden({ name: 'New Garden', geolocation: 'Mumbai', gardenId: 'client-g-1' })
+      .subscribe(({ gardenId }) => {
+        expect(gardenId).toBe('client-g-1');
+        done();
+      });
+  });
+
+  it('getGardenWeather() returns a static fixture', (done) => {
+    api.getGardenWeather('balcony-kitchen-garden').subscribe((weather) => {
+      expect(weather).toBeTruthy();
+      done();
+    });
+  });
+
   it('getGardenById() falls back to the default fixture for an unknown id', (done) => {
     api.getGardenById('nonexistent').subscribe((garden) => {
       expect(garden.gardenId).toBe('balcony-kitchen-garden');
       done();
+    });
+  });
+
+  it('getGardens() includes the default fixture plus any created gardens', (done) => {
+    api.createGarden({ name: 'Second Garden', geolocation: 'Delhi' }).subscribe(({ gardenId }) => {
+      api.getGardens().subscribe((gardens) => {
+        expect(gardens).toContain(
+          jasmine.objectContaining({ gardenId: 'balcony-kitchen-garden', name: 'Balcony Kitchen Garden' }),
+        );
+        expect(gardens).toContain(jasmine.objectContaining({ gardenId, name: 'Second Garden' }));
+        done();
+      });
     });
   });
 });
@@ -87,7 +115,61 @@ describe('HttpGardenApi', () => {
       geolocation: 'Pune',
       vision: 'veggies',
       climateZone: '',
+      photoUrl: undefined,
     });
+  });
+
+  it('getGardenById() maps a DTO photoUrl through onto the Garden', () => {
+    let result: unknown;
+    api.getGardenById('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1`);
+    req.flush({
+      gardenId: 'g-1',
+      name: 'G',
+      geolocation: 'Pune',
+      ownerUserId: 'u-1',
+      createdAt: '2026-09-12T00:00:00+00:00',
+      photoUrl: 'https://example.test/banner.jpg',
+    });
+
+    expect((result as { photoUrl?: string }).photoUrl).toBe('https://example.test/banner.jpg');
+  });
+
+  it('getGardenWeather() GETs /gardens/{id}/weather and returns the raw forecast', () => {
+    let result: unknown;
+    api.getGardenWeather('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/weather`);
+    expect(req.request.method).toBe('GET');
+    req.flush({ temperatureC: 26.4, weatherCode: 1 });
+
+    expect(result).toEqual({ temperatureC: 26.4, weatherCode: 1 });
+  });
+
+  it('getGardenWeather() resolves undefined instead of erroring when the backend fails', () => {
+    let result: unknown = 'not-yet-set';
+    api.getGardenWeather('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/weather`);
+    req.flush({ message: 'geocode failed' }, { status: 404, statusText: 'Not Found' });
+
+    expect(result).toBeUndefined();
+  });
+
+  it('getGardens() GETs /gardens (multi-garden switcher)', () => {
+    let result: unknown;
+    api.getGardens().subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens`);
+    expect(req.request.method).toBe('GET');
+    const body = [
+      { gardenId: 'g-1', name: 'My Terrace Garden' },
+      { gardenId: 'g-2', name: 'Balcony Garden' },
+    ];
+    req.flush(body);
+
+    expect(result).toEqual(body);
   });
 
   it('getGarden() still delegates to the mock (not backed by a real endpoint yet)', (done) => {

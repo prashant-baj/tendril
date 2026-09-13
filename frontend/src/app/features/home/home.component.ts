@@ -30,7 +30,20 @@ export class HomeComponent {
   private readonly currentGarden = inject(CurrentGardenService);
   private readonly router = inject(Router);
 
-  readonly todayTasks = this.taskApi.todayTasks;
+  private readonly allTasks = toSignal(
+    toObservable(this.currentGarden.gardenId).pipe(
+      switchMap((gardenId) => this.taskApi.getTasks(gardenId)),
+    ),
+    { initialValue: [] },
+  );
+  // A quick-glance widget, not the full list (that's the Tasks screen) — capped at 5. Real
+  // tasks have no due-date concept yet (Phase 7+ tracker work), so this is just "what's
+  // pending," not genuinely "due today."
+  readonly todayTasks = computed(() =>
+    this.allTasks()
+      .filter((t) => t.status !== 'done')
+      .slice(0, 5),
+  );
 
   private readonly allGoals = toSignal(
     toObservable(this.currentGarden.gardenId).pipe(
@@ -53,10 +66,6 @@ export class HomeComponent {
     ),
     { initialValue: [] },
   );
-
-  toggleTask(taskId: string): void {
-    this.taskApi.toggle(taskId);
-  }
 
   goToGarden(): void {
     this.router.navigateByUrl('/garden');

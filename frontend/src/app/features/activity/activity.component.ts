@@ -1,7 +1,9 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
+import { toObservable, toSignal } from '@angular/core/rxjs-interop';
+import { switchMap } from 'rxjs/operators';
 import { ActivityItemComponent } from '../../shared/components/activity-item/activity-item.component';
 import { ActivityApi } from '../../core/services/activity.service';
+import { CurrentGardenService } from '../../core/services/current-garden.service';
 
 @Component({
   selector: 'td-activity',
@@ -13,5 +15,12 @@ import { ActivityApi } from '../../core/services/activity.service';
 })
 export class ActivityComponent {
   private readonly activityApi = inject(ActivityApi);
-  readonly activity = toSignal(this.activityApi.getActivity(), { initialValue: [] });
+  private readonly currentGarden = inject(CurrentGardenService);
+
+  readonly activity = toSignal(
+    toObservable(this.currentGarden.gardenId).pipe(
+      switchMap((gardenId) => this.activityApi.getActivity(gardenId)),
+    ),
+    { initialValue: [] },
+  );
 }

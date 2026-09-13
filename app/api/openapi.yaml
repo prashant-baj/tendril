@@ -42,6 +42,31 @@ paths:
         httpMethod: POST
         uri: "__LAMBDA_INTEGRATION_URI__"
         passthroughBehavior: when_no_match
+    get:
+      operationId: listGardens
+      summary: List every garden the caller owns (multi-garden switcher)
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: The caller's gardens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GardenSummary"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
     options: &cors-preflight
       summary: CORS preflight
       responses:
@@ -84,6 +109,38 @@ paths:
                 $ref: "#/components/schemas/Garden"
         "404":
           description: No such garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/weather:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: getGardenWeather
+      summary: Real current weather for this garden's own location
+      responses:
+        "200":
+          description: Current weather
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenWeather"
+        "404":
+          description: No such garden, or its location couldn't be resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The upstream geocoding/weather service is unavailable
           content:
             application/json:
               schema:
@@ -385,6 +442,50 @@ paths:
         passthroughBehavior: when_no_match
     options: *cors-preflight
 
+  /gardens/{gardenId}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: listTasks
+      summary: List every task across every goal in a garden (Phase 6)
+      responses:
+        "200":
+          description: The garden's tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/activity:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: listActivity
+      summary: The garden's event timeline, newest first (Phase 6)
+      responses:
+        "200":
+          description: The garden's activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityEvent"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
 components:
   parameters:
     GardenId:
@@ -444,10 +545,20 @@ components:
         geolocation:
           type: string
           minLength: 1
-          description: Free-text location for now (e.g. "Pune"); structured lat/lon is future work.
+          description: Free-text location (e.g. "Pune, India") — getGardenWeather geocodes this
+            on demand; no separate lat/lon is stored.
         vision:
           type: string
           description: Optional short description of what this garden is for.
+        gardenId:
+          type: string
+          description: Client-supplied id, used only when a garden photo was uploaded first (that
+            upload needs an existing gardenId, so the frontend generates one up front for this
+            case). Omit to let the server generate one, as for every garden without a photo.
+        mediaId:
+          type: string
+          description: Id from a prior createMediaUpload call (uploaded under the same gardenId
+            given above) — becomes this garden's banner photo.
 
     GardenCreateResponse:
       type: object
@@ -473,6 +584,32 @@ components:
         createdAt:
           type: string
           format: date-time
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url (per read, never stored/reused) for
+            this garden's banner photo, present only if one was set at creation.
+
+    GardenWeather:
+      type: object
+      required: [temperatureC, weatherCode]
+      properties:
+        temperatureC:
+          type: number
+        weatherCode:
+          type: integer
+          description: Raw Open-Meteo WMO weather code — deliberately not resolved to an
+            icon/label server-side; the frontend maps it to presentation.
+
+    GardenSummary:
+      type: object
+      required: [gardenId, name]
+      properties:
+        gardenId:
+          type: string
+        name:
+          type: string
+          description: Denormalized onto the USER#{id}/GARDEN#{id} ownership index at creation
+            time (data-architecture.md §2) — lets listGardens be one cheap Query, no GSI/scan.
 
     Error:
       type: object
@@ -628,8 +765,9 @@ components:
             the final synthesis step.
         says:
           type: string
-          description: A short summary of what this specialist (or the orchestrator's own
-            synthesis) concluded.
+          description: The full text of what this specialist (or the orchestrator's own
+            synthesis) concluded — not display-truncated server-side; the frontend collapses
+            long entries with a "Show more" toggle.
         ms:
           type: integer
           description: How long this step took, in milliseconds.
@@ -643,6 +781,10 @@ components:
       properties:
         taskId:
           type: string
+        goalId:
+          type: string
+          description: The goal this task belongs to — always set (Phase 6), load-bearing for
+            listTasks' cross-goal list to link a task back to its goal.
         title:
           type: string
         detail:
@@ -695,6 +837,26 @@ components:
         downloadUrl:
           type: string
           description: Freshly-generated, short-lived presigned S3 GET URL — never stored/reused.
+
+    ActivityEvent:
+      type: object
+      required: [type, payload, createdAt]
+      properties:
+        type:
+          type: string
+          description: "One of \"goal.submitted\", \"plan.updated\", \"plan.approved\",
+            \"task.checkin\" (Phase 6). Deliberately UI-agnostic — no icon/tone/title baked in
+            server-side; the frontend maps type -> presentation."
+        payload:
+          type: object
+          description: Event-specific context, e.g. {goalId, description} for goal.submitted.
+        createdAt:
+          type: string
+          format: date-time
+        goalId:
+          type: string
+          description: Present whenever the event's payload carries one — lets the frontend link
+            an activity entry back to its goal.
 
     GoalDetail:
       type: object

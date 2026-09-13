@@ -10,6 +10,11 @@
       <span class="agent">{{ label }}</span>
       <span class="duration">{{ durationLabel }}</span>
     </div>
-    <div class="says">{{ entry.says }}</div>
+    <div class="says" [class.clamped]="isTruncatable && !expanded()" [innerHTML]="entry.says | markdown"></div>
+    @if (isTruncatable) {
+      <button type="button" class="show-more" (click)="toggle()">
+        {{ expanded() ? 'Show less' : 'Show more' }}
+      </button>
+    }
   </div>
 </div>

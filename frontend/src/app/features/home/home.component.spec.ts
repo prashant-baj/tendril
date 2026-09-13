@@ -6,6 +6,7 @@ import { GardenApi, MockGardenApi } from '../../core/services/garden.service';
 import { GoalApi, MockGoalApi } from '../../core/services/goal.service';
 import { TaskApi, MockTaskApi } from '../../core/services/task.service';
 import { Goal } from '../../core/models/goal.model';
+import { GardenTaskItem } from '../../core/models/task.model';
 
 describe('HomeComponent', () => {
   let fixture: ComponentFixture<HomeComponent>;
@@ -30,12 +31,35 @@ describe('HomeComponent', () => {
     expect(text).toContain('Goals in progress');
     expect(text).toContain('Plants');
   });
+});
 
-  it('toggling a today task delegates to TaskApi', () => {
-    const taskApi = TestBed.inject(TaskApi);
-    spyOn(taskApi, 'toggle');
-    fixture.componentInstance.toggleTask('t2');
-    expect(taskApi.toggle).toHaveBeenCalledWith('t2');
+describe('HomeComponent today tasks', () => {
+  let fixture: ComponentFixture<HomeComponent>;
+
+  const tasks: GardenTaskItem[] = [
+    { taskId: 't1', goalId: 'g1', title: 'Water deeply', detail: 'd', scope: 'plant', status: 'pending' },
+    { taskId: 't2', goalId: 'g1', title: 'Already done', detail: 'd', scope: 'plant', status: 'done' },
+  ];
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [HomeComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GardenApi, useClass: MockGardenApi },
+        { provide: GoalApi, useClass: MockGoalApi },
+        { provide: TaskApi, useValue: { getTasks: () => of(tasks) } },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(HomeComponent);
+    fixture.detectChanges();
+  });
+
+  it('shows only not-yet-done tasks in the Today widget', () => {
+    expect(fixture.componentInstance.todayTasks()).toEqual([tasks[0]]);
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('Water deeply');
+    expect(text).not.toContain('Already done');
   });
 });
 

@@ -13,7 +13,11 @@ describe('GardenSetupComponent', () => {
   let router: Router;
 
   beforeEach(async () => {
-    gardenApi = jasmine.createSpyObj<GardenApi>('GardenApi', ['createGarden']);
+    gardenApi = jasmine.createSpyObj<GardenApi>('GardenApi', [
+      'createGarden',
+      'requestMediaUpload',
+      'uploadMedia',
+    ]);
     currentGarden = jasmine.createSpyObj<CurrentGardenService>('CurrentGardenService', [
       'setCurrentGardenId',
     ]);
@@ -51,8 +55,39 @@ describe('GardenSetupComponent', () => {
       name: 'Balcony Garden',
       geolocation: 'Pune',
       vision: undefined,
+      gardenId: undefined,
+      mediaId: undefined,
     });
+    expect(gardenApi.requestMediaUpload).not.toHaveBeenCalled();
     expect(currentGarden.setCurrentGardenId).toHaveBeenCalledWith('g-123');
+    expect(navigateSpy).toHaveBeenCalledWith('/home');
+  });
+
+  it('uploads the photo first, generating a gardenId, then creates the garden with it', () => {
+    gardenApi.requestMediaUpload.and.returnValue(
+      of({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' }),
+    );
+    gardenApi.uploadMedia.and.returnValue(of(undefined));
+    gardenApi.createGarden.and.returnValue(of({ gardenId: 'client-generated-id' }));
+    const navigateSpy = spyOn(router, 'navigateByUrl');
+
+    const file = new File(['x'], 'garden.jpg', { type: 'image/jpeg' });
+    component.onFileSelected(file);
+    component.form.setValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
+    component.submit();
+
+    expect(gardenApi.requestMediaUpload).toHaveBeenCalledTimes(1);
+    const [gardenIdArg, mediaRequestArg] = gardenApi.requestMediaUpload.calls.mostRecent().args;
+    expect(mediaRequestArg).toEqual({ contentType: 'image/jpeg', fileName: 'garden.jpg' });
+    expect(gardenApi.uploadMedia).toHaveBeenCalledWith('https://s3.example/upload', file);
+    expect(gardenApi.createGarden).toHaveBeenCalledWith({
+      name: 'Balcony Garden',
+      geolocation: 'Pune',
+      vision: undefined,
+      gardenId: gardenIdArg,
+      mediaId: 'media-1',
+    });
+    expect(currentGarden.setCurrentGardenId).toHaveBeenCalledWith('client-generated-id');
     expect(navigateSpy).toHaveBeenCalledWith('/home');
   });
 

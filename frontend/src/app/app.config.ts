@@ -8,8 +8,8 @@ import { routes } from './app.routes';
 import { userIdInterceptor } from './core/interceptors/user-id.interceptor';
 import { GardenApi, HttpGardenApi } from './core/services/garden.service';
 import { GoalApi, HttpGoalApi } from './core/services/goal.service';
-import { TaskApi, MockTaskApi } from './core/services/task.service';
-import { ActivityApi, MockActivityApi } from './core/services/activity.service';
+import { TaskApi, HttpTaskApi } from './core/services/task.service';
+import { ActivityApi, HttpActivityApi } from './core/services/activity.service';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -21,13 +21,12 @@ export const appConfig: ApplicationConfig = {
       enabled: !isDevMode(),
       registrationStrategy: 'registerWhenStable:30000',
     }),
-    // Mock data layer (no backend yet — ADR-0004) except GardenApi/GoalApi, which now have a
-    // real Client API (OB-01/PA-01/PA-02) — bound to their Http* implementations, which
-    // themselves delegate to a Mock* fallback only for the pre-onboarding (no garden yet) case.
-    // Swap the rest's `useClass` the same way as their stories land.
+    // Every Api is now bound to a real Http* implementation (GardenApi/GoalApi since
+    // OB-01/PA-01/PA-02, TaskApi/ActivityApi since Phase 6) — each still delegates to a Mock*
+    // fallback only for the pre-onboarding (no garden yet) case.
     { provide: GardenApi, useClass: HttpGardenApi },
     { provide: GoalApi, useClass: HttpGoalApi },
-    { provide: TaskApi, useClass: MockTaskApi },
-    { provide: ActivityApi, useClass: MockActivityApi },
+    { provide: TaskApi, useClass: HttpTaskApi },
+    { provide: ActivityApi, useClass: HttpActivityApi },
   ],
 };

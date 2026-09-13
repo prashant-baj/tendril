@@ -6,6 +6,8 @@
     </div>
 
     <form [formGroup]="form" (ngSubmit)="submit()" class="form">
+      <td-photo-picker (fileSelected)="onFileSelected($event)" />
+
       <label class="field">
         <span class="field-label">Garden name</span>
         <input

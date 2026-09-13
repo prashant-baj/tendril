@@ -8,7 +8,9 @@
     </div>
     <div class="card list">
       @for (task of todayTasks(); track task.taskId) {
-        <td-task-row [task]="task" (toggle)="toggleTask($event)" />
+        <td-task-row [task]="task" />
+      } @empty {
+        <p class="empty">Nothing pending — you're all caught up.</p>
       }
     </div>
   </section>

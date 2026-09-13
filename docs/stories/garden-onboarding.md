@@ -62,6 +62,21 @@ description, **so that** everything else (plants, goals, plans) has somewhere to
 **Dependencies:** none (first feature). **Status:** ✅ done (implemented; not yet deployed to
 dev — deploy is a separate, explicit step per this repo's practice of asking before any deploy).
 
+**Addendum (2026-09-13) — garden photo + real weather:** two small, contained enhancements added
+after the fact, not a new story:
+- **Garden photo as a hero banner.** `createGarden` now accepts an optional client-supplied
+  `gardenId` and `mediaId` — the *only* deviation from every other entity's server-generated id,
+  needed because `POST /gardens/{gardenId}/media` (the same upload flow OB-02/WS-05 already use)
+  requires an existing `gardenId`, but no garden exists yet at Garden Setup time. The frontend
+  generates one client-side (`core/utils/id.util.ts`) only when a photo is actually picked; the
+  no-photo path is unchanged. `getGarden` resolves the stored `media_id` to a fresh presigned
+  `photoUrl`, rendered as a photo-backed hero banner on the Garden screen.
+- **Real weather for the garden's location**, replacing the top-bar's hardcoded `"34°C · dry"`
+  chip. New `GET /gardens/{gardenId}/weather` geocodes the Garden's free-text `geolocation` via
+  Open-Meteo's free Geocoding API, then fetches the forecast the same way
+  `app/tools/weather/handler.py` already does for specialists (duplicated, not imported — separate
+  deployable units). Refetches whenever the garden switcher changes the active garden.
+
 ---
 
 ## OB-02 — Add a Plant (with a photo)

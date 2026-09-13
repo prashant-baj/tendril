@@ -1,6 +1,16 @@
 @if (garden(); as g) {
   <div class="screen">
-    <section class="card intro">
+    <section
+      class="card intro"
+      [class.has-photo]="g.photoUrl"
+      [style.background-image]="
+        g.photoUrl
+          ? 'linear-gradient(180deg, rgba(20, 30, 20, 0.15), rgba(15, 25, 15, 0.75)), url(' +
+            g.photoUrl +
+            ')'
+          : null
+      "
+    >
       <h2>{{ g.name }}</h2>
       @if (g.vision) {
         <p>&ldquo;{{ g.vision }}&rdquo;</p>

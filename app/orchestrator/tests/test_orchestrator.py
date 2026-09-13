@@ -230,9 +230,23 @@ def test_specialist_tool_appends_to_trace_on_success(monkeypatch):
     assert len(trace) == 1
     entry = trace[0]
     assert entry["agent"] == "agronomy"
-    assert entry["says"].startswith("Looks like nitrogen deficiency")
-    assert len(entry["says"]) <= 150
+    # Full response text is stored, not display-truncated (that's now a frontend concern —
+    # trace-entry.component.ts's "Show more").
+    assert entry["says"] == long_result.strip()
     assert isinstance(entry["ms"], int)
+
+
+def test_specialist_tool_trace_still_caps_a_pathologically_long_response(monkeypatch):
+    huge_result = "x" * 5000
+    fake_client = FakeAgentCoreClient(response_body={"result": huge_result})
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    trace: list[dict] = []
+
+    tool_fn = handler._make_specialist_tool("agronomy", "arn:x", "desc", "g1", trace=trace)
+    tool_fn("what's wrong?")
+
+    assert len(trace[0]["says"]) == 4000
+    assert trace[0]["says"].endswith("…")
 
 
 def test_specialist_tool_appends_to_trace_on_error(monkeypatch):
@@ -438,11 +452,16 @@ def test_write_plan_and_tasks_clears_previous_tasks_then_writes_fresh_set(monkey
             "status": "PlanProposed",
         }
     ]
-    task_items = [i for i in fake_table.put_calls if i["sk"] != "PLAN#goal-1"]
+    task_items = [i for i in fake_table.put_calls if i["sk"].startswith("TASK#")]
     assert len(task_items) == 2
     assert all(i["sk"].startswith("TASK#goal-1#") for i in task_items)
     assert {i["title"] for i in task_items} == {"Water", "Mulch"}
     assert all("plant_id" not in i for i in task_items)
+
+    # Phase 6: a best-effort plan.updated Event is also written alongside the Plan.
+    event_items = [i for i in fake_table.put_calls if i["sk"].startswith("EVENT#")]
+    assert len(event_items) == 1
+    assert event_items[0]["type"] == "plan.updated"
 
 
 def test_write_plan_and_tasks_stamps_plant_id_onto_every_task_when_goal_has_one(monkeypatch):
@@ -455,7 +474,7 @@ def test_write_plan_and_tasks_stamps_plant_id_onto_every_task_when_goal_has_one(
     )
     handler._write_plan_and_tasks("g1", "goal-1", plan, plant_id="plant-1")
 
-    task_items = [i for i in fake_table.put_calls if i["sk"] != "PLAN#goal-1"]
+    task_items = [i for i in fake_table.put_calls if i["sk"].startswith("TASK#")]
     assert task_items[0]["plant_id"] == "plant-1"
 
 
@@ -507,6 +526,23 @@ def test_write_plan_and_tasks_omits_trace_when_not_given(monkeypatch):
 
     plan_item = next(i for i in fake_table.put_calls if i["sk"] == "PLAN#goal-1")
     assert "trace" not in plan_item
+
+
+def test_write_plan_and_tasks_survives_event_write_failure(monkeypatch):
+    # Phase 6: the plan.updated Event write is best-effort — a failure there must not stop the
+    # Plan/Task writes themselves from completing.
+    fake_table = FakeTable(query_response={"Items": []})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(
+        handler, "_write_event", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+
+    plan = handler.PlanProposal(
+        success_criteria="x", tasks=[handler.TaskProposal(title="Water", detail="d")]
+    )
+    handler._write_plan_and_tasks("g1", "goal-1", plan)
+
+    assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
 
 
 # --- handle_goal_submitted (agent-loop wiring; Agent/BedrockModel mocked) ------------------

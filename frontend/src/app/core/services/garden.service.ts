@@ -1,9 +1,15 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable, of } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { catchError, map } from 'rxjs/operators';
 import { CLIENT_API_BASE_URL } from '../config/client-api.config';
-import { CreateGardenRequest, Garden, GardenFact } from '../models/garden.model';
+import {
+  CreateGardenRequest,
+  Garden,
+  GardenFact,
+  GardenSummary,
+  GardenWeather,
+} from '../models/garden.model';
 import { CreateGoalRequest } from '../models/goal.model';
 import { CreatePlantRequest, Plant } from '../models/plant.model';
 import { MediaUploadRequest, MediaUploadResponse } from '../models/media.model';
@@ -28,6 +34,11 @@ export abstract class GardenApi {
   abstract createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }>;
   /** OB-01: `GET /gardens/{gardenId}`. */
   abstract getGardenById(gardenId: string): Observable<Garden>;
+  /** Multi-garden switcher: `GET /gardens` — every garden the caller owns. */
+  abstract getGardens(): Observable<GardenSummary[]>;
+  /** `GET /gardens/{gardenId}/weather` — `undefined` when unavailable (geocoding/forecast
+   * failure), so callers can hide the weather chip rather than show broken data. */
+  abstract getGardenWeather(gardenId: string): Observable<GardenWeather | undefined>;
   /** OB-02: `POST /gardens/{gardenId}/media` — returns a presigned S3 PUT URL + its mediaId. */
   abstract requestMediaUpload(
     gardenId: string,
@@ -101,7 +112,7 @@ export class MockGardenApi extends GardenApi {
   private readonly createdGardens = new Map<string, Garden>([[this.garden.gardenId, this.garden]]);
 
   createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }> {
-    const gardenId = `mock-${Math.random().toString(36).slice(2, 10)}`;
+    const gardenId = request.gardenId ?? `mock-${Math.random().toString(36).slice(2, 10)}`;
     this.createdGardens.set(gardenId, {
       gardenId,
       name: request.name,
@@ -114,6 +125,19 @@ export class MockGardenApi extends GardenApi {
 
   getGardenById(gardenId: string): Observable<Garden> {
     return of(this.createdGardens.get(gardenId) ?? this.garden);
+  }
+
+  getGardens(): Observable<GardenSummary[]> {
+    return of(
+      Array.from(this.createdGardens.values()).map((g) => ({
+        gardenId: g.gardenId,
+        name: g.name,
+      })),
+    );
+  }
+
+  getGardenWeather(_gardenId: string): Observable<GardenWeather | undefined> {
+    return of({ temperatureC: 28, weatherCode: 1 });
   }
 
   requestMediaUpload(
@@ -172,6 +196,8 @@ interface GardenDto {
   vision?: string;
   ownerUserId: string;
   createdAt: string;
+  /** Freshly-generated presigned GET url for this garden's banner photo, if one was set. */
+  photoUrl?: string;
 }
 
 /** Shape returned by `GET /gardens/{gardenId}/plants` (app/api/openapi.yaml's `Plant` schema). */
@@ -247,8 +273,19 @@ export class HttpGardenApi extends GardenApi {
           geolocation: dto.geolocation,
           vision: dto.vision ?? '',
           climateZone: '',
+          photoUrl: dto.photoUrl,
         })),
       );
+  }
+
+  getGardens(): Observable<GardenSummary[]> {
+    return this.http.get<GardenSummary[]>(`${this.baseUrl}/gardens`);
+  }
+
+  getGardenWeather(gardenId: string): Observable<GardenWeather | undefined> {
+    return this.http
+      .get<GardenWeather>(`${this.baseUrl}/gardens/${gardenId}/weather`)
+      .pipe(catchError(() => of(undefined)));
   }
 
   requestMediaUpload(

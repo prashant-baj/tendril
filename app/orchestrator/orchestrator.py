@@ -154,11 +154,14 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
 FALLBACK_TASK_TITLE_MAX_CHARS = 60
 
 
-def _summarize(text: str, max_len: int = 150) -> str:
-    """Hard-truncates a specialist/orchestrator response into a one-line trace summary (PA-05's
-    "How this was decided" section) — never re-asks the model to summarize itself, just a plain
-    substring, matching this codebase's existing bias toward cheap deterministic steps over an
-    extra model round-trip."""
+def _summarize(text: str, max_len: int = 4000) -> str:
+    """Stores a specialist/orchestrator response for the trace (PA-05's "How this was decided"
+    section) — the full text, not a display-truncated one-liner; truncation to a preview is a
+    frontend concern (`trace-entry.component.ts`'s "Show more"), matching this codebase's
+    "UI presentation lives in the frontend" precedent. `max_len` is only a defensive cap against a
+    pathological response, not a normal-path truncation — never re-asks the model to summarize
+    itself, just a plain substring, matching this codebase's existing bias toward cheap
+    deterministic steps over an extra model round-trip."""
     text = text.strip()
     return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "…"
 
@@ -303,6 +306,25 @@ def _update_goal(garden_id: str, goal_id: str, **fields: Any) -> None:
     )
 
 
+def _write_event(garden_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    """Best-effort — an Event is an audit-log entry for the Activity screen (Phase 6), never
+    something a turn's success should depend on. Duplicated in garden_handler.py rather than
+    shared: app/api and app/orchestrator are separate deployable units (no cross-package Python
+    imports in this monorepo)."""
+    event_id = uuid.uuid4().hex
+    created_at = datetime.now(UTC).isoformat()
+    _get_table().put_item(
+        Item={
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"EVENT#{created_at}#{event_id}",
+            "event_id": event_id,
+            "type": event_type,
+            "payload": payload,
+            "created_at": created_at,
+        }
+    )
+
+
 def _write_message(garden_id: str, goal_id: str, *, role: str, content: str) -> None:
     message_id = uuid.uuid4().hex
     created_at = datetime.now(UTC).isoformat()
@@ -369,6 +391,12 @@ def _write_plan_and_tasks(
     if trace:
         plan_item["trace"] = trace
     table.put_item(Item=plan_item)
+    try:
+        _write_event(
+            garden_id, "plan.updated", {"goalId": goal_id, "successCriteria": plan.success_criteria}
+        )
+    except Exception:
+        logger.exception("Failed to write plan.updated event for goal %s", goal_id)
     for t in plan.tasks:
         task_id = uuid.uuid4().hex
         task_item = {

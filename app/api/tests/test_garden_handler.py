@@ -162,6 +162,58 @@ def test_create_garden_happy_path(monkeypatch):
     assert pks == {f"GARDEN#{body['gardenId']}", "USER#user-1"}
 
 
+def test_create_garden_with_client_supplied_id_and_media(monkeypatch):
+    # The only entity whose id can come from the frontend — needed because a garden photo has
+    # to be uploaded (createMediaUpload needs an existing gardenId) before the garden itself
+    # exists.
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+
+    event = _event(
+        "POST",
+        "/gardens",
+        body={
+            "name": "Farmhouse Garden",
+            "geolocation": "Nashik",
+            "gardenId": "client-g-1",
+            "mediaId": "media-1",
+        },
+        headers={"X-User-Id": "user-1"},
+    )
+    resp = handler.create_garden(event)
+
+    assert resp["statusCode"] == 201
+    body = json.loads(resp["body"])
+    assert body["gardenId"] == "client-g-1"
+
+    items = fake_client.calls[0]
+    garden_put = next(i["Put"] for i in items if i["Put"]["Item"]["pk"]["S"] == "GARDEN#client-g-1")
+    assert garden_put["Item"]["media_id"]["S"] == "media-1"
+    assert garden_put["ConditionExpression"] == "attribute_not_exists(pk)"
+
+
+def test_create_garden_gardenid_must_be_a_string():
+    event = _event(
+        "POST",
+        "/gardens",
+        body={"name": "G", "geolocation": "Pune", "gardenId": 123},
+        headers={"X-User-Id": "u"},
+    )
+    resp = handler.create_garden(event)
+    assert resp["statusCode"] == 400
+
+
+def test_create_garden_mediaid_must_be_a_string():
+    event = _event(
+        "POST",
+        "/gardens",
+        body={"name": "G", "geolocation": "Pune", "mediaId": 123},
+        headers={"X-User-Id": "u"},
+    )
+    resp = handler.create_garden(event)
+    assert resp["statusCode"] == 400
+
+
 def test_create_garden_missing_user_id_header(monkeypatch):
     monkeypatch.setattr(handler, "_client", FakeClient())
     event = _event("POST", "/gardens", body={"name": "G", "geolocation": "Pune"}, headers={})
@@ -218,6 +270,59 @@ def test_create_garden_dynamo_failure_returns_500(monkeypatch):
     assert resp["statusCode"] == 500
 
 
+# --- list_gardens (multi-garden switcher) ---------------------------------------
+
+
+def test_list_gardens_happy_path(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {"garden_id": "g1", "name": "Balcony Kitchen Garden"},
+                {"garden_id": "g2", "name": "Terrace Garden"},
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event("GET", "/gardens", headers={"X-User-Id": "user-1"})
+    resp = handler.list_gardens(event)
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == [
+        {"gardenId": "g1", "name": "Balcony Kitchen Garden"},
+        {"gardenId": "g2", "name": "Terrace Garden"},
+    ]
+    assert fake_table.query_calls[0]["KeyConditionExpression"] is not None
+
+
+def test_list_gardens_empty(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens", headers={"X-User-Id": "user-1"})
+    resp = handler.list_gardens(event)
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == []
+
+
+def test_list_gardens_missing_user_id_header():
+    event = _event("GET", "/gardens", headers={})
+    resp = handler.list_gardens(event)
+    assert resp["statusCode"] == 400
+
+
+def test_list_gardens_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_query=RuntimeError("boom")))
+    event = _event("GET", "/gardens", headers={"X-User-Id": "user-1"})
+    resp = handler.list_gardens(event)
+    assert resp["statusCode"] == 500
+
+
+def test_handler_routes_list_gardens(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens", headers={"X-User-Id": "user-1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
 # --- get_garden ----------------------------------------------------------------
 
 
@@ -249,6 +354,52 @@ def test_get_garden_found(monkeypatch):
     }
 
 
+def test_get_garden_resolves_photo_url_when_media_id_set(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "METADATA": {
+                "Item": {
+                    "garden_id": "g1",
+                    "name": "Farmhouse Garden",
+                    "geolocation": "Nashik",
+                    "owner_user_id": "user-1",
+                    "created_at": "2026-09-13T00:00:00+00:00",
+                    "media_id": "media-1",
+                }
+            },
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/banner.jpg"}},
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+
+    event = _event("GET", "/gardens/{gardenId}", path_params={"gardenId": "g1"})
+    resp = handler.get_garden(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert "g1/media-1/banner.jpg" in body["photoUrl"]
+
+
+def test_get_garden_omits_photo_url_when_no_media(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={
+            "Item": {
+                "garden_id": "g1",
+                "name": "Balcony Kitchen Garden",
+                "geolocation": "Pune",
+                "owner_user_id": "user-1",
+                "created_at": "2026-09-12T00:00:00+00:00",
+            }
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    event = _event("GET", "/gardens/{gardenId}", path_params={"gardenId": "g1"})
+    resp = handler.get_garden(event)
+    assert "photoUrl" not in json.loads(resp["body"])
+
+
 def test_get_garden_not_found(monkeypatch):
     monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
     event = _event("GET", "/gardens/{gardenId}", path_params={"gardenId": "missing"})
@@ -269,6 +420,101 @@ def test_get_garden_dynamo_failure_returns_500(monkeypatch):
     event = _event("GET", "/gardens/{gardenId}", path_params={"gardenId": "g1"})
     resp = handler.get_garden(event)
     assert resp["statusCode"] == 500
+
+
+# --- get_garden_weather ----------------------------------------------------------
+
+
+def test_get_garden_weather_happy_path(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "geolocation": "Pune, India"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_geocode", lambda query: (18.52, 73.86))
+    monkeypatch.setattr(
+        handler, "_fetch_forecast", lambda lat, lon: {"temperatureC": 29.4, "weatherCode": 1}
+    )
+
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == {"temperatureC": 29.4, "weatherCode": 1}
+
+
+def test_get_garden_weather_garden_not_found(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "missing"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 404
+
+
+def test_get_garden_weather_missing_path_param():
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params=None)
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 400
+
+
+def test_get_garden_weather_geocode_found_nothing(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "geolocation": "Nowhereland"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_geocode", lambda query: None)
+
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 404
+
+
+def test_get_garden_weather_geocode_failure_returns_502(monkeypatch):
+    import urllib.error
+
+    fake_table = FakeTable(get_item_response={"Item": {"garden_id": "g1", "geolocation": "Pune"}})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    def boom(query):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(handler, "_geocode", boom)
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 502
+
+
+def test_get_garden_weather_forecast_failure_returns_502(monkeypatch):
+    import urllib.error
+
+    fake_table = FakeTable(get_item_response={"Item": {"garden_id": "g1", "geolocation": "Pune"}})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_geocode", lambda query: (18.52, 73.86))
+
+    def boom(lat, lon):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(handler, "_fetch_forecast", boom)
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 502
+
+
+def test_get_garden_weather_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_get=RuntimeError("boom")))
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 500
+
+
+def test_handler_routes_get_garden_weather(monkeypatch):
+    fake_table = FakeTable(get_item_response={"Item": {"garden_id": "g1", "geolocation": "Pune"}})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_geocode", lambda query: (18.52, 73.86))
+    monkeypatch.setattr(
+        handler, "_fetch_forecast", lambda lat, lon: {"temperatureC": 29.4, "weatherCode": 1}
+    )
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
 
 
 # --- create_media_upload (OB-02) ------------------------------------------------
@@ -701,13 +947,21 @@ def test_create_goal_happy_path_without_media(monkeypatch):
     assert "goalId" in body and body["goalId"]
     assert body["status"] == "Intake"
 
-    assert len(fake_table.put_calls) == 1
-    goal_item = fake_table.put_calls[0]
+    # 1 Goal Put + 1 best-effort Event Put (Phase 6's goal.submitted activity entry)
+    assert len(fake_table.put_calls) == 2
+    goal_item = next(i for i in fake_table.put_calls if i["sk"].startswith("GOAL#"))
     assert goal_item["pk"] == "GARDEN#g1"
     assert goal_item["sk"] == f"GOAL#{body['goalId']}"
     assert goal_item["description"] == "leaves turning yellow"
     assert goal_item["status"] == "Intake"
     assert "media_ids" not in goal_item
+
+    event_item = next(i for i in fake_table.put_calls if i["sk"].startswith("EVENT#"))
+    assert event_item["type"] == "goal.submitted"
+    assert event_item["payload"] == {
+        "goalId": body["goalId"],
+        "description": "leaves turning yellow",
+    }
 
     # persisted before the event is published (order matters — see module docstring)
     assert len(fake_events.put_calls) == 1
@@ -722,6 +976,7 @@ def test_create_goal_happy_path_with_media_ids(monkeypatch):
     fake_client = FakeClient()
     monkeypatch.setattr(handler, "_client", fake_client)
     monkeypatch.setattr(handler, "_events", FakeEvents())
+    monkeypatch.setattr(handler, "_table", FakeTable())
 
     event = _event(
         "POST",
@@ -753,6 +1008,7 @@ def test_create_goal_with_plant_id_propagates_to_media(monkeypatch):
     fake_client = FakeClient()
     monkeypatch.setattr(handler, "_client", fake_client)
     monkeypatch.setattr(handler, "_events", FakeEvents())
+    monkeypatch.setattr(handler, "_table", FakeTable())
 
     event = _event(
         "POST",
@@ -984,7 +1240,17 @@ def test_get_goal_detail_with_plan_tasks_media_and_messages(monkeypatch):
             "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/tomato.jpg"}},
         },
         query_responses=[
-            {"Items": [{"task_id": "t1", "title": "Water", "detail": "Deeply", "scope": "plant"}]},
+            {
+                "Items": [
+                    {
+                        "task_id": "t1",
+                        "goal_id": "goal-1",
+                        "title": "Water",
+                        "detail": "Deeply",
+                        "scope": "plant",
+                    }
+                ]
+            },
             {
                 "Items": [
                     {
@@ -1020,6 +1286,7 @@ def test_get_goal_detail_with_plan_tasks_media_and_messages(monkeypatch):
     assert body["tasks"] == [
         {
             "taskId": "t1",
+            "goalId": "goal-1",
             "title": "Water",
             "detail": "Deeply",
             "scope": "plant",
@@ -1105,6 +1372,29 @@ def test_approve_plan_happy_path(monkeypatch):
     assert goal_update["Key"] == {"pk": "GARDEN#g1", "sk": "GOAL#goal-1"}
     assert goal_update["ExpressionAttributeValues"][":status"] == "Approved"
 
+    # Phase 6: a best-effort plan.approved Event is written too.
+    assert len(fake_table.put_calls) == 1
+    event_item = fake_table.put_calls[0]
+    assert event_item["type"] == "plan.approved"
+    assert event_item["payload"] == {"goalId": "goal-1", "planId": "goal-1"}
+
+
+def test_approve_plan_event_write_failure_still_returns_200(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"plan_id": "goal-1", "status": "PlanProposed"}},
+        raise_on_put=RuntimeError("boom"),
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    resp = handler.approve_plan(event)
+
+    assert resp["statusCode"] == 200
+
 
 def test_approve_plan_not_found(monkeypatch):
     monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
@@ -1158,6 +1448,13 @@ def test_post_task_checkin_happy_path_no_plant(monkeypatch):
         "goalId": "goal-1",
         "taskId": "task-1",
     }
+
+    # Phase 6: a best-effort task.checkin Event is written too (a separate concern from the
+    # EventBridge publish above — one's an audit-log item, the other an async trigger).
+    assert len(fake_table.put_calls) == 1
+    event_item = fake_table.put_calls[0]
+    assert event_item["type"] == "task.checkin"
+    assert event_item["payload"] == {"goalId": "goal-1", "taskId": "task-1", "taskTitle": ""}
 
     assert len(fake_client.calls) == 1
     items = fake_client.calls[0]
@@ -1315,6 +1612,7 @@ def test_get_goal_detail_resolves_task_media_and_plant_id(monkeypatch):
                 "Items": [
                     {
                         "task_id": "task-1",
+                        "goal_id": "goal-1",
                         "title": "Water",
                         "detail": "Deeply",
                         "scope": "plant",
@@ -1356,6 +1654,7 @@ def test_get_goal_detail_resolves_task_feedback(monkeypatch):
                 "Items": [
                     {
                         "task_id": "task-1",
+                        "goal_id": "goal-1",
                         "title": "Water",
                         "detail": "Deeply",
                         "scope": "plant",
@@ -1390,6 +1689,7 @@ def test_get_goal_detail_omits_task_feedback_when_absent(monkeypatch):
                 "Items": [
                     {
                         "task_id": "task-1",
+                        "goal_id": "goal-1",
                         "title": "Water",
                         "detail": "Deeply",
                         "scope": "plant",
@@ -1493,6 +1793,131 @@ def test_get_goal_detail_omits_plan_trace_when_absent(monkeypatch):
     assert "trace" not in body["plan"]
 
 
+# --- list_tasks / list_activity (Phase 6) --------------------------------------------------
+
+
+def test_list_tasks_across_multiple_goals(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {
+                    "task_id": "t1",
+                    "goal_id": "goal-1",
+                    "title": "Water",
+                    "detail": "Deeply",
+                    "scope": "plant",
+                    "status": "pending",
+                },
+                {
+                    "task_id": "t2",
+                    "goal_id": "goal-2",
+                    "title": "Mulch",
+                    "detail": "Around base",
+                    "scope": "plant",
+                    "status": "done",
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params={"gardenId": "g1"})
+    resp = handler.list_tasks(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert [t["taskId"] for t in body] == ["t1", "t2"]
+    assert [t["goalId"] for t in body] == ["goal-1", "goal-2"]
+    # A single Query on the shared TASK# prefix, not one per goal.
+    assert len(fake_table.query_calls) == 1
+
+
+def test_list_tasks_empty(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params={"gardenId": "g1"})
+    resp = handler.list_tasks(event)
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == []
+
+
+def test_list_tasks_missing_garden_id():
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params=None)
+    resp = handler.list_tasks(event)
+    assert resp["statusCode"] == 400
+
+
+def test_list_tasks_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_query=RuntimeError("boom")))
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params={"gardenId": "g1"})
+    resp = handler.list_tasks(event)
+    assert resp["statusCode"] == 500
+
+
+def test_list_activity_happy_path_newest_first(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {
+                    "type": "task.checkin",
+                    "payload": {"goalId": "goal-1", "taskId": "t1"},
+                    "created_at": "2026-01-02T00:00:00+00:00",
+                },
+                {
+                    "type": "goal.submitted",
+                    "payload": {"goalId": "goal-1", "description": "help"},
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params={"gardenId": "g1"})
+    resp = handler.list_activity(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert [e["type"] for e in body] == ["task.checkin", "goal.submitted"]
+    assert body[0]["goalId"] == "goal-1"
+    # Newest-first: DynamoDB does the ordering, not a Python-side sort.
+    assert fake_table.query_calls[0]["ScanIndexForward"] is False
+
+
+def test_list_activity_empty(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params={"gardenId": "g1"})
+    resp = handler.list_activity(event)
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == []
+
+
+def test_list_activity_missing_garden_id():
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params=None)
+    resp = handler.list_activity(event)
+    assert resp["statusCode"] == 400
+
+
+def test_list_activity_dynamo_failure_returns_500(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(raise_on_query=RuntimeError("boom")))
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params={"gardenId": "g1"})
+    resp = handler.list_activity(event)
+    assert resp["statusCode"] == 500
+
+
+def test_handler_routes_list_tasks(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params={"gardenId": "g1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
+def test_handler_routes_list_activity(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": []}))
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params={"gardenId": "g1"})
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
 # --- contract test: responses conform to openapi.yaml's JSON Schema (WS-03) ----
 
 
@@ -1541,6 +1966,50 @@ def test_create_garden_response_conforms_to_openapi_schema(monkeypatch):
     validate(instance=body, schema=schema)
 
 
+def test_get_garden_weather_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(get_item_response={"Item": {"garden_id": "g1", "geolocation": "Pune"}}),
+    )
+    monkeypatch.setattr(handler, "_geocode", lambda query: (18.52, 73.86))
+    monkeypatch.setattr(
+        handler, "_fetch_forecast", lambda lat, lon: {"temperatureC": 29.4, "weatherCode": 1}
+    )
+    event = _event("GET", "/gardens/{gardenId}/weather", path_params={"gardenId": "g1"})
+    resp = handler.get_garden_weather(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = spec["components"]["schemas"]["GardenWeather"]
+    validate(instance=body, schema=schema)
+
+
+def test_list_gardens_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(query_response={"Items": [{"garden_id": "g1", "name": "My Garden"}]}),
+    )
+    event = _event("GET", "/gardens", headers={"X-User-Id": "user-1"})
+    resp = handler.list_gardens(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = {"type": "array", "items": spec["components"]["schemas"]["GardenSummary"]}
+    validate(instance=body, schema=schema)
+
+
 def test_list_plants_response_conforms_to_openapi_schema(monkeypatch):
     import yaml
     from jsonschema import validate
@@ -1567,6 +2036,69 @@ def test_list_plants_response_conforms_to_openapi_schema(monkeypatch):
         "type": "array",
         "items": spec["components"]["schemas"]["Plant"],
     }
+    validate(instance=body, schema=schema)
+
+
+def test_list_tasks_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(
+            query_response={
+                "Items": [
+                    {
+                        "task_id": "t1",
+                        "goal_id": "goal-1",
+                        "title": "Water",
+                        "detail": "Deeply",
+                        "scope": "plant",
+                        "status": "pending",
+                    }
+                ]
+            }
+        ),
+    )
+    event = _event("GET", "/gardens/{gardenId}/tasks", path_params={"gardenId": "g1"})
+    resp = handler.list_tasks(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = {"type": "array", "items": spec["components"]["schemas"]["Task"]}
+    validate(instance=body, schema=schema)
+
+
+def test_list_activity_response_conforms_to_openapi_schema(monkeypatch):
+    import yaml
+    from jsonschema import validate
+
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(
+            query_response={
+                "Items": [
+                    {
+                        "type": "goal.submitted",
+                        "payload": {"goalId": "goal-1", "description": "help"},
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ]
+            }
+        ),
+    )
+    event = _event("GET", "/gardens/{gardenId}/activity", path_params={"gardenId": "g1"})
+    resp = handler.list_activity(event)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schema = {"type": "array", "items": spec["components"]["schemas"]["ActivityEvent"]}
     validate(instance=body, schema=schema)
 
 
