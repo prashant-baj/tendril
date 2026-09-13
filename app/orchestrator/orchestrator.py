@@ -206,11 +206,22 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
 
     try:
         result = agent(message)
+        result_text = str(result)
+        # Explicit, not just Strands' streaming callback print: that relies on stdout being
+        # flushed before Lambda freezes the execution environment, which isn't guaranteed and
+        # has been observed to drop the final response from CloudWatch even on a successful run.
+        logger.info(
+            "orchestration_result garden_id=%s goal_id=%s chars=%d: %s",
+            garden_id,
+            goal_id,
+            len(result_text),
+            result_text,
+        )
         _update_goal(
             garden_id,
             goal_id,
             status="PlanProposed",
-            orchestrator_result=str(result),
+            orchestrator_result=result_text,
             updated_at=datetime.now(UTC).isoformat(),
         )
     except Exception as e:
