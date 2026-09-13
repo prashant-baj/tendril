@@ -1,0 +1,68 @@
+openapi: 3.0.1
+info:
+  title: Tendril Weather Tool
+  version: "1.0.0"
+  description: >
+    AF-03's reference Tool API. Documents the contract this Lambda implements; not a CDK deploy
+    artifact (deployed as a Lambda Function URL with IAM auth, not API Gateway — see handler.py's
+    module docstring for why).
+paths:
+  /weather:
+    get:
+      operationId: getWeather
+      summary: Current weather forecast for a location
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -90
+            maximum: 90
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -180
+            maximum: 180
+      responses:
+        "200":
+          description: Current forecast
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  latitude:
+                    type: number
+                  longitude:
+                    type: number
+                  temperatureC:
+                    type: number
+                    nullable: true
+                  precipitationMm:
+                    type: number
+                    nullable: true
+                  weatherCode:
+                    type: integer
+                    nullable: true
+                required: [latitude, longitude]
+        "400":
+          description: Invalid or missing lat/lon
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "502":
+          description: Upstream weather service unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string

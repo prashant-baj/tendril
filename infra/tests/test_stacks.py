@@ -23,14 +23,15 @@ IMAGE = "123456789012.dkr.ecr.ap-south-1.amazonaws.com/tendril:latest"
 
 
 def _app() -> App:
-    # agent_image_uri / garden_handler_image_repo / orchestrator_image_repo avoid a Docker
-    # build during synth (ADR-0005, ADR-0014).
+    # agent_image_uri / garden_handler_image_repo / orchestrator_image_repo / *_tool_image_repo
+    # avoid a Docker build during synth (ADR-0005, ADR-0014).
     return App(
         context={
             "agent_image_uri": IMAGE,
             "model_id": "global.amazon.nova-2-lite-v1:0",
             "garden_handler_image_repo": "tendril-dev-garden-handler",
             "orchestrator_image_repo": "tendril-dev-orchestrator",
+            "weather_tool_image_repo": "tendril-dev-tool-weather",
         }
     )
 
@@ -178,6 +179,86 @@ def test_one_runtime_provisioned_per_registry_file():
         app2 = _app()
         tpl2 = Template.from_stack(AgentCoreStack(app2, "ac3", env_name="dev", env=ENV))
         tpl2.resource_count_is("AWS::BedrockAgentCore::Runtime", expected_count + 1)
+    finally:
+        fixture.unlink()
+
+
+# --- Tool APIs: one Lambda + Function URL per app/tools/*/ folder (AF-03) ----
+
+
+def test_tool_lambda_and_function_url_provisioned():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac6", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like({"FunctionName": "tendril-dev-tool-weather", "PackageType": "Image"}),
+    )
+    # AWS_IAM (not NONE): only specialists granted lambda:InvokeFunctionUrl can call it.
+    tpl.has_resource_properties("AWS::Lambda::Url", Match.object_like({"AuthType": "AWS_IAM"}))
+
+
+def test_specialist_receives_tools_env_vars_for_its_own_declared_tools():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac7", env_name="dev", env=ENV))
+
+    # vision.json declares tools: ["weather"] — its runtime gets both env vars.
+    tpl.has_resource_properties(
+        "AWS::BedrockAgentCore::Runtime",
+        Match.object_like(
+            {
+                "EnvironmentVariables": Match.object_like(
+                    {
+                        "TOOLS": Match.string_like_regexp(r"weather"),
+                        "TOOL_ENDPOINTS": Match.any_value(),
+                    }
+                )
+            }
+        ),
+    )
+
+
+def test_tool_iam_scoped_to_the_specialist_that_declares_it():
+    import json
+    from pathlib import Path
+
+    # A fixture specialist that does NOT declare "weather" — proves the grant is scoped per
+    # specialist, not handed to every runtime via a shared/wildcard policy (AF-01's deferred AC).
+    registry_dir = Path(__file__).resolve().parents[2] / "agents" / "registry"
+    fixture = registry_dir / "_test_fixture_no_tools_agent.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "name": "fixturenotools",
+                "template": "hello_agent",
+                "model_id": "",
+                "prompt_name": "vision-system",
+                "guardrail_name": "vision-guardrail",
+                "description": "test fixture declaring no tools",
+                "tools": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        app = _app()
+        tpl = Template.from_stack(AgentCoreStack(app, "ac8", env_name="dev", env=ENV))
+
+        granted_on = []
+        for logical_id, res in tpl.find_resources("AWS::IAM::Policy").items():
+            for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+                act = stmt["Action"]
+                actions = act if isinstance(act, list) else [act]
+                if "lambda:InvokeFunctionUrl" in actions:
+                    assert stmt["Resource"] != "*"
+                    granted_on.append(logical_id)
+
+        assert any("Vision" in lid for lid in granted_on), (
+            "vision (declares weather) should have lambda:InvokeFunctionUrl"
+        )
+        assert not any("Fixturenotools" in lid for lid in granted_on), (
+            "a specialist that doesn't declare the tool must not get the grant"
+        )
     finally:
         fixture.unlink()
 

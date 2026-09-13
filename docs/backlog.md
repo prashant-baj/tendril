@@ -4,18 +4,29 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-12 (OB-01/OB-02/WS-01..05 all done and smoke-tested end-to-end in dev —
+**Last updated:** 2026-09-13 (OB-01/OB-02/WS-01..05 all done and smoke-tested end-to-end in dev —
 the full photo/issue → orchestrator → specialist pipe is proven live, including finding
 and fixing a real IAM gap along the way (WS-04); added OB-03, a deprioritized follow-up story to
 show real plant photos instead of a generic icon; fixed a real CI gap —
 `pytest -q || echo "no tests yet"` had been silently masking every test suite failing to even
 collect, since `boto3`/`strands-agents`/etc. were never installed in the `quality` job; built a
-real second specialist — **vision**, a plant-photo-identification agent on
-`google.gemma-3-27b-it` — substantially completing AF-01's registry/prompts/guardrails
-generalization ahead of schedule, using a real need instead of the originally-planned Agronomy;
-decommissioned `hello` as a live registry entry now that `vision` is real — `agents/hello_agent/`
-remains only as the shared template code every specialist's `template` field points at, no
-longer separately deployed or callable by the orchestrator)
+real second specialist — **vision**, a plant-photo-identification agent, later switched from
+`google.gemma-3-27b-it` to `qwen.qwen3-vl-235b-a22b` for answer quality — substantially completing
+AF-01's registry/prompts/guardrails generalization ahead of schedule, using a real need instead
+of the originally-planned Agronomy; decommissioned `hello` as a live registry entry now that
+`vision` is real — `agents/hello_agent/` remains only as the shared template code every
+specialist's `template` field points at, no longer separately deployed or callable by the
+orchestrator; found + fixed two real production guardrail false-positives on `vision`'s output
+and input (Bedrock's `NonGardeningAdvice` topic misclassifying legitimate plant diagnoses —
+disabled for `vision` pending a real retune later); fixed a real Bedrock request-size limit crash
+(a 2.79MB photo 400'd the model) by lowering the image cap to 5MB (doesn't fully close the gap —
+the real limit is somewhere below that); **skipped AF-02** (pure rename, no new capability) and
+built **AF-03** (Tool APIs) directly on AF-01: `app/tools/weather/` (Lambda + IAM-authenticated
+Function URL, real Open-Meteo forecast), a tool-agnostic HTTP-tool binding in the shared template
+(`agents/hello_agent/agent.py`'s `build_tools`/`make_tool`/`call_tool_endpoint`, SigV4-signed),
+and — closing AF-01's deferred AC — **per-specialist IAM execution roles** (was one shared role)
+so tool-invoke grants are scoped to only the tools each registry entry declares; `vision.json` now
+declares `tools: ["weather"]` as the proof)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`)
@@ -45,9 +56,9 @@ immediate next thing.
 | 5 | WS | WS-03 | Application: Client API Lambda handlers | ✅ | WS-01, WS-02 | `create_goal` in `garden_handler.py`: persists Goal (status Intake), publishes `goal.submitted`. Contract tests validate responses against `openapi.yaml`'s schemas directly (`jsonschema`). Known trade-off: DynamoDB write + EventBridge publish aren't atomic (documented, accepted for this epic). |
 | 6 | WS | WS-04 | Application: Orchestrator Lambda | ✅ | WS-02, WS-03 | `app/orchestrator/orchestrator.py`: Strands agent loop, agents-as-tools wrapping `InvokeAgentRuntime`, DynamoDB read/write-back, structured logging + `trace_attributes`. Smoke-tested end-to-end against dev: found + fixed a real IAM gap (AgentCore authorizes against the runtime-*endpoint* sub-resource, not the bare runtime ARN). |
 | 7 | WS | WS-05 | Frontend: real photo capture + goal submission | ✅ | WS-01, WS-03 | Reuses OB-02's `PhotoPickerComponent` (no separate `getUserMedia` build — same HTTP-only-deployment reasoning as OB-02). Wires the Capture screen to real `createGoal`/media-upload calls; deleted the scripted `CaptureService` timeline + fabricated findings UI it replaced (not repurposed). `docs/roadmap.md` Phase 4. |
-| 8 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ◐ | WS-02 | Done in substance: all three stacks loop over their data folders; a second real specialist (**vision**, `google.gemma-3-27b-it` — not the originally-planned Agronomy, see the story's 2026-09-12 note) deploys with zero stack-code changes. Verified via `cdk synth`: both runtimes share one built image (same asset hash). Only unchecked AC: per-specialist tool IAM scoping — nothing to scope until AF-03 exists. |
-| 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | ☐ | AF-01 | Generalizes `hello_agent`'s code into the shared template every registry entry uses; proves two agents, one codebase. |
-| 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ☐ | AF-02 | Weather as the reference Lambda+API tool; tool-agnostic binding mechanism in the template agent. |
+| 8 | AF | AF-01 | Infra: generalize Prompts/Guardrails/AgentCore to N specialists | ✅ | WS-02 | All three stacks loop over their data folders; second real specialist (**vision**) deploys with zero stack-code changes (same built image, verified via `cdk synth`). Per-specialist tool IAM scoping (the AC that was deferred) is now done — see AF-03. |
+| 9 | AF | AF-02 | Template agent: one config-driven codebase for every specialist | — | AF-01 | **Skipped (2026-09-13):** pure rename (`hello_agent/` → `template_agent/`), no new capability — the "one codebase, many specialists" proof already happened via `vision.json`. AF-03 built directly on AF-01 instead. |
+| 10 | AF | AF-03 | Tools: Lambda-backed Tool APIs + agent-side binding | ◐ | AF-01 | `app/tools/weather/` (Lambda + IAM Function URL, real Open-Meteo forecast) + tool-agnostic HTTP binding in `agents/hello_agent/agent.py` (SigV4-signed) + per-specialist IAM execution roles (`_make_agent_role`, replacing one shared role). `vision.json` declares `tools: ["weather"]`. Unit + CDK tests green; real `cdk synth` confirms scoped IAM. Only gap: manual dev smoke test not yet run (needs deploy). |
 | 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ☐ | AF-01 | Real agronomy-specific denied topics/PII policy, replacing AF-01's placeholder stub. `vision_guardrail.json` (rank 8) reuses `hello`'s topics verbatim — the domain-tuning + eval-scenario work this story calls for is still genuinely open. |
 | 12 | AF | AF-05 | Memory & Context: per-user/per-garden memory for every specialist | ☐ | AF-02 | Strands Memory (Bedrock KB) + context management, scoped per tenant, opt-in per agent — fulfills ADR-0001 action items 6 & 8. |
 | 13 | — | — | *(not yet storied)* Plan approval via UI (HITL) | ☐ | WS-04 | `docs/roadmap.md` Phase 5 — wires the existing "Review plan" button to `POST /plans/{id}/approve` + orchestrator interrupt/resume. Write the story once Phase 4 ships. |

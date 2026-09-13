@@ -6,6 +6,7 @@ cleanly if the agent's runtime deps aren't installed (e.g. a minimal CI lane).
 """
 
 import importlib
+import json
 
 import pytest
 
@@ -214,3 +215,79 @@ def test_invoke_returns_typed_result(monkeypatch):
     monkeypatch.setattr(agent, "Agent", FakeAgent)
     out = agent.invoke({"prompt": "hello there"})
     assert out == {"result": "echo: hello there"}
+
+
+# --- tool binding (AF-03) -----------------------------------------------------
+
+
+def test_build_tools_empty_when_none_declared(monkeypatch):
+    monkeypatch.delenv("TOOLS", raising=False)
+    monkeypatch.delenv("TOOL_ENDPOINTS", raising=False)
+    assert agent.build_tools() == []
+
+
+def test_build_tools_builds_one_per_declared_name_with_an_endpoint(monkeypatch):
+    monkeypatch.setenv("TOOLS", json.dumps(["weather"]))
+    monkeypatch.setenv("TOOL_ENDPOINTS", json.dumps({"weather": "https://example.com/weather"}))
+    assert len(agent.build_tools()) == 1
+
+
+def test_build_tools_skips_names_without_a_matching_endpoint(monkeypatch):
+    monkeypatch.setenv("TOOLS", json.dumps(["weather", "unknown"]))
+    monkeypatch.setenv("TOOL_ENDPOINTS", json.dumps({"weather": "https://example.com/weather"}))
+    assert len(agent.build_tools()) == 1
+
+
+def test_make_tool_delegates_to_call_tool_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_call(url, params):
+        captured["url"] = url
+        captured["params"] = params
+        return {"temperatureC": 21.5}
+
+    monkeypatch.setattr(agent, "call_tool_endpoint", fake_call)
+    tool_fn = agent.make_tool("weather", "https://example.com/weather")
+    result = tool_fn(params={"lat": 12.9, "lon": 77.6})
+
+    assert result == {"temperatureC": 21.5}
+    assert captured == {
+        "url": "https://example.com/weather",
+        "params": {"lat": 12.9, "lon": 77.6},
+    }
+
+
+def test_call_tool_endpoint_signs_request_and_parses_json_response(monkeypatch):
+    import botocore.credentials
+
+    class FakeSession:
+        def get_credentials(self):
+            return botocore.credentials.Credentials("AKIDFAKE", "SECRETFAKE")
+
+    monkeypatch.setattr(agent.boto3, "Session", FakeSession)
+    monkeypatch.setattr(agent, "AWS_REGION", "ap-south-1")
+
+    captured = {}
+
+    class FakeResponse:
+        def read(self):
+            return b'{"temperatureC": 21.5}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+        return FakeResponse()
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", fake_urlopen)
+
+    result = agent.call_tool_endpoint("https://example.com/weather", {"lat": 12.9, "lon": 77.6})
+
+    assert result == {"temperatureC": 21.5}
+    assert "lat=12.9" in captured["url"]
+    assert "authorization" in captured["headers"]

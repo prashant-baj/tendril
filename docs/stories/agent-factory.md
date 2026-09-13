@@ -57,15 +57,17 @@ specialist is only ever a data change (ADR-0001, ADR-0012).
   way; Agronomy is still exactly as easy to add now (one registry file + one prompt + one
   guardrail file) as this ADR/story always intended — it just isn't the one that happened to
   prove it.
-- [ ] Each specialist's execution IAM only grants the tools it actually declares in its own
-  registry entry — no specialist can invoke a tool it didn't ask for. **Not yet applicable:**
-  neither `hello` nor `vision` declares any `tools` yet (AF-03, Lambda-backed Tool APIs, isn't
-  built) — there's nothing to scope per-specialist until a specialist actually has a tool.
+- [x] Each specialist's execution IAM only grants the tools it actually declares in its own
+  registry entry — no specialist can invoke a tool it didn't ask for. **Closed by AF-03
+  (2026-09-13):** each specialist now gets its own execution role (`_make_agent_role`, replacing
+  the single shared `AgentExecRole` this AC originally described); `lambda:InvokeFunctionUrl` is
+  granted per-role, only for that specialist's own declared tools.
 - [x] `cdk synth` succeeds for `dev`, env-prefixed, no hardcoded account IDs (verified with a
   real Docker build). `cdk deploy` not yet re-run after this change.
 - [x] CDK assertion tests: registry/prompt/guardrail file count → provisioned resource count
   (`test_one_runtime_provisioned_per_registry_file` adds a fixture file and re-asserts the
-  count, proving the loop); per-agent tool IAM scoping is deferred with AF-03 above.
+  count, proving the loop); per-agent tool IAM scoping is now covered by AF-03's
+  `test_tool_iam_scoped_to_the_specialist_that_declares_it`.
 
 **Tasks**
 - [x] Refactor `PromptsStack`/`GuardrailsStack` to loop over their data folders.
@@ -74,7 +76,7 @@ specialist is only ever a data change (ADR-0001, ADR-0012).
 - [x] Author `agents/registry/vision.json` + real `prompts/vision-system.md` +
   `guardrails/vision_guardrail.json` (not placeholders — AF-04's "author the second
   specialist's real guardrail policy" task is done here too, for `vision` instead of Agronomy).
-- [ ] Add/extend CDK assertion tests for the N-item loops and per-agent tool IAM scoping.
+- [x] Add/extend CDK assertion tests for the N-item loops and per-agent tool IAM scoping (AF-03).
 
 **2026-09-12 update:** `hello` — the stand-in specialist used above to prove the N-item loop —
 has since been decommissioned as a live registry entry. `agents/registry/hello.json`,
@@ -86,8 +88,8 @@ code only." CDK assertion tests were updated accordingly (guardrail/prompt resou
 now 1, not 2).
 
 **Dependencies:** WS-02 (registry-loop foundation), ADR-0006, ADR-0008, ADR-0012.
-**Status:** ◐ done in substance (proven with `vision`, not the originally-planned Agronomy) —
-per-agent tool IAM scoping (the one unchecked AC) has nothing to scope until AF-03 exists.
+**Status:** ✅ done (proven with `vision`, not the originally-planned Agronomy) — the one AC that
+was deferred (per-agent tool IAM scoping) closed when AF-03 gave it a real tool to scope against.
 
 ---
 
@@ -133,31 +135,51 @@ callable Strands tool, **so that** tool capabilities are genuinely swappable, in
 deployable APIs — never code baked into one agent (architecture.md §4.2, "tools are APIs").
 
 **Acceptance Criteria**
-- [ ] A uniform **Tool API** convention: each tool is a Lambda + API Gateway (or Function URL)
-  endpoint, defined contract-first (same OpenAPI approach as ADR-0011, scaled down to one
-  operation per tool).
-- [ ] **Weather** is the reference implementation: one Lambda, one operation
-  (`GET /tools/weather?lat=&lon=`), returning a small typed forecast payload.
-- [ ] The template agent (AF-02) turns `tools: ["weather"]` into a bound Strands tool that calls
-  the Weather API over HTTP — the binding mechanism itself is **tool-agnostic** (a second tool
-  needs a new Lambda+API, not new binding code).
-- [ ] Each specialist's execution role grants invoke access **only** to the tools it declares
-  (verified in AF-01's IAM tests).
-- [ ] Unit tests: the Weather Lambda handler (valid/invalid coordinates) and the template's
-  tool-binding logic with a **mocked** HTTP call (no live network access in CI).
+- [x] A uniform **Tool API** convention: each tool is a Lambda + **Function URL** endpoint
+  (`AuthType: AWS_IAM`), defined contract-first (`app/tools/<name>/openapi.yaml`, same shape as
+  ADR-0011 scaled to one operation). **Deviation from the AC's literal wording:** Function URL,
+  not API Gateway — this tool is internal/server-to-server only (no public frontend caller), so a
+  full `SpecRestApi` + OpenAPI-import stack is unwarranted machinery for one operation; the
+  OpenAPI file is still the contract, just not a CDK deploy artifact. `infra/stacks/agentcore_stack.py`
+  provisions one Lambda+URL per `app/tools/<name>/` folder found on disk — directory-driven like
+  the registry/prompts/guardrails, not a stack-code change per tool.
+- [x] **Weather** is the reference implementation: one Lambda, one operation
+  (`GET ?lat=&lon=`), returning a small typed forecast from Open-Meteo (real, not a stub).
+- [x] The template agent (`agents/hello_agent/agent.py`) turns `TOOLS`/`TOOL_ENDPOINTS` (env vars
+  injected per-registry-entry) into bound Strands tools — `build_tools()`/`make_tool()`/
+  `call_tool_endpoint()` are 100% tool-agnostic; a second tool needs a new `app/tools/<name>/`
+  folder + a registry `tools` entry, never new binding code. Calls are SigV4-signed with the
+  runtime's own execution-role credentials (service=`lambda`) since every tool requires
+  `AuthType: AWS_IAM`.
+- [x] Each specialist's execution role grants invoke access **only** to the tools it declares —
+  **this AC also closes AF-01's deferred one**: every specialist now gets its *own* execution
+  role (`_make_agent_role`, replacing the single shared `AgentExecRole`), so
+  `lambda:InvokeFunctionUrl` is granted per-specialist, not repo-wide. Verified in
+  `infra/tests/test_stacks.py::test_tool_iam_scoped_to_the_specialist_that_declares_it` (a
+  fixture specialist with `tools: []` does **not** get the grant) and directly in a real
+  `cdk synth`: the statement's `Resource` is `WeatherTool`'s own ARN via `Fn::GetAtt`, attached
+  only to `VisionExecRoleDefaultPolicy`.
+- [x] Unit tests: `app/tools/weather/tests/test_handler.py` (valid/invalid/missing/out-of-range
+  coordinates, upstream failure) and `agents/hello_agent/tests/test_agent.py`'s tool-binding
+  tests (`build_tools`/`make_tool`/`call_tool_endpoint`, HTTP + SigV4 mocked, no live network).
 - [ ] One manual smoke test recorded: an agent with `tools: ["weather"]` in `dev` calls Weather
-  and gets a real forecast back.
+  and gets a real forecast back. **Not yet run** — needs a `cdk deploy` first; `vision.json` now
+  declares `tools: ["weather"]` and `vision-system.md` was updated so the model knows when to use
+  it (only when a location is already known — it's told not to guess/ask for coordinates).
 
 **Tasks**
-- [ ] Author the Tool API OpenAPI contract + the Weather Lambda + its API Gateway/Function URL
-  infra.
-- [ ] Implement the template agent's generic HTTP-tool binding (registry tool name → endpoint +
-  auth → Strands tool).
-- [ ] Unit tests for the Weather handler and the binding mechanism (mocked HTTP).
-- [ ] Document the pattern so a second tool is "copy this," not "invent a new mechanism."
+- [x] Author the Tool API OpenAPI contract + the Weather Lambda + its Function URL infra.
+- [x] Implement the template agent's generic HTTP-tool binding (registry tool name → endpoint +
+  SigV4 auth → Strands tool).
+- [x] Unit tests for the Weather handler and the binding mechanism (mocked HTTP).
+- [x] Document the pattern (`app/tools/weather/README.md`) so a second tool is "copy this," not
+  "invent a new mechanism."
 
-**Dependencies:** AF-02, ADR-0011 (contract-first pattern reused at tool scale).
-**Status:** ☐ to do.
+**Dependencies:** AF-02, ADR-0011 (contract-first pattern reused at tool scale). **Note:** built
+directly on AF-01 without AF-02's formal rename (`hello_agent/` → `template_agent/`) — that
+rename was explicitly skipped (2026-09-13) since it adds no capability; the tool-binding code
+lives in `agents/hello_agent/agent.py` today, same file AF-02 would still relocate.
+**Status:** ◐ done in substance — only the manual dev smoke test remains, pending deploy.
 
 ---
 

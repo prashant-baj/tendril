@@ -21,6 +21,13 @@ resolved cross-stack the "stable name" way ADR-0008 established for prompts/guar
 Keeping the orchestrator here lets its environment reference `runtime.agent_runtime_arn`
 directly as an in-memory CDK token — never crossing a stack boundary, so there's no need for a
 CFN cross-stack export/import (exactly the "exported-value-in-use" trap ADR-0008 rejected).
+
+Per AF-03, Tool APIs are likewise directory-driven: one Lambda + Function URL (IAM-authenticated)
+per `app/tools/<name>/` folder, built the same way for the same reason Function URLs aren't
+cross-stack-name-predictable either. Each specialist gets **its own** execution role (not one
+role shared by every runtime) so `lambda:InvokeFunctionUrl` can be granted only for the tools its
+own registry entry declares — the per-specialist IAM scoping AF-01 deferred until a real tool
+existed to scope against.
 """
 
 import json
@@ -45,6 +52,7 @@ from constructs import Construct
 AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
 REGISTRY_DIR = AGENTS_DIR / "registry"
 ORCHESTRATOR_DIR = Path(__file__).resolve().parents[2] / "app" / "orchestrator"
+TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
 
 # The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
 # source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
@@ -56,65 +64,41 @@ class AgentCoreStack(Stack):
     def __init__(self, scope: Construct, cid: str, *, env_name: str, **kwargs) -> None:
         super().__init__(scope, cid, **kwargs)
         prefix = f"tendril-{env_name}"
+        self._prefix = prefix
 
-        # --- Execution role assumed by AgentCore runtimes ---
-        self.exec_role = iam.Role(
-            self,
-            "AgentExecRole",
-            role_name=f"{prefix}-agent-exec",
-            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
-            description="Execution role for Tendril AgentCore runtimes",
-        )
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                ],
-                resources=["*"],
-            )
-        )
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "logs:CreateLogGroup",
-                    "logs:CreateLogStream",
-                    "logs:PutLogEvents",
-                    "logs:DescribeLogStreams",
-                    "xray:PutTraceSegments",
-                    "xray:PutTelemetryRecords",
-                ],
-                resources=["*"],
-            )
-        )
-        # Resolve + read externalized prompts by name (ADR-0006). ListPrompts has no
-        # resource; GetPrompt is scoped to this account/region's prompts.
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:ListPrompts"],
-                resources=["*"],
-            )
-        )
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:GetPrompt"],
-                resources=[f"arn:aws:bedrock:{self.region}:{self.account}:prompt/*"],
-            )
-        )
-        # Resolve + apply the externalized guardrail by name (ADR-0008). ListGuardrails has
-        # no resource; GetGuardrail/ApplyGuardrail are scoped to this account/region's guardrails.
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:ListGuardrails"],
-                resources=["*"],
-            )
-        )
-        self.exec_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:GetGuardrail", "bedrock:ApplyGuardrail"],
-                resources=[f"arn:aws:bedrock:{self.region}:{self.account}:guardrail/*"],
-            )
-        )
+        # --- Tool Lambdas: one per app/tools/<name>/ folder (AF-03) ---
+        # Directory-driven the same way agents/registry, prompts/*.md, and guardrails/*.json
+        # are — adding a tool is adding a folder, never a stack-code change.
+        self.tools: dict[str, dict] = {}
+        if TOOLS_DIR.is_dir():
+            for tool_dir in sorted(p for p in TOOLS_DIR.iterdir() if p.is_dir()):
+                name = tool_dir.name
+                tool_cid = name.capitalize()
+                image_repo = self.node.try_get_context(f"{name}_tool_image_repo")
+                if image_repo:
+                    repo = ecr.Repository.from_repository_name(
+                        self, f"{tool_cid}ToolRepo", image_repo
+                    )
+                    image_tag = self.node.try_get_context(f"{name}_tool_image_tag") or "latest"
+                    code = lambda_.DockerImageCode.from_ecr(repo, tag=image_tag)
+                else:
+                    code = lambda_.DockerImageCode.from_image_asset(
+                        str(tool_dir), platform=ecr_assets.Platform.LINUX_ARM64
+                    )
+                fn = lambda_.DockerImageFunction(
+                    self,
+                    f"{tool_cid}Tool",
+                    function_name=f"{prefix}-tool-{name}",
+                    code=code,
+                    architecture=lambda_.Architecture.ARM_64,
+                    timeout=Duration.seconds(10),
+                )
+                # AWS_IAM (not NONE): a tool is invoked only by specialists whose registry entry
+                # declares it — enforced below via a per-specialist grant, not left open to
+                # anyone who obtains the URL.
+                url = fn.add_function_url(auth_type=lambda_.FunctionUrlAuthType.AWS_IAM)
+                self.tools[name] = {"function": fn, "url": url.url}
+                CfnOutput(self, f"{tool_cid}ToolUrl", value=url.url)
 
         # --- AgentCore runtimes: one per agents/registry/*.json entry (ADR-0012) ---
         context_model_id = self.node.try_get_context("model_id") or ""
@@ -141,9 +125,9 @@ class AgentCoreStack(Stack):
                 image_uri=image_uri,
                 prompt_name=f"{prefix}-{entry['prompt_name']}",  # stable name; owned by PromptsStack
                 guardrail_name=f"{prefix}-{entry['guardrail_name']}",  # owned by GuardrailsStack
+                tool_names=entry.get("tools") or [],
             )
 
-        CfnOutput(self, "AgentExecRoleArn", value=self.exec_role.role_arn)
         for name, runtime in self.runtimes.items():
             CfnOutput(self, f"{name.capitalize()}RuntimeArn", value=runtime.agent_runtime_arn)
 
@@ -236,6 +220,61 @@ class AgentCoreStack(Stack):
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 
+    def _make_agent_role(self, name: str, tool_names: list[str]) -> iam.Role:
+        """One execution role per specialist (not one shared by every runtime) so
+        `lambda:InvokeFunctionUrl` can be granted only for the tools *this* specialist's
+        registry entry declares (AF-03) — a specialist can't invoke a tool it didn't ask for."""
+        role = iam.Role(
+            self,
+            f"{name.capitalize()}ExecRole",
+            role_name=f"{self._prefix}-{name}-exec",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            description=f"Execution role for the '{name}' AgentCore runtime",
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogStreams",
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                ],
+                resources=["*"],
+            )
+        )
+        # Resolve + read externalized prompts by name (ADR-0006). ListPrompts has no
+        # resource; GetPrompt is scoped to this account/region's prompts.
+        role.add_to_policy(iam.PolicyStatement(actions=["bedrock:ListPrompts"], resources=["*"]))
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:GetPrompt"],
+                resources=[f"arn:aws:bedrock:{self.region}:{self.account}:prompt/*"],
+            )
+        )
+        # Resolve + apply the externalized guardrail by name (ADR-0008). ListGuardrails has
+        # no resource; GetGuardrail/ApplyGuardrail are scoped to this account/region's guardrails.
+        role.add_to_policy(iam.PolicyStatement(actions=["bedrock:ListGuardrails"], resources=["*"]))
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:GetGuardrail", "bedrock:ApplyGuardrail"],
+                resources=[f"arn:aws:bedrock:{self.region}:{self.account}:guardrail/*"],
+            )
+        )
+        # AF-03: grant invoke only for the tools this specialist's own registry entry declares.
+        for tool_name in tool_names:
+            tool = self.tools.get(tool_name)
+            if tool:
+                tool["function"].grant_invoke_url(role)
+        return role
+
     def _agent_runtime(
         self,
         *,
@@ -246,6 +285,7 @@ class AgentCoreStack(Stack):
         image_uri: str | None,
         prompt_name: str,
         guardrail_name: str,
+        tool_names: list[str],
     ) -> agentcore.Runtime:
         if image_uri:
             artifact = agentcore.AgentRuntimeArtifact.from_image_uri(image_uri)
@@ -255,17 +295,27 @@ class AgentCoreStack(Stack):
                 file="Dockerfile",
                 platform=ecr_assets.Platform.LINUX_ARM64,
             )
+        role = self._make_agent_role(name, tool_names)
+        # Only the endpoints for tools THIS specialist declares — matches the IAM grant above,
+        # so the template agent never even sees a URL it has no permission to call.
+        tool_endpoints = {
+            tool_name: self.tools[tool_name]["url"]
+            for tool_name in tool_names
+            if tool_name in self.tools
+        }
         return agentcore.Runtime(
             self,
             f"{name.capitalize()}Runtime",
             runtime_name=f"tendril_{env_name}_{name}",  # [a-zA-Z0-9_] only
             agent_runtime_artifact=artifact,
-            execution_role=self.exec_role,
+            execution_role=role,
             environment_variables={
                 "MODEL_ID": model_id,
                 "LOG_LEVEL": "INFO",
                 "PROMPT_NAME": prompt_name,
                 "GUARDRAIL_NAME": guardrail_name,
+                "TOOLS": self.to_json_string(tool_names),
+                "TOOL_ENDPOINTS": self.to_json_string(tool_endpoints),
             },
             network_configuration=agentcore.RuntimeNetworkConfiguration.using_public_network(),
             # Managed trace delivery requires the account's X-Ray trace segment

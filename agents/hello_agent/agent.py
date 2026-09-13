@@ -17,15 +17,28 @@ the agent resolves its id at runtime and attaches it to the model so input/outpu
 filtered on every Converse call. Resolution is fail-open for the MVP (the agent still
 runs if the guardrail can't be resolved) — production should fail-closed; the
 deterministic layers beneath (IAM, hardcoded checks, HITL) do not depend on this.
+
+Tool APIs (AF-03, architecture.md §4.2 "tools are APIs"): `TOOLS` (a JSON list of names) and
+`TOOL_ENDPOINTS` (a JSON {name: url} map) are injected per-registry-entry by `AgentCoreStack` —
+only for the tools *this* specialist's own `agents/registry/*.json` entry declares (its
+execution role is likewise scoped to only those). Every Tool API is a Lambda Function URL with
+`AuthType: AWS_IAM`, so `build_tools()` SigV4-signs each call with this runtime's own execution
+role credentials, the same posture as calling any other AWS API — never a shared secret/API key.
+The binding is tool-agnostic: adding a second tool is a new `app/tools/<name>/` Lambda + registry
+declaration, never new code here.
 """
 
+import json
 import logging
 import os
+import urllib.parse
 import urllib.request
 
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
-from strands import Agent
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+from strands import Agent, tool
 from strands.models import BedrockModel
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -200,10 +213,58 @@ def resolve_content(payload: dict) -> str | list[dict]:
     ]
 
 
+# Per-tool guidance for the model (AF-03: Weather is the only reference tool so far). A tool
+# without an entry here still works — it just gets a generic description — so a new tool never
+# needs a code change here, only a registry declaration.
+TOOL_DESCRIPTIONS = {
+    "weather": (
+        "Look up the current weather forecast for a location. "
+        "Params: lat (number, -90 to 90), lon (number, -180 to 180)."
+    ),
+}
+DEFAULT_TOOL_DESCRIPTION = "Call this tool's API with the given parameters."
+TOOL_REQUEST_TIMEOUT_SECONDS = 8
+
+
+def call_tool_endpoint(url: str, params: dict) -> dict:
+    """SigV4-signs a GET request with this runtime's own execution-role credentials — every
+    Tool API is a Lambda Function URL with AuthType=AWS_IAM (AF-03), never public."""
+    query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    full_url = f"{url}?{query}" if query else url
+    request = AWSRequest(method="GET", url=full_url)
+    SigV4Auth(boto3.Session().get_credentials(), "lambda", AWS_REGION).add_auth(request)
+    req = urllib.request.Request(full_url, headers=dict(request.headers))
+    with urllib.request.urlopen(req, timeout=TOOL_REQUEST_TIMEOUT_SECONDS) as resp:  # noqa: S310
+        return json.loads(resp.read())
+
+
+def make_tool(name: str, url: str):
+    """Wraps one registry-declared tool as a Strands tool calling its Function URL (AF-03)."""
+    description = TOOL_DESCRIPTIONS.get(name, DEFAULT_TOOL_DESCRIPTION)
+
+    @tool(name=name, description=description)
+    def call_tool(params: dict) -> dict:
+        try:
+            return call_tool_endpoint(url, params)
+        except Exception:
+            logger.exception("tool_call_failed name=%s", name)
+            raise
+
+    return call_tool
+
+
+def build_tools() -> list:
+    """Turns this runtime's `TOOLS`/`TOOL_ENDPOINTS` env vars (injected by `AgentCoreStack` from
+    this specialist's own registry entry) into real, callable Strands tools."""
+    tool_names = json.loads(os.getenv("TOOLS", "[]"))
+    endpoints = json.loads(os.getenv("TOOL_ENDPOINTS", "{}"))
+    return [make_tool(name, endpoints[name]) for name in tool_names if name in endpoints]
+
+
 @app.entrypoint
 def invoke(payload: dict) -> dict:
     content = resolve_content(payload)
-    agent = Agent(model=_get_model(), system_prompt=_get_system_prompt())
+    agent = Agent(model=_get_model(), system_prompt=_get_system_prompt(), tools=build_tools())
     result = agent(content)
     text = str(result)
     logger.info("invoke returning %d chars: %s", len(text), text[:500])

@@ -26,6 +26,7 @@ jobs:
           -r agents/hello_agent/requirements.txt
           -r app/api/requirements.txt
           -r app/orchestrator/requirements.txt
+          -r app/tools/weather/requirements.txt
       - name: Lint
         run: ruff check .
       - name: Format check
