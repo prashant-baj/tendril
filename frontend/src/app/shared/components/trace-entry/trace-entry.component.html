@@ -1,0 +1,15 @@
+<div class="entry">
+  <div class="rail">
+    <span class="node" [class.orchestrator]="entry.isOrchestrator">
+      <td-icon [name]="icon" size="15px" />
+    </span>
+    <span class="line" [class.hidden]="last"></span>
+  </div>
+  <div class="body">
+    <div class="head">
+      <span class="agent">{{ label }}</span>
+      <span class="duration">{{ durationLabel }}</span>
+    </div>
+    <div class="says">{{ entry.says }}</div>
+  </div>
+</div>

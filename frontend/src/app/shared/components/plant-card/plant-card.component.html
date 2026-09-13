@@ -1,6 +1,10 @@
 <button type="button" class="card" (click)="activate.emit()">
   <span class="thumb">
-    <td-icon [name]="plant.icon" size="30px" />
+    @if (plant.photoUrl && !photoFailed()) {
+      <img class="photo" [src]="plant.photoUrl" alt="" (error)="onPhotoError()" />
+    } @else {
+      <td-icon [name]="plant.icon" size="30px" />
+    }
   </span>
   <span class="name">{{ plant.name }}</span>
   <span class="state">

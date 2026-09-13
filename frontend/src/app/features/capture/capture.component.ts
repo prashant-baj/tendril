@@ -1,10 +1,11 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, OnInit, signal } from '@angular/core';
 import { Observable, of } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { PhotoPickerComponent } from '../../shared/components/photo-picker/photo-picker.component';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 import { GardenApi } from '../../core/services/garden.service';
+import { Plant } from '../../core/models/plant.model';
 
 type CapturePhase = 'idle' | 'submitting' | 'submitted' | 'error';
 
@@ -24,7 +25,7 @@ type CapturePhase = 'idle' | 'submitting' | 'submitted' | 'error';
   templateUrl: './capture.component.html',
   styleUrl: './capture.component.scss',
 })
-export class CaptureComponent {
+export class CaptureComponent implements OnInit {
   private readonly gardenApi = inject(GardenApi);
   private readonly currentGarden = inject(CurrentGardenService);
 
@@ -32,6 +33,14 @@ export class CaptureComponent {
   readonly errorMessage = signal<string | null>(null);
   readonly description = signal('');
   readonly selectedFile = signal<File | null>(null);
+  readonly plants = signal<Plant[]>([]);
+  /** Empty string means "whole garden / not sure" — no plantId sent. */
+  readonly selectedPlantId = signal<string>('');
+
+  ngOnInit(): void {
+    const gardenId = this.currentGarden.gardenId();
+    this.gardenApi.getPlants(gardenId).subscribe((plants) => this.plants.set(plants));
+  }
 
   onFileSelected(file: File | null): void {
     this.selectedFile.set(file);
@@ -39,6 +48,10 @@ export class CaptureComponent {
 
   onDescriptionInput(value: string): void {
     this.description.set(value);
+  }
+
+  onPlantSelected(plantId: string): void {
+    this.selectedPlantId.set(plantId);
   }
 
   submit(): void {
@@ -68,9 +81,13 @@ export class CaptureComponent {
           )
       : of(undefined);
 
+    const plantId = this.selectedPlantId() || undefined;
+
     mediaIds$
       .pipe(
-        switchMap((mediaIds) => this.gardenApi.createGoal(gardenId, { description, mediaIds })),
+        switchMap((mediaIds) =>
+          this.gardenApi.createGoal(gardenId, { description, mediaIds, plantId }),
+        ),
       )
       .subscribe({
         next: () => this.phase.set('submitted'),
@@ -88,5 +105,6 @@ export class CaptureComponent {
     this.errorMessage.set(null);
     this.description.set('');
     this.selectedFile.set(null);
+    this.selectedPlantId.set('');
   }
 }

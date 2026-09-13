@@ -139,6 +139,18 @@ describe('HttpGardenApi', () => {
     expect(result).toEqual({ plantId: 'p-1' });
   });
 
+  it('createPlant() surfaces photoUrl (OB-03) when the backend returns one', () => {
+    let result: { plantId: string; photoUrl?: string } | undefined;
+    api.createPlant('g-1', { species: 'Tomato', mediaId: 'media-1' }).subscribe((r) => {
+      result = r;
+    });
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    req.flush({ plantId: 'p-1', photoUrl: 'https://example.test/p-1.jpg' });
+
+    expect(result).toEqual({ plantId: 'p-1', photoUrl: 'https://example.test/p-1.jpg' });
+  });
+
   it('getPlants(gardenId) GETs /gardens/{id}/plants and maps each Plant DTO', () => {
     let result: unknown;
     api.getPlants('g-1').subscribe((plants) => (result = plants));
@@ -156,6 +168,23 @@ describe('HttpGardenApi', () => {
         stage: 'fruiting',
       }),
     ]);
+  });
+
+  it('getPlants(gardenId) maps a DTO photoUrl through onto the Plant', () => {
+    let result: unknown;
+    api.getPlants('g-1').subscribe((plants) => (result = plants));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    req.flush([
+      {
+        plantId: 'p-1',
+        species: 'Tomato',
+        stage: 'fruiting',
+        photoUrl: 'https://example.test/p-1.jpg',
+      },
+    ]);
+
+    expect((result as { photoUrl?: string }[])[0].photoUrl).toBe('https://example.test/p-1.jpg');
   });
 
   it('getPlants(null) falls back to the mock fixture (no garden created yet)', (done) => {

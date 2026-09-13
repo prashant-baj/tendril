@@ -48,7 +48,8 @@ td-photo-picker {
   color: var(--td-color-ink-secondary);
 }
 
-textarea {
+textarea,
+select {
   font-family: var(--td-font-sans);
   font-size: 15px;
   color: var(--td-color-ink);
@@ -62,6 +63,10 @@ textarea {
     outline: none;
     border-color: var(--td-color-primary);
   }
+}
+
+select {
+  height: 44px;
 }
 
 .form-error {

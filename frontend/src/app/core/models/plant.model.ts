@@ -11,6 +11,8 @@ export interface Plant {
   healthState: PlantHealthState;
   /** Short summary line shown on the garden screen, e.g. "Pusa Ruby · 64 days · 12 L pot". */
   meta: string;
+  /** Freshly-generated presigned GET url (OB-03), present only if the plant has a linked photo. */
+  photoUrl?: string;
 }
 
 /** Client API request body for `POST /gardens/{gardenId}/plants` (OB-02, app/api/openapi.yaml). */

@@ -20,6 +20,30 @@
       </section>
     }
 
+    @if (d.plan?.trace?.length) {
+      <section class="card">
+        <button type="button" class="trace-toggle" (click)="toggleTrace()" [attr.aria-expanded]="traceOpen()">
+          <td-icon name="graph_3" size="20px" class="trace-icon" />
+          <span class="trace-toggle-body">
+            <span class="trace-toggle-title">How this was decided</span>
+            <span class="trace-toggle-sub">{{ traceSpecialistCount }} specialists · {{ traceTotalSeconds }}s · resolved at runtime</span>
+          </span>
+          <td-icon name="expand_more" size="22px" class="chevron" [class.open]="traceOpen()" />
+        </button>
+        @if (traceOpen()) {
+          <div class="trace-body">
+            @for (entry of d.plan!.trace; track $index; let last = $last) {
+              <td-trace-entry [entry]="entry" [last]="last" />
+            }
+            <div class="trace-note">
+              <td-icon name="info" size="17px" />
+              <span>No fixed sequence — the orchestrator picked these specialists from your garden's context and what the photo showed.</span>
+            </div>
+          </div>
+        }
+      </section>
+    }
+
     @if (d.plan) {
       <section>
         <div class="section-head">
@@ -32,7 +56,11 @@
         </div>
         <div class="plan-list">
           @for (task of d.tasks; track task.taskId) {
-            <td-plan-task-card [task]="task" />
+            <td-plan-task-card
+              [task]="task"
+              [awaitingFeedback]="awaitingFeedbackForTaskId() === task.taskId"
+              (checkin)="onTaskCheckin(task.taskId, $event)"
+            />
           }
         </div>
       </section>

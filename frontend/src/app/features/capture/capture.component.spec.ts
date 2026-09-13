@@ -14,7 +14,9 @@ describe('CaptureComponent', () => {
       'createGoal',
       'requestMediaUpload',
       'uploadMedia',
+      'getPlants',
     ]);
+    gardenApi.getPlants.and.returnValue(of([]));
 
     await TestBed.configureTestingModule({
       imports: [CaptureComponent],
@@ -51,6 +53,7 @@ describe('CaptureComponent', () => {
     expect(gardenApi.createGoal).toHaveBeenCalledWith('g-1', {
       description: 'leaves turning yellow',
       mediaIds: undefined,
+      plantId: undefined,
     });
     expect(component.phase()).toBe('submitted');
   });
@@ -75,8 +78,32 @@ describe('CaptureComponent', () => {
     expect(gardenApi.createGoal).toHaveBeenCalledWith('g-1', {
       description: 'leaves turning yellow',
       mediaIds: ['media-1'],
+      plantId: undefined,
     });
     expect(component.phase()).toBe('submitted');
+  });
+
+  it('populates the plant picker and includes plantId when one is selected', () => {
+    gardenApi.getPlants.and.returnValue(
+      of([{ plantId: 'plant-1', name: 'Tomato #2' } as any]),
+    );
+    gardenApi.createGoal.and.returnValue(of({ goalId: 'goal-1', status: 'Intake' }));
+
+    fixture = TestBed.createComponent(CaptureComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.plants().length).toBe(1);
+
+    component.onPlantSelected('plant-1');
+    component.onDescriptionInput('leaves turning yellow');
+    component.submit();
+
+    expect(gardenApi.createGoal).toHaveBeenCalledWith('g-1', {
+      description: 'leaves turning yellow',
+      mediaIds: undefined,
+      plantId: 'plant-1',
+    });
   });
 
   it('shows a recoverable error when submission fails', () => {

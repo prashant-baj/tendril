@@ -322,6 +322,44 @@ paths:
         passthroughBehavior: when_no_match
     options: *cors-preflight
 
+  /gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      operationId: postTaskCheckin
+      summary: >
+        Attach a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
+        chain and marks the task done (one check-in per task; not a repeatable progress log)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCheckinRequest"
+      responses:
+        "200":
+          description: Task checked in
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such task or media
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
   /gardens/{gardenId}/plans/{planId}/approve:
     parameters:
       - $ref: "#/components/parameters/GardenId"
@@ -372,6 +410,13 @@ components:
 
     PlanId:
       name: planId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    TaskId:
+      name: taskId
       in: path
       required: true
       schema:
@@ -478,6 +523,10 @@ components:
       properties:
         plantId:
           type: string
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url for the plant's linked photo (OB-03),
+            present only if a mediaId was given at creation.
 
     Plant:
       type: object
@@ -491,6 +540,10 @@ components:
           type: string
         stage:
           type: string
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url per read (OB-03) — never stored, same
+            posture as GoalMedia's downloadUrl. Absent if the plant has no linked photo.
 
     GoalCreateRequest:
       type: object
@@ -505,6 +558,12 @@ components:
           items:
             type: string
           description: Ids from prior createMediaUpload calls, referencing attached photos.
+        plantId:
+          type: string
+          description: >
+            Optional — which plant this goal is about, if any (not every issue is plant-specific).
+            When set, propagates onto every attached Media record and every Task the orchestrator
+            later proposes for this goal.
 
     GoalCreateResponse:
       type: object
@@ -535,6 +594,8 @@ components:
           type: array
           items:
             type: string
+        plantId:
+          type: string
 
     Plan:
       type: object
@@ -549,6 +610,32 @@ components:
         status:
           type: string
           description: "\"PlanProposed\" or \"Approved\" (architecture.md §7.3)."
+        trace:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEntry"
+          description: The specialist-consultation record behind this plan's current version
+            (PA-05) — "How this was decided". Absent for an older goal, or a plan that was
+            synthesized from a fallback (no specialist actually consulted).
+
+    TraceEntry:
+      type: object
+      required: [agent, says, ms]
+      properties:
+        agent:
+          type: string
+          description: Specialist name (registry `name`, e.g. "agronomy"), or "orchestrator" for
+            the final synthesis step.
+        says:
+          type: string
+          description: A short summary of what this specialist (or the orchestrator's own
+            synthesis) concluded.
+        ms:
+          type: integer
+          description: How long this step took, in milliseconds.
+        isOrchestrator:
+          type: boolean
+          description: True only for the final synthesis entry, not a specialist call.
 
     Task:
       type: object
@@ -565,6 +652,26 @@ components:
           description: "\"plant\" or \"garden\"."
         status:
           type: string
+          description: "\"pending\" or \"done\" — flips to \"done\" the moment a check-in photo is attached."
+        plantId:
+          type: string
+          description: Inherited from the goal's plantId, if any, when this task was proposed.
+        media:
+          $ref: "#/components/schemas/GoalMedia"
+          description: Present once a check-in photo has been attached (postTaskCheckin).
+        feedback:
+          type: string
+          description: The orchestrator's assessment of this task's check-in photo against the
+            plan (PA-05) — written asynchronously after postTaskCheckin, may take a few seconds
+            to appear.
+
+    TaskCheckinRequest:
+      type: object
+      required: [mediaId]
+      properties:
+        mediaId:
+          type: string
+          description: Id from a prior createMediaUpload call, once the upload itself has completed.
 
     Message:
       type: object

@@ -32,3 +32,29 @@
   gap: 6px;
   margin-top: 10px;
 }
+
+.checkin {
+  margin-top: 10px;
+}
+
+.checkin-photo {
+  display: block;
+  width: 100%;
+  max-height: 160px;
+  object-fit: cover;
+  border-radius: var(--td-radius-md);
+  margin-top: 10px;
+}
+
+.feedback {
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--td-color-ink-secondary);
+  margin-top: 8px;
+  text-wrap: pretty;
+
+  &.pending {
+    font-style: italic;
+    color: var(--td-color-ink-tertiary);
+  }
+}

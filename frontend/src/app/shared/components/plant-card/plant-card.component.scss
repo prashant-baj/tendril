@@ -20,6 +20,13 @@
   border-radius: var(--td-radius-md);
   background: var(--td-color-primary-surface);
   color: var(--td-color-primary-tint);
+  overflow: hidden;
+}
+
+.photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .name {

@@ -3,7 +3,18 @@ import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/route
 import { Observable, of } from 'rxjs';
 import { GoalDetailComponent } from './goal-detail.component';
 import { GoalApi, GoalDetail } from '../../core/services/goal.service';
+import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
+
+class FakeGardenApi {
+  requestMediaUpload(): Observable<{ uploadUrl: string; mediaId: string }> {
+    return of({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-2' });
+  }
+
+  uploadMedia(): Observable<void> {
+    return of(undefined);
+  }
+}
 
 const DETAIL: GoalDetail = {
   goal: {
@@ -44,6 +55,13 @@ class FakeGoalApi {
     this.lastApprove = { gardenId, planId };
     return of(undefined);
   }
+
+  lastCheckin: { gardenId: string; goalId: string; taskId: string; mediaId: string } | undefined;
+
+  checkinTask(gardenId: string, goalId: string, taskId: string, mediaId: string): Observable<void> {
+    this.lastCheckin = { gardenId, goalId, taskId, mediaId };
+    return of(undefined);
+  }
 }
 
 describe('GoalDetailComponent', () => {
@@ -57,6 +75,7 @@ describe('GoalDetailComponent', () => {
       providers: [
         provideRouter([]),
         { provide: GoalApi, useValue: fakeGoalApi },
+        { provide: GardenApi, useClass: FakeGardenApi },
         { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
         {
           provide: ActivatedRoute,
@@ -108,6 +127,25 @@ describe('GoalDetailComponent', () => {
 
     expect(fakeGoalApi.lastApprove).toEqual({ gardenId: 'g-1', planId: 'goal-1' });
   });
+
+  it('checking in a task uploads the photo, then calls GoalApi.checkinTask, then polls for feedback', () => {
+    const file = new File(['x'], 'proof.jpg', { type: 'image/jpeg' });
+    fixture.componentInstance.onTaskCheckin('t1', file);
+
+    expect(fakeGoalApi.lastCheckin).toEqual({
+      gardenId: 'g-1',
+      goalId: 'goal-1',
+      taskId: 't1',
+      mediaId: 'media-2',
+    });
+    expect(fixture.componentInstance.checkingInTaskId()).toBeNull();
+    expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBe('t1');
+  });
+
+  it('does not render "How this was decided" when the plan has no trace', () => {
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).not.toContain('How this was decided');
+  });
 });
 
 describe('GoalDetailComponent (polling for the orchestrator\'s reply)', () => {
@@ -149,6 +187,7 @@ describe('GoalDetailComponent (polling for the orchestrator\'s reply)', () => {
       providers: [
         provideRouter([]),
         { provide: GoalApi, useClass: PollingFakeGoalApi },
+        { provide: GardenApi, useClass: FakeGardenApi },
         { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
         {
           provide: ActivatedRoute,
@@ -175,6 +214,137 @@ describe('GoalDetailComponent (polling for the orchestrator\'s reply)', () => {
   }));
 });
 
+describe('GoalDetailComponent (polling for check-in feedback)', () => {
+  class CheckinPollingFakeGoalApi {
+    callCount = 0;
+
+    getGoalDetail(): Observable<GoalDetail> {
+      this.callCount += 1;
+      // Call 1 is the initial constructor fetch, call 2 is the poll's immediate first check
+      // (still no feedback) — call 3+ (after one interval tick) simulates the orchestrator
+      // having written feedback by then. Mirrors PollingFakeGoalApi's callCount convention above.
+      const feedback = this.callCount >= 3 ? 'Looking good, keep it up!' : undefined;
+      return of({
+        ...DETAIL,
+        tasks: [{ ...DETAIL.tasks[0], status: 'done', feedback }],
+      });
+    }
+
+    sendMessage(): Observable<void> {
+      return of(undefined);
+    }
+
+    approve(): Observable<void> {
+      return of(undefined);
+    }
+
+    getGoals(): Observable<never[]> {
+      return of([]);
+    }
+
+    checkinTask(): Observable<void> {
+      return of(undefined);
+    }
+  }
+
+  it('shows the waiting indicator, then the feedback once it arrives — no manual refresh needed', fakeAsync(() => {
+    TestBed.configureTestingModule({
+      imports: [GoalDetailComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GoalApi, useClass: CheckinPollingFakeGoalApi },
+        { provide: GardenApi, useClass: FakeGardenApi },
+        { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
+        {
+          provide: ActivatedRoute,
+          useValue: { paramMap: of(convertToParamMap({ goalId: 'goal-1' })) },
+        },
+      ],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(GoalDetailComponent);
+    fixture.detectChanges();
+
+    const file = new File(['x'], 'proof.jpg', { type: 'image/jpeg' });
+    fixture.componentInstance.onTaskCheckin('t1', file);
+
+    expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBe('t1');
+    expect(fixture.componentInstance.detail()?.tasks[0].feedback).toBeUndefined();
+
+    tick(2000);
+
+    expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBeNull();
+    expect(fixture.componentInstance.detail()?.tasks[0].feedback).toBe(
+      'Looking good, keep it up!',
+    );
+  }));
+});
+
+describe('GoalDetailComponent ("How this was decided")', () => {
+  const DETAIL_WITH_TRACE: GoalDetail = {
+    ...DETAIL,
+    plan: {
+      ...DETAIL.plan!,
+      trace: [
+        { agent: 'agronomy', says: 'Nitrogen is high.', ms: 2100 },
+        { agent: 'orchestrator', says: 'Feed change recommended.', ms: 900, isOrchestrator: true },
+      ],
+    },
+  };
+
+  class TraceFakeGoalApi {
+    getGoalDetail(): Observable<GoalDetail> {
+      return of(DETAIL_WITH_TRACE);
+    }
+    sendMessage(): Observable<void> {
+      return of(undefined);
+    }
+    approve(): Observable<void> {
+      return of(undefined);
+    }
+    getGoals(): Observable<never[]> {
+      return of([]);
+    }
+    checkinTask(): Observable<void> {
+      return of(undefined);
+    }
+  }
+
+  let fixture: ComponentFixture<GoalDetailComponent>;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [GoalDetailComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GoalApi, useClass: TraceFakeGoalApi },
+        { provide: GardenApi, useClass: FakeGardenApi },
+        { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
+        {
+          provide: ActivatedRoute,
+          useValue: { paramMap: of(convertToParamMap({ goalId: 'goal-1' })) },
+        },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(GoalDetailComponent);
+    fixture.detectChanges();
+  });
+
+  it('renders the collapsed toggle with specialist count and total duration', () => {
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('How this was decided');
+    expect(text).toContain('1 specialists · 3s · resolved at runtime');
+    expect(fixture.nativeElement.querySelector('td-trace-entry')).toBeFalsy();
+  });
+
+  it('expands to show each trace entry when toggled', () => {
+    fixture.componentInstance.toggleTrace();
+    fixture.detectChanges();
+
+    const entries = fixture.nativeElement.querySelectorAll('td-trace-entry');
+    expect(entries.length).toBe(2);
+  });
+});
+
 describe('GoalDetailComponent (goal not found)', () => {
   it('shows a not-found message when the goal has no detail', async () => {
     await TestBed.configureTestingModule({
@@ -185,6 +355,7 @@ describe('GoalDetailComponent (goal not found)', () => {
           provide: GoalApi,
           useValue: { getGoalDetail: () => of(undefined) },
         },
+        { provide: GardenApi, useClass: FakeGardenApi },
         { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
         {
           provide: ActivatedRoute,

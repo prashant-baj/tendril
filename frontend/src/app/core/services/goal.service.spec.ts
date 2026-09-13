@@ -111,4 +111,18 @@ describe('HttpGoalApi', () => {
 
     expect(completed).toBe(true);
   });
+
+  it('checkinTask() POSTs to /gardens/{id}/goals/{goalId}/tasks/{taskId}/checkins', () => {
+    let completed = false;
+    api.checkinTask('g-1', 'goal-1', 'task-1', 'media-1').subscribe(() => (completed = true));
+
+    const req = httpMock.expectOne(
+      `${baseUrl}/gardens/g-1/goals/goal-1/tasks/task-1/checkins`,
+    );
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ mediaId: 'media-1' });
+    req.flush(null);
+
+    expect(completed).toBe(true);
+  });
 });

@@ -410,6 +410,18 @@ def test_goal_submitted_eventbridge_rule_targets_orchestrator():
             }
         ),
     )
+    # PA-05: a task check-in also mirrors goal.submitted's rule exactly.
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": {
+                    "source": ["tendril.client-api"],
+                    "detail-type": ["task.checkin.received"],
+                }
+            }
+        ),
+    )
     tpl.has_resource_properties(
         "AWS::Lambda::Function",
         Match.object_like(

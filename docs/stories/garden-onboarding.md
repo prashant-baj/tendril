@@ -143,7 +143,7 @@ out, same pattern as the existing upload flow.
 > `generate_download_url(s3_key)` helper for the other to call, rather than duplicating it.
 
 **Acceptance Criteria**
-- [ ] `createPlant`'s response includes a `photoUrl` (short-lived presigned GET URL) when the
+- [x] `createPlant`'s response includes a `photoUrl` (short-lived presigned GET URL) when the
   plant has a linked Media record — enough for the plant just added in the current session to
   show its real photo immediately (no new read endpoint needed for this part).
 - [x] ~~A real `GET /gardens/{gardenId}/plants` list operation exists~~ — **already done**, see the
@@ -151,26 +151,31 @@ out, same pattern as the existing upload flow.
   freshly-generated `photoUrl` per read (presigned URLs expire, so a stored URL is never reused
   across requests) — this is what makes photos still visible after a page reload, not just right
   after upload.
-- [ ] Plants with no attached photo keep showing the existing generic icon — `photoUrl` is
+- [x] Plants with no attached photo keep showing the existing generic icon — `photoUrl` is
   always optional, never a hard requirement.
-- [ ] An expired/broken `photoUrl` (e.g. the frontend held onto it too long) falls back to the
+- [x] An expired/broken `photoUrl` (e.g. the frontend held onto it too long) falls back to the
   generic icon rather than a broken-image glyph.
-- [ ] Unit tests: presigned GET URL generation, `list_plants` (with and without a linked photo).
-- [ ] Component tests: a plant with `photoUrl` renders the image instead of the icon; an image
+- [x] Unit tests: presigned GET URL generation, `list_plants` (with and without a linked photo).
+- [x] Component tests: a plant with `photoUrl` renders the image instead of the icon; an image
   load error (`(error)` on `<img>`) falls back to the icon.
 
 **Tasks**
-- [ ] Add `photoUrl` (optional) to `PlantCreateResponse` and the existing `Plant` list schema in
+- [x] Add `photoUrl` (optional) to `PlantCreateResponse` and the existing `Plant` list schema in
   `openapi.yaml`.
-- [ ] `garden_handler.py`: add/reuse a shared `generate_download_url(s3_key)` helper (see the
-  update note — shared with PA-03) and call it from `create_plant` and `list_plants` wherever a
-  plant's linked Media record is known.
-- [ ] Frontend: add `photoUrl?: string` to the `Plant` model; `PlantRowComponent`/
+- [x] `garden_handler.py`: reused the shared `_generate_download_url(s3_key)` helper (already
+  built for PA-03/PA-04) and called it from `create_plant` and `list_plants` wherever a plant's
+  linked Media record is known. **One real gap found and closed along the way:** `create_plant`
+  only ever set `Media.plant_id` (Media → Plant), never `Plant.media_id` (Plant → Media) — so
+  there was no way to look a plant's photo back up at all. Added `media_id` onto the `Plant` item
+  itself (mirroring `Goal.media_ids`' role), making it a direct `GetItem` rather than a scan/GSI.
+- [x] Frontend: added `photoUrl?: string` to the `Plant` model; `PlantRowComponent`/
   `PlantCardComponent` render an `<img [src]>` when present (with an `(error)` handler falling
-  back to the icon), otherwise the existing icon.
+  back to the icon via a local `photoFailed` signal), otherwise the existing icon.
 
 **Dependencies:** OB-02 (needs the upload + Media↔Plant link it already built).
-**Status:** ☐ to do.
+**Status:** ✅ done — deployed to `dev` and live-verified: created a plant with a real photo,
+confirmed `createPlant`'s response and a subsequent `listPlants` both resolved a working
+presigned `photoUrl` (fetched the actual photo bytes, HTTP 200), then deleted the smoke-test data.
 
 ---
 

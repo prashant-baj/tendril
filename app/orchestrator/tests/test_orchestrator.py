@@ -215,6 +215,85 @@ def test_build_tools_passes_image_to_every_tool(monkeypatch):
     assert payload["imageFormat"] == "jpeg"
 
 
+# --- specialist-trace capture (PA-05: "How this was decided") -----------------------------
+
+
+def test_specialist_tool_appends_to_trace_on_success(monkeypatch):
+    long_result = "Looks like nitrogen deficiency. " + ("Detail. " * 30)
+    fake_client = FakeAgentCoreClient(response_body={"result": long_result})
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    trace: list[dict] = []
+
+    tool_fn = handler._make_specialist_tool("agronomy", "arn:x", "desc", "g1", trace=trace)
+    tool_fn("what's wrong?")
+
+    assert len(trace) == 1
+    entry = trace[0]
+    assert entry["agent"] == "agronomy"
+    assert entry["says"].startswith("Looks like nitrogen deficiency")
+    assert len(entry["says"]) <= 150
+    assert isinstance(entry["ms"], int)
+
+
+def test_specialist_tool_appends_to_trace_on_error(monkeypatch):
+    fake_client = FakeAgentCoreClient(raise_on_invoke=RuntimeError("unreachable"))
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    trace: list[dict] = []
+
+    tool_fn = handler._make_specialist_tool("agronomy", "arn:x", "desc", "g1", trace=trace)
+    tool_fn("prompt")
+
+    assert len(trace) == 1
+    assert trace[0]["agent"] == "agronomy"
+    assert "Unavailable" in trace[0]["says"]
+
+
+def test_specialist_tool_works_without_a_trace_list(monkeypatch):
+    # No trace given -> no crash, nothing recorded (default None, existing callers unaffected).
+    fake_client = FakeAgentCoreClient(response_body={"result": "hi"})
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+
+    tool_fn = handler._make_specialist_tool("hello", "arn:x", "desc", "g1")
+    result = tool_fn("hi")
+
+    assert result == "hi"
+
+
+def test_summarize_returns_short_text_unchanged():
+    assert handler._summarize("short") == "short"
+
+
+def test_summarize_truncates_long_text_with_ellipsis():
+    result = handler._summarize("a" * 200, max_len=150)
+    assert len(result) == 150
+    assert result.endswith("…")
+
+
+def test_finalize_trace_appends_orchestrator_entry_with_remaining_time():
+    trace = [{"agent": "agronomy", "says": "ok", "ms": 100}]
+    turn = handler.ChatTurnResult(reply="All good.", updated_plan=None)
+
+    handler._finalize_trace(trace, turn, turn_ms=400)
+
+    assert len(trace) == 2
+    orch = trace[-1]
+    assert orch["agent"] == "orchestrator"
+    assert orch["is_orchestrator"] is True
+    assert orch["ms"] == 300
+    assert orch["says"] == "All good."
+
+
+def test_finalize_trace_floors_ms_at_zero():
+    # Guards against a negative "orchestrator" duration if timing is ever inconsistent — should
+    # not happen in practice (turn_ms wraps the whole turn, specialist ms is a subset of it).
+    trace = [{"agent": "agronomy", "says": "ok", "ms": 500}]
+    turn = handler.ChatTurnResult(reply="ok", updated_plan=None)
+
+    handler._finalize_trace(trace, turn, turn_ms=100)
+
+    assert trace[-1]["ms"] == 0
+
+
 # --- _resolve_image (data-architecture.md §4 — presigned GET, no specialist S3 IAM) --------
 
 
@@ -363,6 +442,71 @@ def test_write_plan_and_tasks_clears_previous_tasks_then_writes_fresh_set(monkey
     assert len(task_items) == 2
     assert all(i["sk"].startswith("TASK#goal-1#") for i in task_items)
     assert {i["title"] for i in task_items} == {"Water", "Mulch"}
+    assert all("plant_id" not in i for i in task_items)
+
+
+def test_write_plan_and_tasks_stamps_plant_id_onto_every_task_when_goal_has_one(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": []})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    plan = handler.PlanProposal(
+        success_criteria="Healthy again",
+        tasks=[handler.TaskProposal(title="Water", detail="Deeply", scope="plant")],
+    )
+    handler._write_plan_and_tasks("g1", "goal-1", plan, plant_id="plant-1")
+
+    task_items = [i for i in fake_table.put_calls if i["sk"] != "PLAN#goal-1"]
+    assert task_items[0]["plant_id"] == "plant-1"
+
+
+def test_write_plan_and_tasks_preserves_done_tasks_across_a_revision(monkeypatch):
+    # PA-05: a revision must never wipe a completed check-in's status/media/feedback — only
+    # not-yet-done tasks get cleared and replaced.
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "TASK#goal-1#done-task",
+                    "status": "done",
+                    "media_id": "media-1",
+                },
+                {"pk": "GARDEN#g1", "sk": "TASK#goal-1#pending-task", "status": "pending"},
+            ]
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    plan = handler.PlanProposal(
+        success_criteria="Healthy again",
+        tasks=[handler.TaskProposal(title="New task", detail="d", scope="plant")],
+    )
+    handler._write_plan_and_tasks("g1", "goal-1", plan)
+
+    assert fake_table.delete_calls == [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#pending-task"}]
+
+
+def test_write_plan_and_tasks_stores_trace_on_plan_item_when_given(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": []})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    trace = [{"agent": "agronomy", "says": "ok", "ms": 100}]
+
+    plan = handler.PlanProposal(success_criteria="x", tasks=[])
+    handler._write_plan_and_tasks("g1", "goal-1", plan, trace=trace)
+
+    plan_item = next(i for i in fake_table.put_calls if i["sk"] == "PLAN#goal-1")
+    assert plan_item["trace"] == trace
+
+
+def test_write_plan_and_tasks_omits_trace_when_not_given(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": []})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    plan = handler.PlanProposal(success_criteria="x", tasks=[])
+    handler._write_plan_and_tasks("g1", "goal-1", plan)
+
+    plan_item = next(i for i in fake_table.put_calls if i["sk"] == "PLAN#goal-1")
+    assert "trace" not in plan_item
 
 
 # --- handle_goal_submitted (agent-loop wiring; Agent/BedrockModel mocked) ------------------
@@ -391,6 +535,31 @@ def test_handle_goal_submitted_happy_path(monkeypatch):
     assert message_items[1]["content"] == "Water more."
     # The Plan itself was written too.
     assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
+
+
+def test_handle_goal_submitted_propagates_goal_plant_id_onto_tasks(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={
+            "Item": {
+                "garden_id": "g1",
+                "goal_id": "goal-1",
+                "description": "help",
+                "plant_id": "plant-1",
+            }
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    plan = handler.PlanProposal(
+        success_criteria="Fixed", tasks=[handler.TaskProposal(title="Water", detail="d")]
+    )
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Water more.", updated_plan=plan)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    task_items = [i for i in fake_table.put_calls if i["sk"].startswith("TASK#")]
+    assert task_items[0]["plant_id"] == "plant-1"
 
 
 def test_handle_goal_submitted_with_photo_passes_image_url_to_tools(monkeypatch):
@@ -482,6 +651,40 @@ def test_handle_goal_submitted_goal_not_found(monkeypatch):
     handler.handle_goal_submitted({"gardenId": "g1", "goalId": "missing"})
 
     assert fake_table.update_calls == []
+
+
+def test_handle_goal_submitted_persists_trace_when_plan_is_produced(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    plan = handler.PlanProposal(
+        success_criteria="Fixed", tasks=[handler.TaskProposal(title="Water", detail="d")]
+    )
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Water more.", updated_plan=plan)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    plan_item = next(i for i in fake_table.put_calls if i["sk"] == "PLAN#goal-1")
+    assert "trace" in plan_item
+    assert plan_item["trace"][-1]["agent"] == "orchestrator"
+    assert plan_item["trace"][-1]["says"] == "Water more."
+
+
+def test_handle_goal_submitted_omits_trace_when_no_plan_produced(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Tell me more?", updated_plan=None)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert not any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
 
 
 def test_handle_goal_submitted_agent_failure_reverts_to_intake(monkeypatch):
@@ -593,6 +796,175 @@ def test_handle_goal_message_received_failure_writes_apologetic_message(monkeypa
     assert "model unreachable" in message_items[0]["content"]
 
 
+# --- handle_task_checkin_received (PA-05: check-in feedback + optional plan revision) ------
+
+
+def test_handle_task_checkin_received_writes_task_feedback(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "leaves yellow"}
+            },
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green",
+                    "status": "PlanProposed",
+                }
+            },
+        },
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "TASK#goal-1#task-1",
+                    "task_id": "task-1",
+                    "title": "Water deeply",
+                    "detail": "Soak the soil",
+                    "status": "done",
+                    "media_id": "media-1",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.structured_output = handler.ChatTurnResult(
+        reply="Looking good, keep it up!", updated_plan=None
+    )
+
+    handler.handle_task_checkin_received({"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"})
+
+    feedback_calls = [c for c in fake_table.update_calls if c["Key"]["sk"] == "TASK#goal-1#task-1"]
+    assert len(feedback_calls) == 1
+    assert feedback_calls[0]["ExpressionAttributeValues"][":f"] == "Looking good, keep it up!"
+
+
+def test_handle_task_checkin_received_with_plan_revision_preserves_checked_in_task(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "leaves yellow"}
+            },
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green",
+                    "status": "PlanProposed",
+                }
+            },
+        },
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "TASK#goal-1#task-1",
+                    "task_id": "task-1",
+                    "title": "Water deeply",
+                    "detail": "Soak the soil",
+                    "status": "done",
+                    "media_id": "media-1",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    revised_plan = handler.PlanProposal(
+        success_criteria="Leaves green",
+        tasks=[handler.TaskProposal(title="Reduce watering", detail="Every 3 days")],
+    )
+    FakeAgent.structured_output = handler.ChatTurnResult(
+        reply="This isn't improving — I've adjusted the watering.", updated_plan=revised_plan
+    )
+
+    handler.handle_task_checkin_received({"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"})
+
+    # The already-done task was never deleted — a revision only clears not-yet-done tasks.
+    assert not any(c["sk"] == "TASK#goal-1#task-1" for c in fake_table.delete_calls)
+    feedback_calls = [c for c in fake_table.update_calls if c["Key"]["sk"] == "TASK#goal-1#task-1"]
+    assert (
+        feedback_calls[-1]["ExpressionAttributeValues"][":f"]
+        == "This isn't improving — I've adjusted the watering."
+    )
+    new_tasks = [
+        i
+        for i in fake_table.put_calls
+        if i["sk"].startswith("TASK#goal-1#") and i["sk"] != "TASK#goal-1#task-1"
+    ]
+    assert len(new_tasks) == 1
+    assert new_tasks[0]["title"] == "Reduce watering"
+
+
+def test_handle_task_checkin_received_goal_not_found(monkeypatch):
+    fake_table = FakeTable(get_item_response={})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_task_checkin_received({"gardenId": "g1", "goalId": "missing", "taskId": "t1"})
+
+    assert fake_table.update_calls == []
+
+
+def test_handle_task_checkin_received_task_not_found(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}
+            },
+        },
+        query_response={"Items": []},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_task_checkin_received(
+        {"gardenId": "g1", "goalId": "goal-1", "taskId": "missing-task"}
+    )
+
+    assert fake_table.update_calls == []
+
+
+def test_handle_task_checkin_received_agent_failure_writes_no_feedback(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}
+            },
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "x",
+                    "status": "PlanProposed",
+                }
+            },
+        },
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "TASK#goal-1#task-1",
+                    "task_id": "task-1",
+                    "title": "Water",
+                    "detail": "d",
+                    "status": "done",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.raise_on_call = RuntimeError("model unreachable")
+
+    handler.handle_task_checkin_received({"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"})
+
+    assert fake_table.update_calls == []
+
+
 # --- handler() routing ----------------------------------------------------------------------
 
 
@@ -629,6 +1001,42 @@ def test_handler_routes_goal_message_received(monkeypatch):
     )
 
     assert any("GOALMSG#" in i["sk"] for i in fake_table.put_calls)
+
+
+def test_handler_routes_task_checkin_received(monkeypatch):
+    fake_table = FakeTable(
+        responses_by_sk={
+            "GOAL#goal-1": {
+                "Item": {"garden_id": "g1", "goal_id": "goal-1", "description": "help"}
+            },
+        },
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "TASK#goal-1#task-1",
+                    "task_id": "task-1",
+                    "title": "Water",
+                    "detail": "d",
+                    "status": "done",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    FakeAgent.structured_output = handler.ChatTurnResult(reply="Looks good.", updated_plan=None)
+
+    handler.handler(
+        {
+            "detail-type": "task.checkin.received",
+            "detail": {"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+        },
+        None,
+    )
+
+    assert any(c["Key"]["sk"] == "TASK#goal-1#task-1" for c in fake_table.update_calls)
 
 
 def test_handler_ignores_unknown_detail_type(monkeypatch):

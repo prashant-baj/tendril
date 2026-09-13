@@ -15,6 +15,21 @@
 
       <td-photo-picker (fileSelected)="onFileSelected($event)" />
 
+      @if (plants().length > 0) {
+        <label class="field">
+          <span class="field-label">Which plant?</span>
+          <select
+            [value]="selectedPlantId()"
+            (change)="onPlantSelected($any($event.target).value)"
+          >
+            <option value="">Whole garden / not sure</option>
+            @for (plant of plants(); track plant.plantId) {
+              <option [value]="plant.plantId">{{ plant.name }}</option>
+            }
+          </select>
+        </label>
+      }
+
       <label class="field">
         <span class="field-label">What's going on?</span>
         <textarea

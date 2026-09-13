@@ -3,11 +3,14 @@ import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { interval, startWith, switchMap, takeWhile } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { ChipComponent, ChipTone } from '../../shared/components/chip/chip.component';
 import { PlanTaskCardComponent } from '../../shared/components/plan-task-card/plan-task-card.component';
+import { TraceEntryComponent } from '../../shared/components/trace-entry/trace-entry.component';
 import { MarkdownPipe } from '../../shared/pipes/markdown.pipe';
 import { GoalApi, GoalDetail } from '../../core/services/goal.service';
+import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
 const IN_PROGRESS_STATUSES = new Set(['Approved', 'InProgress']);
@@ -22,7 +25,15 @@ const MAX_POLLS = 30; // ~60s
 @Component({
   selector: 'td-goal-detail',
   standalone: true,
-  imports: [RouterLink, ReactiveFormsModule, IconComponent, ChipComponent, PlanTaskCardComponent, MarkdownPipe],
+  imports: [
+    RouterLink,
+    ReactiveFormsModule,
+    IconComponent,
+    ChipComponent,
+    PlanTaskCardComponent,
+    TraceEntryComponent,
+    MarkdownPipe,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './goal-detail.component.html',
   styleUrl: './goal-detail.component.scss',
@@ -30,6 +41,7 @@ const MAX_POLLS = 30; // ~60s
 export class GoalDetailComponent {
   private readonly route = inject(ActivatedRoute);
   private readonly goalApi = inject(GoalApi);
+  private readonly gardenApi = inject(GardenApi);
   private readonly currentGarden = inject(CurrentGardenService);
   private readonly fb = inject(FormBuilder);
   private readonly destroyRef = inject(DestroyRef);
@@ -45,6 +57,14 @@ export class GoalDetailComponent {
   // True while polling for the orchestrator's reply after sending a message — drives the
   // "Tendril is typing…" indicator so the chat reads as live, two-way conversation.
   readonly waitingForReply = signal(false);
+  // The taskId currently uploading a check-in photo, if any — lets the template disable just
+  // that one task's picker rather than the whole plan.
+  readonly checkingInTaskId = signal<string | null>(null);
+  // The taskId waiting on the orchestrator's async check-in feedback (PA-05), if any — drives
+  // that task's "Tendril is reviewing your check-in…" line.
+  readonly awaitingFeedbackForTaskId = signal<string | null>(null);
+  // "How this was decided" (PA-05) — collapsed by default, same as the original mockup.
+  readonly traceOpen = signal(false);
 
   readonly replyForm = this.fb.nonNullable.group({
     content: ['', [Validators.required, Validators.minLength(1)]],
@@ -71,6 +91,19 @@ export class GoalDetailComponent {
   get planIsApproved(): boolean {
     const plan = this.detail()?.plan;
     return !!plan && IN_PROGRESS_STATUSES.has(plan.status);
+  }
+
+  get traceSpecialistCount(): number {
+    return (this.detail()?.plan?.trace ?? []).filter((e) => !e.isOrchestrator).length;
+  }
+
+  get traceTotalSeconds(): number {
+    const totalMs = (this.detail()?.plan?.trace ?? []).reduce((sum, e) => sum + e.ms, 0);
+    return Math.round(totalMs / 1000);
+  }
+
+  toggleTrace(): void {
+    this.traceOpen.update((open) => !open);
   }
 
   onImageError(event: Event): void {
@@ -138,5 +171,49 @@ export class GoalDetailComponent {
       },
       error: () => this.approving.set(false),
     });
+  }
+
+  onTaskCheckin(taskId: string, file: File): void {
+    const gardenId = this.currentGarden.gardenId();
+    const goalId = this.goalId();
+    if (!gardenId || this.checkingInTaskId()) {
+      return;
+    }
+    this.checkingInTaskId.set(taskId);
+    this.gardenApi
+      .requestMediaUpload(gardenId, { contentType: file.type, fileName: file.name })
+      .pipe(
+        switchMap(({ uploadUrl, mediaId }) =>
+          this.gardenApi.uploadMedia(uploadUrl, file).pipe(map(() => mediaId)),
+        ),
+        switchMap((mediaId) => this.goalApi.checkinTask(gardenId, goalId, taskId, mediaId)),
+      )
+      .subscribe({
+        next: () => {
+          this.checkingInTaskId.set(null);
+          this.pollForTaskFeedback(gardenId, goalId, taskId);
+        },
+        error: () => this.checkingInTaskId.set(null),
+      });
+  }
+
+  private pollForTaskFeedback(gardenId: string, goalId: string, taskId: string): void {
+    this.awaitingFeedbackForTaskId.set(taskId);
+    let attempts = 0;
+    interval(POLL_INTERVAL_MS)
+      .pipe(
+        startWith(0),
+        switchMap(() => this.goalApi.getGoalDetail(gardenId, goalId)),
+        takeWhile((d) => {
+          attempts += 1;
+          const gotFeedback = !!d?.tasks.find((t) => t.taskId === taskId)?.feedback;
+          return !gotFeedback && attempts < MAX_POLLS;
+        }, true),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (d) => this.detailSignal.set(d),
+        complete: () => this.awaitingFeedbackForTaskId.set(null),
+      });
   }
 }

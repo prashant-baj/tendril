@@ -35,11 +35,12 @@ export abstract class GardenApi {
   ): Observable<MediaUploadResponse>;
   /** OB-02: uploads the file bytes directly to S3 using a presigned URL — never via the Lambda. */
   abstract uploadMedia(uploadUrl: string, file: File): Observable<void>;
-  /** OB-02: `POST /gardens/{gardenId}/plants`. */
+  /** OB-02: `POST /gardens/{gardenId}/plants`. `photoUrl` (OB-03) is present only if `mediaId`
+   * was given. */
   abstract createPlant(
     gardenId: string,
     request: CreatePlantRequest,
-  ): Observable<{ plantId: string }>;
+  ): Observable<{ plantId: string; photoUrl?: string }>;
   /** Plant lifecycle: `DELETE /gardens/{gardenId}/plants/{plantId}`. */
   abstract deletePlant(gardenId: string, plantId: string): Observable<void>;
   /** WS-03/WS-05: `POST /gardens/{gardenId}/goals` — 202, async orchestration (ADR-0012). */
@@ -179,6 +180,8 @@ interface PlantDto {
   species: string;
   variety?: string;
   stage: string;
+  /** Freshly-generated presigned GET url (OB-03), present only if the plant has a linked photo. */
+  photoUrl?: string;
 }
 
 function plantFromDto(dto: PlantDto): Plant {
@@ -188,11 +191,12 @@ function plantFromDto(dto: PlantDto): Plant {
     species: dto.species,
     variety: dto.variety ?? '',
     stage: dto.stage,
-    // No real health-tracking or per-plant photo backend yet — a generic icon/healthy state
-    // for every real plant until those stories land (OB-03 tracks the real-photo follow-up).
+    // No real health-tracking backend yet — a generic icon/healthy state stands in for it until
+    // that story lands. The photo itself is real (OB-03); `icon` is just its no-photo fallback.
     icon: 'eco',
     healthState: 'healthy',
     meta: dto.variety ?? '',
+    photoUrl: dto.photoUrl,
   };
 }
 
@@ -265,8 +269,14 @@ export class HttpGardenApi extends GardenApi {
       .pipe(map(() => undefined));
   }
 
-  createPlant(gardenId: string, request: CreatePlantRequest): Observable<{ plantId: string }> {
-    return this.http.post<{ plantId: string }>(`${this.baseUrl}/gardens/${gardenId}/plants`, request);
+  createPlant(
+    gardenId: string,
+    request: CreatePlantRequest,
+  ): Observable<{ plantId: string; photoUrl?: string }> {
+    return this.http.post<{ plantId: string; photoUrl?: string }>(
+      `${this.baseUrl}/gardens/${gardenId}/plants`,
+      request,
+    );
   }
 
   deletePlant(gardenId: string, plantId: string): Observable<void> {

@@ -1,7 +1,11 @@
 <div class="row">
   <button type="button" class="row-main" (click)="activate.emit()">
     <span class="thumb">
-      <td-icon [name]="plant.icon" size="24px" />
+      @if (plant.photoUrl && !photoFailed()) {
+        <img class="photo" [src]="plant.photoUrl" alt="" (error)="onPhotoError()" />
+      } @else {
+        <td-icon [name]="plant.icon" size="24px" />
+      }
     </span>
     <span class="body">
       <span class="name">{{ plant.name }}</span>

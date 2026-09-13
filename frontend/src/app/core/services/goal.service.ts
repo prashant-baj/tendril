@@ -36,6 +36,13 @@ export abstract class GoalApi {
   abstract sendMessage(gardenId: string, goalId: string, content: string): Observable<void>;
   /** PA-02: approve a proposed plan — a synchronous, deterministic status flip. */
   abstract approve(gardenId: string, planId: string): Observable<void>;
+  /** Attaches a check-in photo to a task, flipping it to done. */
+  abstract checkinTask(
+    gardenId: string,
+    goalId: string,
+    taskId: string,
+    mediaId: string,
+  ): Observable<void>;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -57,6 +64,15 @@ export class MockGoalApi extends GoalApi {
   approve(_gardenId: string, _planId: string): Observable<void> {
     return of(undefined);
   }
+
+  checkinTask(
+    _gardenId: string,
+    _goalId: string,
+    _taskId: string,
+    _mediaId: string,
+  ): Observable<void> {
+    return of(undefined);
+  }
 }
 
 interface GoalDto {
@@ -65,6 +81,7 @@ interface GoalDto {
   type: string;
   status: string;
   mediaIds?: string[];
+  plantId?: string;
 }
 
 interface GoalDetailDto {
@@ -111,6 +128,20 @@ export class HttpGoalApi extends GoalApi {
   approve(gardenId: string, planId: string): Observable<void> {
     return this.http
       .post<void>(`${this.baseUrl}/gardens/${gardenId}/plans/${planId}/approve`, {})
+      .pipe(map(() => undefined));
+  }
+
+  checkinTask(
+    gardenId: string,
+    goalId: string,
+    taskId: string,
+    mediaId: string,
+  ): Observable<void> {
+    return this.http
+      .post<void>(
+        `${this.baseUrl}/gardens/${gardenId}/goals/${goalId}/tasks/${taskId}/checkins`,
+        { mediaId },
+      )
       .pipe(map(() => undefined));
   }
 }

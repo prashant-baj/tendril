@@ -267,6 +267,143 @@ will reuse `_generate_download_url` when it's picked up. **Status:** ✅ done �
 
 ---
 
+## PA-04 — Complete the Plant/Goal/Task/Media traceability chain, add task check-in photos
+
+**As a** gardener, **I want** every photo I ever upload to be traceable to the plant, goal, and
+(once acted on) task it's evidence for, **so that** Tendril's record of what happened to a plant
+is actually complete, not just "some photos floating in a bucket."
+
+**Context:** `data-architecture.md` §2 had reserved `Goal.plant_id?` and `Media.plant_id?` since
+the original design, but no code path ever set either — a goal could be plant-scoped in theory,
+never in practice, and a goal-attached photo never linked back to its goal (`Media.goal_id?`
+didn't exist at all). `Task` had no photo concept whatsoever. Per direct instruction, this closed
+the gap **and** added a new real capability — attaching a check-in photo to a `Task` — rather than
+just wiring up the already-reserved fields.
+
+**Acceptance Criteria**
+- [x] `createGoal` accepts an optional `plantId`; when given, it's stored on the `Goal` and
+  propagated (via `TransactWriteItems`, mirroring `createPlant`'s existing Put+Update pattern) to
+  every attached `Media` record's `plant_id`, alongside `goal_id` (always set, plant or not).
+- [x] The orchestrator (`_write_plan_and_tasks`) stamps the Goal's `plant_id` onto every `Task` it
+  proposes for that goal — no re-fetch of the Goal needed later.
+- [x] New `postTaskCheckin` (`POST /gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins`):
+  attaches a check-in photo to a `Task`, flips it to `status=done`, and updates the `Media`
+  record's `task_id`/`goal_id`/`plant_id` (the last only if the task has one) — one transaction,
+  same Put/Update-pair shape used throughout this epic. **Deliberately one check-in per task, not
+  a repeatable progress log** — that's the Phase 7+ tracker/outcome loop, not this pass.
+- [x] `getGoalDetail`'s tasks include `plantId` (if set) and a resolved `media` object (via the
+  existing `_generate_download_url` helper) once a task has been checked in.
+- [x] Frontend: `CaptureComponent` gets an optional plant picker (defaults to "whole garden / not
+  sure" — no `plantId` sent); `PlanTaskCardComponent` shows a photo picker for a pending task and
+  emits the moment a photo is picked (no separate upload step), or the check-in photo + a "Done"
+  badge once checked in; `GoalDetailComponent` wires the upload→checkin→refetch chain.
+- [x] Live smoke test (2026-09-13): created a goal with a real `plantId` + photo — confirmed the
+  `Media` record got both `goal_id` and `plant_id`; checked in the resulting task with a second
+  photo — confirmed the task flipped to `done`, `getGoalDetail` resolved its `media`, and the
+  `Media` record ended up carrying `task_id`/`goal_id`/`plant_id` all three.
+
+**Note (found live during the smoke test, not a regression from this story):** the `vision`
+specialist call can take several minutes end-to-end (including its own memory-fact-extraction
+step) against a cold/just-redeployed AgentCore runtime, long enough to trip the orchestrator
+Lambda's 300s timeout on the very first invocation after a deploy. A malformed test image made
+this worse (the runtime returned a `RuntimeClientError` after ~220s instead of failing fast). The
+orchestrator's existing fail-open behavior (falls back to a clarifying-question reply, never
+crashes or corrupts state) handled it correctly — no plan was written until given real detail in
+a follow-up chat message. Worth keeping an eye on cold-start latency after AgentCore redeploys if
+this recurs; not fixed here since it's a pre-existing latency characteristic, not something this
+story introduced.
+
+**Dependencies:** PA-01 (`Plan`/`Task` entities), PA-03 (`_generate_download_url`, presigned-GET
+IAM). **Status:** ✅ done — deployed to `dev` and live-verified end to end.
+
+---
+
+## PA-05 — Check-in agent feedback + a real "How this was decided" trace
+
+**As a** gardener, **I want** to know whether my check-in looks good (or if the plan needs to
+change) and to actually see which specialists were consulted and why, **so that** the assistant's
+reasoning is transparent instead of a black box, and a check-in isn't a dead end.
+
+**Context:** Two gaps, one root cause — the orchestrator already does real, dynamic
+multi-specialist reasoning (agents-as-tools, ADR-0012), but none of it was ever persisted or
+surfaced beyond the final chat reply. (1) A task check-in (PA-04) marked a task `done` and linked
+the photo, but nothing ever looked at it again. (2) "How this was decided" existed only in the
+very first frontend mockup (commit `7f3b810`, deleted in `1c8a8a9`) as 100% fixture data — the
+orchestrator's `call_specialist` tool already logged each call's name/duration/result to
+CloudWatch, but never persisted it anywhere the frontend could read.
+
+**Scope decision:** a check-in's feedback turn is allowed to **actually revise the plan** (not
+just describe a recommendation in text) — a deliberate, more-powerful choice made explicitly
+aware of the risk it exposed: `_write_plan_and_tasks` (used by every plan revision, chat-triggered
+included) unconditionally deleted and recreated the *entire* task list on every revision, silently
+discarding any task's `done` status/`media_id`/(now) `feedback`. **Fixed at the root**, not just
+for check-ins: it now only ever deletes/replaces tasks that are not yet `done` — a completed
+task (with its check-in photo/feedback) is always preserved untouched across a revision. This was
+a real, pre-existing correctness gap that also silently affected chat-triggered revisions before
+this; framed as closing it, not introducing new complexity to work around it.
+
+**Design — reuse "everything is just a turn," build no new mechanism:** a task check-in
+(`handle_task_checkin_received`, new `task.checkin.received` EventBridge event, mirroring
+`goal.message.received`'s rule/handler shape exactly) is a third kind of turn alongside goal
+submission and chat: async, reconstructs context from DynamoDB, runs the existing `_run_turn`
+(tool-calling + structured `ChatTurnResult` extraction) against the check-in's own new photo, and
+applies the result via the existing `_apply_turn_result` — writing the reply to the chat thread
+*and* stamping it onto the checked-in `Task.feedback`. Specialist-trace capture threads through
+the existing tool-wrapping mechanism (`_make_specialist_tool`/`_build_tools`) via one shared
+mutable list per turn, appended to by every specialist call (success or failure) plus one final
+"orchestrator" synthesis entry; persisted onto the `Plan` item by `_write_plan_and_tasks` whenever
+a turn produces a plan — so the trace always describes *the current plan's* reasoning, whichever
+kind of turn produced it.
+
+**Acceptance Criteria**
+- [x] `postTaskCheckin` publishes `task.checkin.received` after its transaction commits —
+  best-effort (a separate try/except, unlike `create_goal`'s stricter posture): the check-in's
+  core contract (done + photo linked) already succeeded, so losing just the bonus feedback event
+  shouldn't turn an already-successful check-in into a 500.
+- [x] The orchestrator assesses the check-in's own photo (not the goal's original one) against
+  the plan's success criteria, writes a short feedback reply onto `Task.feedback`, and may revise
+  the plan if it concludes that's warranted — all via the existing turn/apply-result machinery.
+- [x] `_write_plan_and_tasks` preserves any `done` task untouched across a revision (the core
+  fix) — verified both by unit test and live (see below).
+- [x] `getGoalDetail` surfaces `Task.feedback` and `Plan.trace` (mapped to camelCase
+  `{agent, says, ms, isOrchestrator}`) when present.
+- [x] Frontend: `PlanTaskCardComponent` renders `task.feedback` below the check-in photo, or a
+  "Tendril is reviewing your check-in…" line while polling for it (same
+  `interval`/`takeWhile`/`takeUntilDestroyed` pattern PA-02's chat-reply polling already
+  established); `GoalDetailComponent` reinstates "How this was decided" as a real, collapsible
+  section (recreated from the deleted mockup's `trace-entry` design) showing each specialist's
+  icon/name/duration/summary plus the orchestrator's own synthesis node, computing "N specialists
+  · Ts · resolved at runtime" from the real trace — renders nothing when a plan has no trace
+  (older goals, or a fallback-synthesized plan that never called a specialist).
+
+**Found and fixed live during the smoke test (real bug, not a test artifact):** `get_goal_detail`
+500'd the moment a plan actually had a trace — `TypeError: Object of type Decimal is not JSON
+serializable`. DynamoDB's resource-layer `Table` deserializes Number attributes as
+`decimal.Decimal`, not `int`; `trace[].ms` passed straight through into the JSON response without
+converting back. Fixed with `"ms": int(e["ms"])` in the trace-mapping code, and added a regression
+test that uses `Decimal` in the fixture (the previous plain-`int` fixture couldn't have caught
+this — matches this file's existing note on `create_garden`/`get_garden`'s fakes verifying request
+*shape*, not boto3's actual deserialization behavior).
+
+**Live-verified end to end (2026-09-13):** submitted a goal with no photo — two specialists
+(agronomy, irrigation) were consulted in parallel, `plan.trace` persisted and rendered correctly
+with real names/summaries/durations. Checked in two of its tasks with photos: the first check-in's
+`vision` call initially hung past the orchestrator's 300s Lambda timeout (a malformed test image,
+same pre-existing latency characteristic PA-04 already documented) — EventBridge's automatic retry
+picked it up, `vision` failed cleanly on the retry, and the orchestrator's fail-open behavior
+still produced correct feedback despite the specialist failure. The second check-in (a valid
+photo) got fast, honest feedback from `vision` ("just a solid green square") and **the model chose
+to revise the plan** — live-confirming the core fix: both already-`done` tasks (with their
+photos/feedback) survived the revision completely untouched, while the not-yet-done tasks were
+replaced by a fresh set. Test data cleaned up afterward.
+
+**Dependencies:** PA-01 (`_run_turn`/`ChatTurnResult`), PA-04 (`postTaskCheckin`, the
+`_write_plan_and_tasks` function this story hardens). **Status:** ✅ done — deployed to `dev`
+(`client-api` → `agentcore` → frontend) and live-verified end to end, including a genuine
+plan-revision-preserves-done-tasks scenario, not just the happy path.
+
+---
+
 ### Definition of Done (applies to every story)
 
 Per [`../engineering-best-practices.md`](../engineering-best-practices.md): CI green (lint +
@@ -280,5 +417,8 @@ touches `data-architecture.md` §2/§6.4 directly — keep it in sync as each st
 The tracker/scheduler Lambda and `TasksDueIndex`-driven follow-ups (Phase 7+); true
 `SnapshotSessionManager`/`AgentStateBucket` session-resume (deferred by PA-02's Context note —
 still the right design for the multi-day follow-up loop when that's built); the WebSocket push
-channel; using photos for progress comparison over time (needs the Task/Tracking check-in loop,
-which needs the tracker first).
+channel; repeated/multi-photo check-ins per task and using photos for progress comparison over
+time (PA-04 added a single one-shot check-in photo per task; PA-05 added real feedback + an
+optional plan revision on that one check-in, but a real progress *log* — multiple check-ins,
+before/after comparison — still needs the Task/Tracking check-in loop, which needs the tracker
+first).

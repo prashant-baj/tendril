@@ -62,10 +62,12 @@ TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
 # The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
 # source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
 # goal.message.received (PA-02) is the same source, published by the goal-message handler for
-# every chat-thread turn after the first.
+# every chat-thread turn after the first. task.checkin.received (PA-05) is the same source too,
+# published by post_task_checkin after a check-in photo is attached to a task.
 GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
 GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
+TASK_CHECKIN_RECEIVED_DETAIL_TYPE = "task.checkin.received"
 
 
 class AgentCoreStack(Stack):
@@ -239,6 +241,19 @@ class AgentCoreStack(Stack):
             ),
         )
         goal_message_received_rule.add_target(targets.LambdaFunction(self.orchestrator))
+
+        # EventBridge: task.checkin.received -> orchestrator (PA-05) — a check-in photo was
+        # attached to a task; mirrors GoalSubmittedRule/GoalMessageReceivedRule exactly. No new
+        # IAM: the Client API Lambda's events:PutEvents grant isn't scoped by detail-type.
+        task_checkin_received_rule = events.Rule(
+            self,
+            "TaskCheckinReceivedRule",
+            rule_name=f"{prefix}-task-checkin-received",
+            event_pattern=events.EventPattern(
+                source=[GOAL_EVENT_SOURCE], detail_type=[TASK_CHECKIN_RECEIVED_DETAIL_TYPE]
+            ),
+        )
+        task_checkin_received_rule.add_target(targets.LambdaFunction(self.orchestrator))
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 

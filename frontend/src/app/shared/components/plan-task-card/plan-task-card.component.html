@@ -4,6 +4,22 @@
     <div class="detail">{{ task.detail }}</div>
     <div class="chips">
       <td-chip tone="neutral" shape="rect" icon="yard">{{ task.scope }}</td-chip>
+      @if (task.status === 'done') {
+        <td-chip tone="green" shape="rect" icon="check_circle">Done</td-chip>
+      }
     </div>
+
+    @if (task.status === 'done' && task.media) {
+      <img class="checkin-photo" [src]="task.media.downloadUrl" alt="Check-in photo" />
+      @if (task.feedback) {
+        <div class="feedback">{{ task.feedback }}</div>
+      } @else if (awaitingFeedback) {
+        <div class="feedback pending">Tendril is reviewing your check-in…</div>
+      }
+    } @else if (task.status !== 'done') {
+      <div class="checkin">
+        <td-photo-picker (fileSelected)="onPhotoSelected($event)" />
+      </div>
+    }
   </div>
 </div>

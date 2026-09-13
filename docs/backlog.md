@@ -4,7 +4,60 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-13, latest (built, tested, and deployed **PA-01/PA-02/PA-03 together** —
+**Last updated:** 2026-09-13, latest (built, tested, and deployed **PA-05** — check-in agent
+feedback + a real "How this was decided" specialist-trace section. A task check-in
+(`postTaskCheckin`) now publishes `task.checkin.received`; the orchestrator treats it as a third
+kind of turn (alongside goal submission and chat) — assesses the check-in's own photo against the
+plan, writes feedback onto `Task.feedback`, and may revise the plan if warranted, reusing the
+existing `_run_turn`/`_apply_turn_result` machinery unchanged. Each specialist call is now recorded
+into a shared trace persisted on the `Plan` item, surfaced by `getGoalDetail` and rendered as a
+real, collapsible "How this was decided" section (recreated from the very first frontend mockup,
+which was 100% fixture data before this). **The real fix underneath both:** `_write_plan_and_tasks`
+used to unconditionally wipe and recreate a goal's *entire* task list on every revision (chat- or
+now check-in-triggered), silently discarding any completed check-in's status/photo/feedback — a
+real, pre-existing correctness gap, now closed by never touching an already-`done` task across a
+revision. **Found + fixed a second real bug live:** `getGoalDetail` 500'd the moment a plan
+actually had a trace — DynamoDB's resource-layer `Table` deserializes numbers as `decimal.Decimal`,
+which `json.dumps` can't serialize; fixed with an explicit `int()` cast, with a regression test
+using `Decimal` in its fixture (a plain-`int` fixture couldn't have caught this). Deployed to `dev`
+(`client-api` → `agentcore` → frontend) and live-verified end to end, including a genuine
+plan-revision-preserves-done-tasks scenario: two specialists consulted and traced on goal
+submission, two tasks checked in with photos, one check-in's `vision` call timed out and was
+retried by EventBridge (handled gracefully), the other triggered a real plan revision that
+correctly preserved both completed tasks' photos/feedback while only the pending tasks were
+replaced. See `stories/plan-approval.md`'s PA-05 section for full detail.)
+
+**Earlier, 2026-09-13:** built, tested, and deployed **OB-03** — plant photos now
+render for real. `createPlant`/`listPlants` resolve a fresh presigned GET `photoUrl` per plant
+with a linked photo, reusing PA-03/PA-04's `_generate_download_url` helper. **Found + fixed a real
+gap along the way:** `create_plant` only ever set `Media.plant_id` (one-directional, Media→Plant),
+never `Plant.media_id` — so there was actually no way to look a plant's photo back up at all;
+added `media_id` onto the `Plant` item itself (mirrors `Goal.media_ids`' role), making it a direct
+`GetItem` rather than a scan/GSI. Frontend: `PlantCardComponent`/`PlantRowComponent` render the
+real photo with an icon fallback on load error (`photoFailed` signal). Deployed to `dev`
+(`client-api` → frontend) and live-verified: created a plant with a real photo, confirmed both
+`createPlant`'s response and a subsequent `listPlants` call resolved a working presigned url
+(fetched the actual photo bytes, HTTP 200), then cleaned up the smoke-test data. See
+`stories/garden-onboarding.md`'s OB-03 section for full detail.)
+
+**Earlier, 2026-09-13:** built, tested, and deployed **PA-04** — closed the
+Plant/Goal/Task/Media traceability gap `data-architecture.md` had reserved fields for since the
+original design but no code had ever populated (`Goal.plant_id`, `Media.goal_id`), and added a new
+real capability: a task check-in photo (`postTaskCheckin`) that attaches a photo to a `Task` and
+flips it to `done` in one transaction. `createGoal` now propagates an optional `plantId` onto every
+attached `Media` record; the orchestrator stamps that `plant_id` onto every `Task` it proposes for
+the goal. Frontend: `CaptureComponent` gets an optional plant picker, `PlanTaskCardComponent` gets
+a photo-picker/check-in UI, `GoalDetailComponent` wires the upload→checkin→refetch chain. Deployed
+to `dev` (`client-api` → `agentcore` → frontend) and live-verified end to end: a goal created with
+a real `plantId` + photo correctly stamped `goal_id`/`plant_id` onto the `Media` record; checking
+in its task with a second photo correctly flipped it to `done` and stamped `task_id`/`goal_id`/
+`plant_id` onto that `Media` record too. **Found (not caused by this change):** a cold/just-
+redeployed AgentCore runtime's first `vision` call can take minutes, long enough to trip the
+orchestrator Lambda's 300s timeout — handled gracefully by the orchestrator's existing fail-open
+behavior (asks a clarifying question instead of crashing). See `stories/plan-approval.md`'s PA-04
+section for full detail.)
+
+**Earlier, 2026-09-13:** built, tested, and deployed **PA-01/PA-02/PA-03 together** —
 the orchestrator now proposes a real, structured `Plan`+`Task` list via Strands' verified
 `structured_output_model` mechanism (no specialist changes needed), a full chat thread lets the
 gardener discuss/revise it or answer a clarifying question, an explicit **Approve** action is a
@@ -98,9 +151,9 @@ locally at all)
 **Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`) · **PA** = Plan Proposal, Conversational Approval & Photo Review (`stories/plan-approval.md`)
 
 **Active development plan:** [`docs/roadmap.md`](./roadmap.md) sequences OB → WS → AF → PA as a
-UI-first, incremental feature track (2026-09-12, extended 2026-09-13) — ranks 1-17 below reflect
-that plan; rank 18 (AF-06) is a deliberately-deferred research note, not active work. The
-pre-existing `TF`/`PG` housekeeping (ranks 19+) is still real, open work; it's just no longer the
+UI-first, incremental feature track (2026-09-12, extended 2026-09-13) — ranks 1-19 below reflect
+that plan; rank 20 (AF-06) is a deliberately-deferred research note, not active work. The
+pre-existing `TF`/`PG` housekeeping (ranks 20+) is still real, open work; it's just no longer the
 immediate next thing.
 
 ## Story board (at a glance)
@@ -109,9 +162,9 @@ A quick-glance grouping of the same rows below by status — the ranked table re
 source of truth (rank, dependencies, notes); this section is just a faster read. Regenerate it by
 eye whenever a Status cell changes below.
 
-**✅ Completed (19)**
-OB-01 · OB-02 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PA-01 · PA-02 · PA-03 · PG-06 ·
-PG-05 · TF-02 · TF-03 · TF-04 · PG-01 · PG-03 · PG-04
+**✅ Completed (22)**
+OB-01 · OB-02 · OB-03 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PA-01 · PA-02 · PA-03 ·
+PA-04 · PA-05 · PG-06 · PG-05 · TF-02 · TF-03 · TF-04 · PG-01 · PG-03 · PG-04
 
 **◐ In progress (10)**
 AF-03 (tools — manual dev smoke test pending) · AF-04 (real guardrail content now exists for 4
@@ -121,11 +174,10 @@ specialists; confirmed `pest_disease` over-block still needs the eval-scenario r
 (pre-commit gitleaks missing) · PG-02 (prompt scope/refusal framing not yet added) · TF-07 (no
 prod deploy path yet) · TF-06 (frontend has no formal per-screen stories)
 
-**☐ Backlog (4, ranked)**
-1. *(not yet storied)* Tasks & Activity on real data (rank 16)
-2. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 17)
-3. **AF-06** — external data-source tools for specialists, researched but deferred (rank 18)
-4. **OB-03** — real plant photo, narrowed scope (rank 34)
+**☐ Backlog (3, ranked)**
+1. *(not yet storied)* Tasks & Activity on real data (rank 18)
+2. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 19)
+3. **AF-06** — external data-source tools for specialists, researched but deferred (rank 20)
 
 **Not on the board:** AF-02 (rank 9) — deliberately **skipped**, not backlog: a pure rename with
 no new capability, superseded by `vision.json` already proving the "one codebase, many
@@ -157,38 +209,42 @@ specialists" pattern.
 | 11 | AF | AF-04 | Guardrails: author the Agronomy specialist's real guardrail policy | ◐ | AF-01 | Real, domain-reworded (not copy-pasted) denied-topic policies now exist for agronomy/irrigation/pest_disease/pruning (2026-09-13). **Confirmed still open:** a live smoke test found `pest_disease`'s `UnsafeChemicalUse` topic over-blocking a legitimate, safe answer — the eval-scenario proof this story calls for ("safe advice isn't over-blocked") is real, necessary follow-up work, not hypothetical. |
 | 12 | AF | AF-05 | Memory & Context: per-garden memory for every specialist | ◐ | AF-01, AF-03 | `infra/stacks/memory_stack.py` (Bedrock KB on S3 Vectors — pay-per-use, not OpenSearch Serverless) + per-garden `MemoryManager`/`BedrockKnowledgeBaseStore` in the template + `context_manager="auto"` + per-specialist IAM (mirrors AF-03). Scoped per-garden not per-user (no auth yet). Open: context pinning (needs session continuity, not yet built) and the manual dev smoke test. |
 | 13 | PA | PA-01 | The orchestrator proposes a structured Plan | ✅ | WS-04 | `docs/roadmap.md` Phase 4.5. `stories/plan-approval.md`. Real `Plan`/`Task` DynamoDB entities + `GET /gardens/{id}/goals[/{goalId}]`. Structured output via Strands' real `structured_output_model` mechanism (verified against installed source), applied only at the orchestrator's synthesis step — no specialist changes needed. Deployed + smoke-tested live in `dev`. |
-| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ✅ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media via a shared `_generate_download_url` helper (OB-03, rank 34, will reuse it). Deployed + smoke-tested live. |
-| 15 | PA | PA-02 | Conversational plan approval (chat + explicit Approve) | ✅ | PA-01 | `docs/roadmap.md` Phase 5. `stories/plan-approval.md`. Real chat (`Message` entity) + explicit, deterministic approve. **Deviation from the original event-based design:** approve is a fully synchronous Client API operation (no model reasoning needed, so no event/orchestrator round-trip) — `plan.approval.responded` was never implemented. Still does *not* build `SnapshotSessionManager`/`AgentStateBucket` session-resume — each chat turn is a fresh, stateless orchestrator invocation; true session-resume stays deferred to rank 17. Approved goals surface under Home's "Goals in progress"; a real "Needs your attention" section covers goals still awaiting approval. Deployed + smoke-tested live — a real goal correctly consulted multiple specialists and produced a real Plan. |
-| 16 | — | — | *(not yet storied)* Tasks & Activity on real data | ☐ | WS-04 | `docs/roadmap.md` Phase 6 — replaces `MockTaskApi`/`MockActivityApi`. Write the story once Phase 5 ships. |
-| 17 | — | — | *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` follow-ups | ☐ | AF-05, PA-02 | `docs/roadmap.md` Phase 7.5+ — builds the `SnapshotSessionManager`/`AgentStateBucket` design PA-02 deliberately deferred, plus the tracker/scheduler Lambda (`app/tracker/`, not yet scaffolded) and `TasksDueIndex` GSI (`data-architecture.md` §2/§9). Prerequisite for using photos to compare progress over time (see "Carried forward" below). |
-| 18 | AF | AF-06 | External data-source tools for specialists (researched, deferred) | ☐ | AF-03, PA-01 | `stories/agent-factory.md`. Researched real candidates (Pl@ntNet, Plantix, SoilGrids, Agmarknet/data.gov.in) 2026-09-13 — **deliberately not built**; every specialist relies on the foundation model's own reasoning alone until PA-01 + a couple of real specialists surface an actual gap. Re-verify each candidate's live status/terms before picking it up (Plantix looks commercial; SoilGrids' own docs flag instability). |
-| 19 | PG | PG-07 | Verify: eval scenarios for prompt & guardrail | ◐ | PG-02, PG-04, PG-05 | Eval script built; live run **4/6 pass**. Open: (a) commit + redeploy the retuned `UnsafeChemicalUse` topic, then re-verify the safe-IPM case no longer over-blocks; (b) **PII returned `action=NONE`** — run `eval_guardrail.py --debug` and diagnose (region/feature vs input-vs-output masking). |
-| 20 | TF | TF-05 | Build with AI setup (Strands MCP + rules) | ◐ | TF-01 | `llms.txt` present, `CLAUDE.md` references it. **Gap:** `.mcp.json` (`uvx strands-agents-mcp-server`) is **missing on disk** — MCP docs server not actually wired. Re-add it. |
-| 21 | TF | TF-01 | Repository & monorepo structure | ◐ | — | Structure/config/LICENSE/README present. **Gap:** `.pre-commit-config.yaml` is **missing on disk** — local format/lint/gitleaks hooks not installed. Re-add it. |
-| 22 | TF | TF-08 | Secrets & configuration baseline | ◐ | TF-01, TF-03 | gitleaks in **CI** ✅; `.env.example`, `config.get_secret`, CDK context ✅. **Gap:** pre-commit gitleaks missing (same missing file as TF-01). |
-| 23 | PG | PG-02 | Prompt-layer safety: scope & refusal guidance | ◐ | PG-01 | Prompt exists; add explicit scope + first-line refusal framing mirroring guardrail denied topics; publish new version. |
-| 24 | TF | TF-07 | CI/CD & selective deploy (GitOps) | ◐ | TF-03 | PR lint/test/gitleaks + OIDC + path deploy to dev all working; prompts/guardrails wiring done (PG-06). **Gaps:** no prod deploy path (tag/approval gate); branch protection account-side. |
-| 25 | TF | TF-06 | Local development environment | ◐ | TF-01 | Pinned Python/Node, `tasks.ps1`, per-component requirements, setup guides present. `frontend/` is now a scaffolded Angular 19 PWA (design implemented, ADR-0010 deploys it to S3) — no formal feature stories written yet for the individual screens (see `frontend/README.md`). |
-| 26 | PG | PG-06 | Decoupled deploy & CI for prompts and guardrails | ✅ | PG-03, TF-07 | `ci.yml` has `prompts/**`+`guardrails/**` filters and deploys `foundation → prompts → guardrails → agentcore` (cold-start order). Committed + pushed; prompts & guardrails deployed standalone. |
-| 27 | PG | PG-05 | Deterministic floor: schema validation & fail-safe | ✅ | PG-01, PG-04 | `resolve_user_message` payload validation + lazy init in `agent.py`; 13 unit tests + 7 policy-limit tests + 3 CDK tests, all green. Committed. |
-| 28 | TF | TF-02 | AWS account & CLI setup (dev/prod) | ✅ | — | `verify-aws.*` + `developer-setup.md`; account-side items proven by successful deploys + Bedrock responses. |
-| 29 | TF | TF-03 | CDK bootstrap & IaC baseline | ✅ | TF-02 | `env_name`-parameterized, env-prefixed stacks, no hardcoded account IDs, synth/deploy succeed. |
-| 30 | TF | TF-04 | AgentCore CLI & runtime prerequisites | ✅ | TF-02, TF-03 | Strands + bedrock-agentcore, ARM64 Dockerfile, exec role, OTel; hello agent deployed and returned a greeting. |
-| 31 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
-| 32 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
-| 33 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
-| 34 | OB | OB-03 | Show the real plant photo (not a generic icon) | ☐ | OB-02 | Explicitly deprioritized ("will do later") — not blocking Phase 3. **Narrowed scope (2026-09-13):** its list-plants AC is already done (built during the unstoried plant-lifecycle work); remaining work is just adding a presigned **GET** `photoUrl` to `createPlant`/`listPlants` responses, sharing a `generate_download_url` helper with PA-03 (rank 14) rather than duplicating it. |
+| 14 | PA | PA-03 | Show the goal's photo(s) in Goal Detail | ✅ | PA-01 | `docs/roadmap.md` Phase 4.6. `stories/plan-approval.md`. Presigned **GET** URLs for goal-attached media via a shared `_generate_download_url` helper (later reused by OB-03, rank 36, and PA-04, rank 16). Deployed + smoke-tested live. |
+| 15 | PA | PA-02 | Conversational plan approval (chat + explicit Approve) | ✅ | PA-01 | `docs/roadmap.md` Phase 5. `stories/plan-approval.md`. Real chat (`Message` entity) + explicit, deterministic approve. **Deviation from the original event-based design:** approve is a fully synchronous Client API operation (no model reasoning needed, so no event/orchestrator round-trip) — `plan.approval.responded` was never implemented. Still does *not* build `SnapshotSessionManager`/`AgentStateBucket` session-resume — each chat turn is a fresh, stateless orchestrator invocation; true session-resume stays deferred to rank 19. Approved goals surface under Home's "Goals in progress"; a real "Needs your attention" section covers goals still awaiting approval. Deployed + smoke-tested live — a real goal correctly consulted multiple specialists and produced a real Plan. |
+| 16 | PA | PA-04 | Complete the Plant/Goal/Task/Media traceability chain, add task check-in photos | ✅ | PA-01, PA-03 | `stories/plan-approval.md`. `createGoal` propagates an optional `plantId` onto every attached `Media` record (`goal_id` always, `plant_id` if given); the orchestrator stamps that `plant_id` onto every `Task` it proposes; new `postTaskCheckin` attaches a check-in photo to a `Task` and flips it to `done` in one transaction (one check-in per task, not a repeatable log). Frontend: plant picker on Capture, photo-picker/check-in UI on `PlanTaskCardComponent`. Deployed + live-verified end to end (2026-09-13). |
+| 17 | PA | PA-05 | Check-in agent feedback + a real "How this was decided" trace | ✅ | PA-01, PA-04 | `stories/plan-approval.md`. New `task.checkin.received` event — the orchestrator treats a check-in as a third kind of turn, assesses its own photo against the plan, writes `Task.feedback`, and may revise the plan (reuses `_run_turn`/`_apply_turn_result` unchanged). Each specialist call is recorded into a trace persisted on the `Plan` item, surfaced as a real "How this was decided" section (recreated from the original fixture-only mockup). **Real fix underneath both:** `_write_plan_and_tasks` no longer wipes `done` tasks on any revision (chat- or check-in-triggered) — a genuine pre-existing correctness gap, now closed. **Found + fixed live:** `getGoalDetail` 500'd on `Decimal`-typed trace `ms` values (DynamoDB's resource-layer deserialization) — fixed with an explicit `int()` cast. Deployed + live-verified end to end, including a real plan-revision-preserves-done-tasks case (2026-09-13). |
+| 18 | — | — | *(not yet storied)* Tasks & Activity on real data | ☐ | WS-04 | `docs/roadmap.md` Phase 6 — replaces `MockTaskApi`/`MockActivityApi`. Write the story once Phase 5 ships. |
+| 19 | — | — | *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` follow-ups | ☐ | AF-05, PA-02 | `docs/roadmap.md` Phase 7.5+ — builds the `SnapshotSessionManager`/`AgentStateBucket` design PA-02 deliberately deferred, plus the tracker/scheduler Lambda (`app/tracker/`, not yet scaffolded) and `TasksDueIndex` GSI (`data-architecture.md` §2/§9). Prerequisite for using photos to compare progress over time (see "Carried forward" below). |
+| 20 | AF | AF-06 | External data-source tools for specialists (researched, deferred) | ☐ | AF-03, PA-01 | `stories/agent-factory.md`. Researched real candidates (Pl@ntNet, Plantix, SoilGrids, Agmarknet/data.gov.in) 2026-09-13 — **deliberately not built**; every specialist relies on the foundation model's own reasoning alone until PA-01 + a couple of real specialists surface an actual gap. Re-verify each candidate's live status/terms before picking it up (Plantix looks commercial; SoilGrids' own docs flag instability). |
+| 21 | PG | PG-07 | Verify: eval scenarios for prompt & guardrail | ◐ | PG-02, PG-04, PG-05 | Eval script built; live run **4/6 pass**. Open: (a) commit + redeploy the retuned `UnsafeChemicalUse` topic, then re-verify the safe-IPM case no longer over-blocks; (b) **PII returned `action=NONE`** — run `eval_guardrail.py --debug` and diagnose (region/feature vs input-vs-output masking). |
+| 22 | TF | TF-05 | Build with AI setup (Strands MCP + rules) | ◐ | TF-01 | `llms.txt` present, `CLAUDE.md` references it. **Gap:** `.mcp.json` (`uvx strands-agents-mcp-server`) is **missing on disk** — MCP docs server not actually wired. Re-add it. |
+| 23 | TF | TF-01 | Repository & monorepo structure | ◐ | — | Structure/config/LICENSE/README present. **Gap:** `.pre-commit-config.yaml` is **missing on disk** — local format/lint/gitleaks hooks not installed. Re-add it. |
+| 24 | TF | TF-08 | Secrets & configuration baseline | ◐ | TF-01, TF-03 | gitleaks in **CI** ✅; `.env.example`, `config.get_secret`, CDK context ✅. **Gap:** pre-commit gitleaks missing (same missing file as TF-01). |
+| 25 | PG | PG-02 | Prompt-layer safety: scope & refusal guidance | ◐ | PG-01 | Prompt exists; add explicit scope + first-line refusal framing mirroring guardrail denied topics; publish new version. |
+| 26 | TF | TF-07 | CI/CD & selective deploy (GitOps) | ◐ | TF-03 | PR lint/test/gitleaks + OIDC + path deploy to dev all working; prompts/guardrails wiring done (PG-06). **Gaps:** no prod deploy path (tag/approval gate); branch protection account-side. |
+| 27 | TF | TF-06 | Local development environment | ◐ | TF-01 | Pinned Python/Node, `tasks.ps1`, per-component requirements, setup guides present. `frontend/` is now a scaffolded Angular 19 PWA (design implemented, ADR-0010 deploys it to S3) — no formal feature stories written yet for the individual screens (see `frontend/README.md`). |
+| 28 | PG | PG-06 | Decoupled deploy & CI for prompts and guardrails | ✅ | PG-03, TF-07 | `ci.yml` has `prompts/**`+`guardrails/**` filters and deploys `foundation → prompts → guardrails → agentcore` (cold-start order). Committed + pushed; prompts & guardrails deployed standalone. |
+| 29 | PG | PG-05 | Deterministic floor: schema validation & fail-safe | ✅ | PG-01, PG-04 | `resolve_user_message` payload validation + lazy init in `agent.py`; 13 unit tests + 7 policy-limit tests + 3 CDK tests, all green. Committed. |
+| 30 | TF | TF-02 | AWS account & CLI setup (dev/prod) | ✅ | — | `verify-aws.*` + `developer-setup.md`; account-side items proven by successful deploys + Bedrock responses. |
+| 31 | TF | TF-03 | CDK bootstrap & IaC baseline | ✅ | TF-02 | `env_name`-parameterized, env-prefixed stacks, no hardcoded account IDs, synth/deploy succeed. |
+| 32 | TF | TF-04 | AgentCore CLI & runtime prerequisites | ✅ | TF-02, TF-03 | Strands + bedrock-agentcore, ARM64 Dockerfile, exec role, OTel; hello agent deployed and returned a greeting. |
+| 33 | PG | PG-01 | Externalize the hello agent's system prompt | ✅ | TF-04 | `PromptsStack` reads `prompts/hello-system.md`; runtime resolves by `PROMPT_NAME` with fallback; scoped IAM. Deployed. |
+| 34 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
+| 35 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
+| 36 | OB | OB-03 | Show the real plant photo (not a generic icon) | ✅ | OB-02 | `stories/garden-onboarding.md`. `createPlant`/`listPlants` now resolve a fresh presigned **GET** `photoUrl` per plant with a linked photo, reusing PA-03/PA-04's `_generate_download_url` helper rather than duplicating it. **Found + fixed a real gap along the way:** `create_plant` only ever set `Media.plant_id` (one-directional), never `Plant.media_id` — so there was no way to look a plant's photo back up at all; added `media_id` onto the `Plant` item itself (mirrors `Goal.media_ids`). Frontend: `PlantCardComponent`/`PlantRowComponent` render the real photo with an icon fallback on load error. Deployed + live-verified (2026-09-13): created a plant with a real photo, confirmed both `createPlant` and a subsequent `listPlants` resolved a working presigned url. |
 
 ## Carried forward (future epics — not yet storied)
 
-Plan proposal, photo review, and conversational approval are **now storied** (PA-01/03/02, ranks
-13-15) — no longer placeholders. Tasks/Activity-on-real-data and the session-resume/tracker epic
-are still placeholders, at ranks 16-17 — see `docs/roadmap.md` Phases 6, 7.5+. Still genuinely
+Plan proposal, photo review, conversational approval, the Plant/Goal/Task/Media traceability
+chain, and check-in feedback + the specialist trace are **now storied** (PA-01/03/02/04/05, ranks
+13-17) — no longer placeholders. Tasks/Activity-on-real-data and the session-resume/tracker epic
+are still placeholders, at ranks 18-19 — see `docs/roadmap.md` Phases 6, 7.5+. Still genuinely
 future, not yet storied: full garden/plant editing beyond OB-01/02's create-only scope, a
 multi-garden switcher, the remaining 7 specialist agents and 4 tools beyond Agronomy/Weather, the
 WebSocket push channel + live result rendering, auth (Cognito), Cedar authorization + wider
-Interventions/HITL handlers, aggregated-data/learning layer, and using photos to compare progress
-over time (needs rank 17's tracker first — PA-03, rank 14, only builds the *display* mechanism).
+Interventions/HITL handlers, aggregated-data/learning layer, and a repeated-check-in progress *log*
+over time (PA-05 already lets one check-in give feedback and optionally revise the plan; a real
+log needs rank 19's tracker first — PA-03, rank 14, only builds the *display* mechanism).
 Add as feature stories when scoped, then insert into the table with a Rank.
 
 **Explicitly deprioritized:** the **WhatsApp (and email) notification/reply channel** — in scope

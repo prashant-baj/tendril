@@ -15,6 +15,7 @@ invocation against real DynamoDB.
 """
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import garden_handler as handler
@@ -404,6 +405,7 @@ def test_create_plant_without_media(monkeypatch):
 def test_create_plant_with_media_links_it_transactionally(monkeypatch):
     fake_client = FakeClient()
     monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_table", FakeTable())
 
     event = _event(
         "POST",
@@ -423,8 +425,52 @@ def test_create_plant_with_media_links_it_transactionally(monkeypatch):
     put_item = next(i["Put"] for i in items if "Put" in i)["Item"]
     update_item = next(i["Update"] for i in items if "Update" in i)
     assert put_item["sk"]["S"] == f"PLANT#{body['plantId']}"
+    assert put_item["media_id"]["S"] == "media-1"
     assert update_item["Key"]["sk"]["S"] == "MEDIA#media-1"
     assert update_item["ExpressionAttributeValues"][":pid"]["S"] == body["plantId"]
+
+
+def test_create_plant_with_media_response_includes_photo_url(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(get_item_response={"Item": {"s3_key": "g1/media-1/leaf.jpg"}}),
+    )
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plants",
+        body={"species": "Tomato", "mediaId": "media-1"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_plant(event)
+
+    assert resp["statusCode"] == 201
+    body = json.loads(resp["body"])
+    assert (
+        body["photoUrl"]
+        == "https://example-bucket.s3.amazonaws.com/g1/media-1/leaf.jpg?presigned=1"
+    )
+
+
+def test_create_plant_with_media_omits_photo_url_when_media_missing(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    monkeypatch.setattr(handler, "_table", FakeTable())  # no Item -> media not found
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plants",
+        body={"species": "Tomato", "mediaId": "media-1"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_plant(event)
+
+    assert resp["statusCode"] == 201
+    assert "photoUrl" not in json.loads(resp["body"])
 
 
 def test_create_plant_missing_species(monkeypatch):
@@ -516,6 +562,44 @@ def test_list_plants_happy_path(monkeypatch):
         {"plantId": "p1", "species": "Tomato", "variety": "Pusa Ruby", "stage": "fruiting"},
         {"plantId": "p2", "species": "Chilli", "variety": "", "stage": "new"},
     ]
+
+
+def test_list_plants_resolves_photo_url_for_plants_with_media(monkeypatch):
+    fake_table = FakeTable(
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "PLANT#p1",
+                    "plant_id": "p1",
+                    "species": "Tomato",
+                    "stage": "new",
+                    "media_id": "media-1",
+                },
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "PLANT#p2",
+                    "plant_id": "p2",
+                    "species": "Chilli",
+                    "stage": "new",
+                },
+            ]
+        },
+        get_item_responses={"MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/leaf.jpg"}}},
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+
+    event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
+    resp = handler.list_plants(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert (
+        body[0]["photoUrl"]
+        == "https://example-bucket.s3.amazonaws.com/g1/media-1/leaf.jpg?presigned=1"
+    )
+    assert "photoUrl" not in body[1]
 
 
 def test_list_plants_empty(monkeypatch):
@@ -635,8 +719,8 @@ def test_create_goal_happy_path_without_media(monkeypatch):
 
 
 def test_create_goal_happy_path_with_media_ids(monkeypatch):
-    fake_table = FakeTable()
-    monkeypatch.setattr(handler, "_table", fake_table)
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
     monkeypatch.setattr(handler, "_events", FakeEvents())
 
     event = _event(
@@ -649,7 +733,54 @@ def test_create_goal_happy_path_with_media_ids(monkeypatch):
     resp = handler.create_goal(event)
 
     assert resp["statusCode"] == 202
-    assert fake_table.put_calls[0]["media_ids"] == ["media-1", "media-2"]
+    body = json.loads(resp["body"])
+
+    assert len(fake_client.calls) == 1
+    items = fake_client.calls[0]
+    assert len(items) == 3  # 1 Put (the goal) + 2 Update (one per media_id)
+    put_item = next(i["Put"] for i in items if "Put" in i)["Item"]
+    assert put_item["media_ids"]["L"] == [{"S": "media-1"}, {"S": "media-2"}]
+    update_items = [i["Update"] for i in items if "Update" in i]
+    updated_sks = {u["Key"]["sk"]["S"] for u in update_items}
+    assert updated_sks == {"MEDIA#media-1", "MEDIA#media-2"}
+    for u in update_items:
+        # No plantId was given on this goal — media only learns goal_id, not plant_id.
+        assert u["ExpressionAttributeValues"][":gid"]["S"] == body["goalId"]
+        assert ":pid" not in u["ExpressionAttributeValues"]
+
+
+def test_create_goal_with_plant_id_propagates_to_media(monkeypatch):
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help", "mediaIds": ["media-1"], "plantId": "plant-1"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+
+    assert resp["statusCode"] == 202
+    items = fake_client.calls[0]
+    put_item = next(i["Put"] for i in items if "Put" in i)["Item"]
+    assert put_item["plant_id"]["S"] == "plant-1"
+    update_item = next(i["Update"] for i in items if "Update" in i)
+    assert update_item["ExpressionAttributeValues"][":pid"]["S"] == "plant-1"
+
+
+def test_create_goal_plant_id_must_be_a_string():
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "help", "plantId": 123},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.create_goal(event)
+    assert resp["statusCode"] == 400
 
 
 def test_create_goal_missing_description(monkeypatch):
@@ -990,6 +1121,376 @@ def test_approve_plan_missing_path_params():
     event = _event("POST", "/gardens/{gardenId}/plans/{planId}/approve", path_params=None)
     resp = handler.approve_plan(event)
     assert resp["statusCode"] == 400
+
+
+# --- post_task_checkin (images-completion: Plant/Goal/Task/Media traceability) -------------
+
+
+def test_post_task_checkin_happy_path_no_plant(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1", "goal_id": "goal-1"}},
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
+        }
+    )
+    fake_client = FakeClient()
+    fake_events = FakeEvents()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_events", fake_events)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.post_task_checkin(event)
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == {"taskId": "task-1", "status": "done"}
+
+    assert len(fake_events.put_calls) == 1
+    published = fake_events.put_calls[0][0]
+    assert published["DetailType"] == "task.checkin.received"
+    assert json.loads(published["Detail"]) == {
+        "gardenId": "g1",
+        "goalId": "goal-1",
+        "taskId": "task-1",
+    }
+
+    assert len(fake_client.calls) == 1
+    items = fake_client.calls[0]
+    task_update = next(
+        i["Update"] for i in items if i["Update"]["Key"]["sk"]["S"] == "TASK#goal-1#task-1"
+    )
+    media_update = next(
+        i["Update"] for i in items if i["Update"]["Key"]["sk"]["S"] == "MEDIA#media-1"
+    )
+    assert task_update["ExpressionAttributeValues"][":status"]["S"] == "done"
+    assert task_update["ExpressionAttributeValues"][":mid"]["S"] == "media-1"
+    assert media_update["ExpressionAttributeValues"][":tid"]["S"] == "task-1"
+    assert media_update["ExpressionAttributeValues"][":gid"]["S"] == "goal-1"
+    assert ":pid" not in media_update["ExpressionAttributeValues"]
+
+
+def test_post_task_checkin_propagates_plant_id_to_media(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "TASK#goal-1#task-1": {
+                "Item": {"task_id": "task-1", "goal_id": "goal-1", "plant_id": "plant-1"}
+            },
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
+        }
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.post_task_checkin(event)
+
+    assert resp["statusCode"] == 200
+    media_update = next(
+        i["Update"]
+        for i in fake_client.calls[0]
+        if i["Update"]["Key"]["sk"]["S"] == "MEDIA#media-1"
+    )
+    assert media_update["ExpressionAttributeValues"][":pid"]["S"] == "plant-1"
+
+
+def test_post_task_checkin_task_not_found(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "missing"},
+    )
+    resp = handler.post_task_checkin(event)
+    assert resp["statusCode"] == 404
+
+
+def test_post_task_checkin_media_not_found(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={"TASK#goal-1#task-1": {"Item": {"task_id": "task-1"}}},
+        get_item_response={},  # MEDIA# lookup falls through to this default -> not found
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "missing-media"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.post_task_checkin(event)
+    assert resp["statusCode"] == 404
+
+
+def test_post_task_checkin_missing_media_id():
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.post_task_checkin(event)
+    assert resp["statusCode"] == 400
+
+
+def test_post_task_checkin_missing_path_params():
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params=None,
+    )
+    resp = handler.post_task_checkin(event)
+    assert resp["statusCode"] == 400
+
+
+def test_post_task_checkin_event_publish_failure_still_returns_200(monkeypatch):
+    # Deliberately NOT folded into the transaction's try/except (PA-05): the check-in's core
+    # contract (done + photo linked) already committed by the time the event publish runs, so
+    # losing just the bonus agent-feedback event shouldn't turn a successful check-in into a 500.
+    fake_table = FakeTable(
+        get_item_responses={
+            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1", "goal_id": "goal-1"}},
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    monkeypatch.setattr(handler, "_events", FakeEvents(raise_on_put=RuntimeError("boom")))
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.post_task_checkin(event)
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == {"taskId": "task-1", "status": "done"}
+
+
+def test_handler_routes_post_task_checkin(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1"}},
+            "MEDIA#media-1": {"Item": {"s3_key": "k"}},
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
+        body={"mediaId": "media-1"},
+        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+
+# --- get_goal_detail: task media/plantId resolution (images completion) --------------------
+
+
+def test_get_goal_detail_resolves_task_media_and_plant_id(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}},
+            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
+        },
+        query_responses=[
+            {
+                "Items": [
+                    {
+                        "task_id": "task-1",
+                        "title": "Water",
+                        "detail": "Deeply",
+                        "scope": "plant",
+                        "status": "done",
+                        "plant_id": "plant-1",
+                        "media_id": "media-1",
+                    }
+                ]
+            },
+            {"Items": []},
+        ],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    task = body["tasks"][0]
+    assert task["plantId"] == "plant-1"
+    assert task["media"]["mediaId"] == "media-1"
+    assert "g1/media-1/photo.jpg" in task["media"]["downloadUrl"]
+
+
+def test_get_goal_detail_resolves_task_feedback(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}},
+        },
+        query_responses=[
+            {
+                "Items": [
+                    {
+                        "task_id": "task-1",
+                        "title": "Water",
+                        "detail": "Deeply",
+                        "scope": "plant",
+                        "status": "done",
+                        "feedback": "Looking good, keep it up!",
+                    }
+                ]
+            },
+            {"Items": []},
+        ],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    body = json.loads(resp["body"])
+    assert body["tasks"][0]["feedback"] == "Looking good, keep it up!"
+
+
+def test_get_goal_detail_omits_task_feedback_when_absent(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}},
+        },
+        query_responses=[
+            {
+                "Items": [
+                    {
+                        "task_id": "task-1",
+                        "title": "Water",
+                        "detail": "Deeply",
+                        "scope": "plant",
+                        "status": "pending",
+                    }
+                ]
+            },
+            {"Items": []},
+        ],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    body = json.loads(resp["body"])
+    assert "feedback" not in body["tasks"][0]
+
+
+def test_get_goal_detail_resolves_plan_trace(monkeypatch):
+    # "ms" is a Decimal, not a plain int (real boto3 resource-layer regression: DynamoDB's Table
+    # deserializes Number attributes as decimal.Decimal, which json.dumps can't serialize on its
+    # own — found live, get_goal_detail 500'd the moment a plan actually had a trace).
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}},
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green",
+                    "status": "PlanProposed",
+                    "trace": [
+                        {"agent": "agronomy", "says": "Nitrogen is high.", "ms": Decimal(2100)},
+                        {
+                            "agent": "orchestrator",
+                            "says": "Feed change recommended.",
+                            "ms": Decimal(900),
+                            "is_orchestrator": True,
+                        },
+                    ],
+                }
+            },
+        },
+        query_responses=[{"Items": []}, {"Items": []}],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    body = json.loads(resp["body"])
+    trace = body["plan"]["trace"]
+    assert trace[0] == {
+        "agent": "agronomy",
+        "says": "Nitrogen is high.",
+        "ms": 2100,
+        "isOrchestrator": False,
+    }
+    assert trace[1] == {
+        "agent": "orchestrator",
+        "says": "Feed change recommended.",
+        "ms": 900,
+        "isOrchestrator": True,
+    }
+
+
+def test_get_goal_detail_omits_plan_trace_when_absent(monkeypatch):
+    fake_table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": {"goal_id": "goal-1", "description": "help"}},
+            "PLAN#goal-1": {
+                "Item": {
+                    "plan_id": "goal-1",
+                    "goal_id": "goal-1",
+                    "success_criteria": "Leaves green",
+                    "status": "PlanProposed",
+                }
+            },
+        },
+        query_responses=[{"Items": []}, {"Items": []}],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "GET",
+        "/gardens/{gardenId}/goals/{goalId}",
+        path_params={"gardenId": "g1", "goalId": "goal-1"},
+    )
+    resp = handler.get_goal_detail(event)
+
+    body = json.loads(resp["body"])
+    assert "trace" not in body["plan"]
 
 
 # --- contract test: responses conform to openapi.yaml's JSON Schema (WS-03) ----
