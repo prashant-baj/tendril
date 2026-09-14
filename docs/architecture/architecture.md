@@ -75,7 +75,7 @@ flowchart LR
   ORCH --> DDB
   SPEC --> MEM["Per-garden memory<br/>(Bedrock Knowledge Base)"]
   SCHED["Tracker<br/>(plain Lambda, scheduled)"] -->|reads TasksDueIndex| DDB
-  SCHED -. followup.due .-> EB
+  SCHED -. followup due .-> EB
   ORCH -->|writes nudge directly into<br/>the goal's chat thread| DDB
   U -->|polls| API
   GRD["Bedrock Guardrails"] -. applied per call .-> SPEC
