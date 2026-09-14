@@ -859,9 +859,9 @@ def test_handle_goal_message_received_revises_plan(monkeypatch):
 
     handler.handle_goal_message_received({"gardenId": "g1", "goalId": "goal-1"})
 
-    # Phase 7.5+: the prompt is just the newest message's text, not a full-transcript restatement
-    # (the resumed session already has the goal description/plan/prior history).
-    assert FakeAgent.last_prompt == "actually water it less often"
+    # The prompt is a full transcript restatement (goal + plan + tasks + message history) on top
+    # of the already-resumed session (module docstring, SR-02) — the newest message is in there.
+    assert "actually water it less often" in FakeAgent.last_prompt
     assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
     statuses = [c["ExpressionAttributeValues"][":status"] for c in fake_table.update_calls]
     assert statuses == ["PlanProposed"]
@@ -964,12 +964,12 @@ def test_handle_task_checkin_received_writes_task_feedback(monkeypatch):
     assert len(feedback_calls) == 1
     assert feedback_calls[0]["ExpressionAttributeValues"][":f"] == "Looking good, keep it up!"
 
-    # Phase 7.5+: the prompt is the fixed check-in framing (naming the task), not a full
-    # transcript restatement — and no message-history query happens for this handler at all
-    # (only the one TASK# query, to find the checked-in task).
+    # The prompt is a full transcript restatement ending in the fixed check-in framing (naming
+    # the task) — two query calls: _load_tasks (finds the checked-in task) and _load_messages
+    # (the prior conversation history restated on top of the resumed session).
     assert "Water deeply" in FakeAgent.last_prompt
     assert "Soak the soil" in FakeAgent.last_prompt
-    assert len(fake_table.query_calls) == 1
+    assert len(fake_table.query_calls) == 2
 
 
 def test_handle_task_checkin_received_with_plan_revision_preserves_checked_in_task(monkeypatch):

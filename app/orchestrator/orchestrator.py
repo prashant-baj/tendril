@@ -18,13 +18,12 @@ Client API's synchronous request path (ADR-0004). Four entry points:
 The first three are "just a turn in an ongoing conversation." `_build_orchestrator_agent` attaches
 a real `SnapshotSessionManager` (`session_id=goal_id`, Phase 7.5+ — see its own docstring) so the
 resumed conversation history survives across Lambda invocations, closing the gap
-`docs/stories/plan-approval.md`'s PA-02 Context note deliberately deferred. Each handler's prompt
-is now just the genuinely new information for that turn — the goal's description (first turn),
-the single newest `Message` (chat turn — the resumed session already has every prior one), or a
-fixed check-in framing naming the task (check-in turn) — not a full transcript restatement
-(`docs/stories/tracker-scheduler.md`'s SR-02/SR-03). A `Plan`/`Task`/`Message` read still happens
-where a handler needs a structured-state *fact* the resumed session can't answer (e.g. "does a
-Plan already exist"), never to rebuild conversation text.
+`docs/stories/plan-approval.md`'s PA-02 Context note deliberately deferred. Each handler still
+also reconstructs a per-turn prompt from DynamoDB (the goal, current `Plan`/`Task`s, and the full
+`Message` history) — restating this on top of an already-resumed session is deliberately
+redundant for now, an intermediate rollout step (`docs/stories/tracker-scheduler.md`'s SR-02)
+verifying resume itself works correctly before SR-03 minimizes each turn's prompt to just what's
+new.
 
 Each turn runs in two steps (`_run_turn`): first, a normal call so the model can call whichever
 specialist tools are relevant (agents-as-tools, ADR-0012 — which specialists exist comes from
@@ -296,6 +295,54 @@ def _load_latest_message(garden_id: str, goal_id: str) -> dict[str, Any] | None:
     )
     items = resp.get("Items", [])
     return items[0] if items else None
+
+
+def _load_messages(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
+    """Every Message for this goal — `GOALMSG#{goal_id}#{iso_ts}#{id}` sk already sorts
+    chronologically (data-architecture.md §2); the explicit sort here only guards against a
+    fake/non-ordering table in tests, mirroring `garden_handler.py::get_goal_detail`'s identical
+    pattern. Restated into this turn's prompt by `_format_transcript` on top of the
+    already-resumed session — see that function's docstring for why."""
+    resp = _get_table().query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"GOALMSG#{goal_id}#")
+    )
+    return sorted(resp.get("Items", []), key=lambda m: m.get("sk", ""))
+
+
+def _format_transcript(
+    goal: dict[str, Any],
+    plan: dict[str, Any] | None,
+    tasks: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    *,
+    checkin_task: dict[str, Any] | None = None,
+) -> str:
+    """Reconstructs this turn's prompt from DynamoDB — the goal, the current Plan/Tasks (if any),
+    and the full Message history so far. Restating this on top of an already-resumed session is
+    deliberately redundant for now (module docstring, SR-02) — an intermediate rollout step
+    verifying resume itself works correctly before a later step (SR-03) minimizes each turn's
+    prompt to just what's new. Ends with whatever is genuinely new for this turn: the fixed
+    check-in framing (`_build_checkin_prompt`) when one is in progress, or an instruction to
+    respond to the latest message already included in the transcript above."""
+    lines = [f"Goal: {goal.get('description', '')}"]
+    if plan:
+        lines.append(f"Current plan — success criteria: {plan.get('success_criteria', '')}")
+    if tasks:
+        lines.append("Current tasks:")
+        for t in tasks:
+            lines.append(
+                f"- [{t.get('status', 'pending')}] {t.get('title', '')}: {t.get('detail', '')}"
+            )
+    if messages:
+        lines.append("Conversation so far:")
+        for m in messages:
+            lines.append(f"{m.get('role', 'user')}: {m.get('content', '')}")
+    if checkin_task is not None:
+        lines.append(_build_checkin_prompt(checkin_task))
+    else:
+        lines.append("Respond to the gardener's latest message above.")
+    return "\n".join(lines)
 
 
 def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
@@ -644,22 +691,22 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
         logger.error("goal_not_found garden_id=%s goal_id=%s", garden_id, goal_id)
         return
 
-    # Phase 7.5+: the resumed session already has every prior turn — `plan` is only read here to
-    # decide `synthesize_fallback_plan` (a structured-state fact the session can't answer), not to
-    # rebuild a transcript. Only the just-arrived message is genuinely new input for this turn.
     plan = _load_plan(garden_id, goal_id)
-    latest_message = _load_latest_message(garden_id, goal_id)
-    prompt = (latest_message or {}).get("content", "")
+    tasks = _load_tasks(garden_id, goal_id)
+    # Already includes the newest user message — the Client API writes it before publishing this
+    # event, the same ordering create_goal already relies on for goal.submitted.
+    messages = _load_messages(garden_id, goal_id)
 
     image = _resolve_image(garden_id, goal.get("media_ids") or [])
     image_url, image_format = image if image else (None, None)
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
+    transcript = _format_transcript(goal, plan, tasks, messages)
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, prompt, synthesize_fallback_plan=plan is None)
+        turn = _run_turn(agent, transcript, synthesize_fallback_plan=plan is None)
         logger.info(
             "chat_turn_result garden_id=%s goal_id=%s has_plan=%s reply=%r",
             garden_id,
@@ -696,9 +743,7 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
         logger.error("goal_not_found garden_id=%s goal_id=%s", garden_id, goal_id)
         return
 
-    # Phase 7.5+: only the check-in's own task lookup is needed (a structured-state fact) — the
-    # resumed session already has the full prior conversation/plan, so no `plan`/message-history
-    # read is needed here at all.
+    plan = _load_plan(garden_id, goal_id)
     tasks = _load_tasks(garden_id, goal_id)
     checkin_task = next((t for t in tasks if t.get("task_id") == task_id), None)
     if not checkin_task:
@@ -706,6 +751,7 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
             "checkin_task_not_found garden_id=%s goal_id=%s task_id=%s", garden_id, goal_id, task_id
         )
         return
+    messages = _load_messages(garden_id, goal_id)
 
     image = _resolve_image(
         garden_id, [checkin_task["media_id"]] if checkin_task.get("media_id") else []
@@ -714,10 +760,11 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
+    transcript = _format_transcript(goal, plan, tasks, messages, checkin_task=checkin_task)
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, _build_checkin_prompt(checkin_task), synthesize_fallback_plan=False)
+        turn = _run_turn(agent, transcript, synthesize_fallback_plan=False)
         logger.info(
             "checkin_feedback_result garden_id=%s goal_id=%s task_id=%s has_plan=%s reply=%r",
             garden_id,

@@ -318,4 +318,5 @@ convention alone:
 - [ADR-0004 (backend API, serverless & storage)](./ADRs/0004-backend-api-serverless-storage.md)
 - [ADR-0012 (orchestrator + declarative agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)
 - [Strands capability mapping](./strands-capability-mapping.md) (session/memory/context mechanics)
+- [ADR-0015 (IoT-driven autonomous actuation & Strands-native HITL, future state — Proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md)
 - [`architecture.md`](./architecture.md) §2 (domain model), §4 (APIs)

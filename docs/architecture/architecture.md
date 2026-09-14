@@ -12,22 +12,23 @@ A single **Agent Template** (one codebase) is specialized into many agents purel
 
 ```mermaid
 flowchart LR
-  T["Agent Template<br/>(single codebase)"]
-  CFG["Config per agent:<br/>model · tools · prompt/skill · guardrails"]
+  T["Agent Template<br/>(single codebase, agents/hello_agent/)"]
+  CFG["Registry entry per agent:<br/>agents/registry/*.json —<br/>model · tools · prompt · guardrail · memory"]
   T --> CFG
-  CFG --> A1["Agronomy Agent"]
-  CFG --> A2["Pest / Disease Agent"]
+  CFG --> A1["Vision Agent"]
+  CFG --> A2["Agronomy Agent"]
   CFG --> A3["Irrigation Agent"]
-  CFG --> A4["Pruning Agent"]
-  CFG --> A5["Beautification /<br/>Landscaping Agent"]
-  CFG --> A6["... Agent N"]
-  PM["Prompts &amp; Skills<br/>Bedrock Prompt Mgmt / S3"] -. injected .-> A1
+  CFG --> A4["Pest / Disease Agent"]
+  CFG --> A5["Pruning Agent"]
+  PM["Prompts &amp; Guardrails<br/>Bedrock Prompt Mgmt / Guardrails"] -. injected .-> A1
   PM -.-> A2
   PM -.-> A3
   PM -.-> A4
   PM -.-> A5
-  PM -.-> A6
 ```
+
+5 specialists are deployed today (one AgentCore runtime each, all sharing the one template
+codebase above); adding a 6th is a new `agents/registry/*.json` entry, never new agent code.
 
 The specialized agents, the model-driven orchestrator, the tool bindings, and the domain prompts are composed into an **Application** and deployed via **AWS CDK** to **dev** and **prod**.
 
@@ -62,34 +63,35 @@ At runtime there is **no fixed execution order**. The orchestrator (Strands) dec
 
 ```mermaid
 flowchart LR
-  U["User<br/>(Web app; WhatsApp deprioritized)"] --> API["Client API<br/>(API Gateway + Lambda,<br/>OpenAPI contract-first)"]
-  API --> ING["Garden / Ingestion Service"]
-  ING --> S3[("S3<br/>media + storage")]
-  ING --> DDB[("DynamoDB<br/>domain state + events")]
-  ING -. async event .-> EB["EventBridge"]
+  U["User<br/>(Angular PWA)"] --> API["Client API<br/>(API Gateway + Lambda,<br/>OpenAPI contract-first)"]
+  API --> S3[("S3<br/>media")]
+  API --> DDB[("DynamoDB<br/>domain state + events")]
+  API -. async event .-> EB["EventBridge"]
   EB --> ORCH["Orchestrator<br/>(Strands on Lambda)"]
   ORCH -->|InvokeAgentRuntime| SPEC["Specialist Agents<br/>(AgentCore runtimes,<br/>declarative registry)"]
-  ORCH --> TOOLS["Tool APIs (MCP / REST)"]
+  ORCH --> TOOLS["Tool APIs"]
   SPEC --> TOOLS
   TOOLS --> WX["Weather"]
-  TOOLS --> VIS["Plant-ID / Vision"]
-  TOOLS --> MKT["Nursery / Market"]
   ORCH --> DDB
-  ORCH --> MEM["Memory<br/>(Bedrock KB)"]
-  SCHED["Tracker / Scheduler<br/>(EventBridge + Lambda)"] --> EB
-  ORCH --> NOTIF["Notification Service"]
-  NOTIF --> U
-  ORCH -. push .-> WS["WebSocket API"]
-  WS --> U
-  GRD["Bedrock Guardrails"] -. applied .-> ORCH
-  GRD -.-> SPEC
-  OTEL["OpenTelemetry / X-Ray / CloudWatch"] -. observes .-> ORCH
+  SPEC --> MEM["Per-garden memory<br/>(Bedrock Knowledge Base)"]
+  SCHED["Tracker<br/>(plain Lambda, scheduled)"] -->|reads TasksDueIndex| DDB
+  SCHED -. followup.due .-> EB
+  ORCH -->|writes nudge directly into<br/>the goal's chat thread| DDB
+  U -->|polls| API
+  GRD["Bedrock Guardrails"] -. applied per call .-> SPEC
+  CW["CloudWatch Logs<br/>(X-Ray: opt-in, off by default)"] -. observes .-> ORCH
 ```
 
 The orchestrator is **Lambda-hosted and async, event-triggered** — it runs off the Client API's
 request path (matching ADR-0004's push-based design for long-running agent work), not on
 AgentCore. Specialist agents remain on AgentCore, invoked dynamically by the orchestrator's
 Strands agent loop via `InvokeAgentRuntime` (see [ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)).
+
+**No push channel exists yet** — no WebSocket, no WhatsApp/SMS/email, no web-push. A proactive
+follow-up is a plain chat message the Tracker/orchestrator write directly into the goal's
+existing message thread; the gardener sees it the next time the app polls or is opened. A
+`ConnectionsTable` for a future WebSocket channel is provisioned (`infra/stacks/foundation_stack.py`)
+but nothing writes to or reads from it yet — a genuine, tracked gap, not a design choice.
 
 ---
 
@@ -105,23 +107,19 @@ erDiagram
   PLANT ||--o{ GOAL : "may scope"
   GOAL ||--|| PLAN : "results in"
   PLAN ||--o{ TASK : "breaks into"
-  TASK ||--o{ TRACKING : "tracked by"
-  GOAL ||--o{ TRACKING : "progress"
+  GOAL ||--o{ MESSAGE : "reasoning thread"
   GARDEN ||--o{ MEDIA : "photos"
   PLANT ||--o{ MEDIA : "photos"
-  TASK ||--o{ NOTIFICATION : "triggers"
+  TASK ||--o| MEDIA : "check-in photo"
   GARDEN ||--o{ EVENT : "logs"
   USER {
     string user_id
-    string channel
-    string locale
   }
   GARDEN {
     string garden_id
     string name
     string vision
     string geolocation
-    string climate_zone
   }
   PLANT {
     string plant_id
@@ -145,22 +143,30 @@ erDiagram
     string scope
     string status
     date due_date
+    string feedback
   }
-  TRACKING {
-    string tracking_id
-    date timestamp
-    string observation
-    string decision
+  MESSAGE {
+    string message_id
+    string role
+    string content
+    date created_at
   }
   EVENT {
     string event_id
     string type
-    date timestamp
+    date created_at
   }
 ```
 
 - **Scope of a Task** is either **plant-level** or **garden-level** (part or whole garden).
-- **EVENT** is the capture-first log that feeds the future data flywheel.
+- **EVENT** is the capture-first activity-tab log (`goal.submitted`, `plan.approved`,
+  `task.checkin`, `task.followup_due`, ...).
+- **MESSAGE** is the per-goal reasoning thread the orchestrator resumes across turns (initial
+  diagnosis, chat replies, proactive nudges, check-in feedback) — it is the real mechanism behind
+  what earlier drafts of this doc called "tracking."
+- `USER` today is just the anonymous `X-User-Id` header value (ADR-0004) — no channel/locale
+  fields are actually stored anywhere; there is no separate User record, only the
+  `USER#{id}/GARDEN#{id}` ownership index (`data-architecture.md` §2).
 
 ---
 
@@ -168,16 +174,19 @@ erDiagram
 
 | Service | Responsibility | Tech | Deploy target |
 |---------|----------------|------|---------------|
-| **Client API** | User-facing entry: gardens, plants, photos, goals, plan approval, status — **OpenAPI 3.x contract-first** ([ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md)) | API Gateway + Lambda | Lambda |
-| **Garden / Ingestion** | Create/describe gardens; accept photos & metadata; build initial context; emits async events | Lambda + S3 | Lambda |
-| **Orchestrator** | Model-driven decomposition & composition of specialists/tools; async, event-triggered ([ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)) | Strands | **Lambda** |
-| **Specialist Agents** | Domain expertise (agronomy, pest, disease, irrigation, fertilizer, pruning, weather, beautification, landscaping); declared in `agents/registry/*.json` | Strands (factory) | AgentCore |
-| **Tracker / Scheduler** | Drive the outcome loop: due follow-ups, reminders, re-evaluation | EventBridge + Lambda | Lambda |
-| **Notification** | Outbound reminders & inbound replies — in-app/WebSocket + web-push first; WhatsApp/email are in scope but **deprioritized** to a future backlog item (ADR-0001 refinement, 2026-09-12) | Lambda + provider | Lambda |
-| **Media / Vision** | Plant-ID and photo diagnosis (specialized model or API tool) | Bedrock / external model | Tool API |
-| **Memory / Knowledge** | Semantic garden history & horticultural knowledge | Bedrock Knowledge Bases | Managed |
-| **Persistence** | Structured domain state + event log | DynamoDB | Managed |
-| **Frontend** | Angular PWA — 6 screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
+| **Client API** | The one Lambda (`app/api/garden_handler.py`) behind every user-facing endpoint: gardens, plants, media, goals, messages, check-ins, plan approval, tasks, activity — **OpenAPI 3.x contract-first** ([ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md)) | API Gateway + Lambda | Lambda |
+| **Orchestrator** | Model-driven decomposition & composition of specialists/tools; async, event-triggered ([ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)) | Strands | Lambda |
+| **Specialist Agents** | Domain expertise — **5 deployed today**: vision, agronomy, irrigation, pest/disease, pruning; declared in `agents/registry/*.json` | Strands (factory) | AgentCore |
+| **Tracker / Scheduler** | Plain boto3 Lambda (no model, no Strands) — polls a DynamoDB GSI for overdue tasks and emits `followup.due`; the orchestrator's `handle_followup_due` then writes a deterministic nudge straight into the goal's chat thread (no external send) | EventBridge Scheduler + Lambda | Lambda |
+| **Tool APIs** | Weather (real, Lambda behind an IAM-authenticated Function URL) — the only tool deployed today; the pattern is designed to add more without touching agent code | Lambda | Lambda |
+| **Memory / Knowledge** | Real per-garden memory — a Bedrock Knowledge Base (S3 Vectors backend) each specialist retrieves/ingests against, wired into the shared agent template, not the orchestrator | Bedrock Knowledge Bases | Managed |
+| **Persistence** | Structured domain state + event/message log, single table | DynamoDB | Managed |
+| **Frontend** | Angular PWA — 8 routed screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
+
+**Not built yet** (documented gaps, not oversights): a Notification service and any push channel
+(WebSocket/WhatsApp/email/web-push) — today every follow-up is a chat message the gardener sees
+on their next poll, never sent anywhere externally. A `ConnectionsTable` for a future WebSocket
+channel exists in `foundation_stack.py` but nothing reads or writes it yet.
 
 ---
 
@@ -191,26 +200,35 @@ importing it directly, and the frontend's TypeScript types are generated from th
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/gardens` | POST | Create a named garden (vision, geolocation) |
-| `/gardens/{id}` | GET/PATCH | Read/update garden context |
-| `/gardens/{id}/plants` | POST/GET | Add / list plants (with photos) |
-| `/gardens/{id}/media` | POST | Upload a plant/garden photo |
-| `/gardens/{id}/goals` | POST | Submit a concern / expectation / wish |
-| `/plans/{id}/approve` | POST | Human-in-the-loop plan approval |
-| `/gardens/{id}/tasks` | POST/GET | Create / list plant- or garden-level tasks |
-| `/gardens/{id}/status` | GET | Progress, upcoming follow-ups, history |
+| `/gardens` | POST, GET | Create a garden (name, geolocation); list the caller's gardens |
+| `/gardens/{gardenId}` | GET | Read garden context |
+| `/gardens/{gardenId}/weather` | GET | Real current weather for the garden's geolocation |
+| `/gardens/{gardenId}/media` | POST | Get a presigned upload URL + create the Media record |
+| `/gardens/{gardenId}/plants` | POST, GET | Add / list plants (with photos) |
+| `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant |
+| `/gardens/{gardenId}/goals` | POST, GET | Submit an issue (async — 202, orchestrator decomposes it); list goals |
+| `/gardens/{gardenId}/goals/{goalId}` | GET | Goal + plan + tasks + media + full message thread |
+| `/gardens/{gardenId}/goals/{goalId}/messages` | POST | Send a chat message on an existing goal (async) |
+| `/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins` | POST | Attach a check-in photo, mark the task done (async feedback) |
+| `/gardens/{gardenId}/plans/{planId}/approve` | POST | Human-in-the-loop plan approval (sync, no model call) |
+| `/gardens/{gardenId}/tasks` | GET | All tasks across every goal in the garden |
+| `/gardens/{gardenId}/activity` | GET | The garden's event timeline, newest first |
+
+No `PATCH`/update endpoints and no `/status` endpoint exist — garden/plan/task status is read
+back through the endpoints above, never written directly by the client. Full request/response
+shapes are the source-of-truth `app/api/openapi.yaml`, not this table.
 
 ### 4.2 Tool APIs (agent-facing, "tools are APIs")
 
-| Tool | Purpose | Consumer |
-|------|---------|----------|
-| Weather | Forecast & climate for the garden's geolocation | Orchestrator, weather/irrigation/pruning agents |
-| Plant-ID / Vision | Species ID and disease/pest diagnosis from photos | Diagnosis agent |
-| Nursery / Market | Availability & prices of inputs/plants | Landscaping / procurement |
-| Notification | Send reminders, collect replies | Tracker, orchestrator |
-| Knowledge search | Retrieve grounded horticultural references | All specialists |
+| Tool | Purpose | Consumer | Status |
+|------|---------|----------|--------|
+| Weather | Forecast for the garden's geolocation, called via an IAM-authenticated Lambda Function URL | vision, irrigation, and pruning agents (per `agents/registry/*.json`'s per-agent `tools` list) | **Built** |
+| Knowledge base retrieve/ingest | Per-garden memory | Every specialist (`memory.enabled: true` in its registry entry) | **Built** — via the Strands `MemoryManager`/`BedrockKnowledgeBaseStore` in the shared agent template, not a separate "tool" the model calls explicitly |
 
-All tools sit behind a uniform contract (MCP / REST) so they are discoverable and swappable.
+Species ID and pest/disease diagnosis from a photo is **not** a separate tool call — the vision
+specialist receives the image directly as multimodal model input. A Nursery/Market pricing tool
+and a Notification-send tool are natural future additions (same uniform-contract pattern), but
+neither exists today.
 
 ### 4.3 Orchestrator ↔ Specialist invocation
 
@@ -252,33 +270,29 @@ Adding a specialty = a new prompt + a config entry. Adding a use case = a new co
 ```mermaid
 flowchart TB
   subgraph Client
-    FE["Frontend PWA<br/>(S3 static website)"]
+    FE["Frontend PWA<br/>(S3 static website, HTTP only —<br/>CloudFront is the documented upgrade path)"]
   end
   subgraph Edge
     APIGW["API Gateway<br/>(OpenAPI contract-first)"]
-    WSAPI["API Gateway WebSocket"]
-    WA["WhatsApp / Email Gateway<br/>(deprioritized — future)"]
   end
   subgraph Compute
-    L["Lambda:<br/>ingestion · orchestrator · tracker · notifier"]
-    AC["AgentCore:<br/>specialist agents<br/>(declarative registry)"]
+    L["Lambda:<br/>Client API · orchestrator · tracker"]
+    AC["AgentCore:<br/>5 specialist agents<br/>(declarative registry)"]
   end
   subgraph Data
-    DDB[("DynamoDB")]
-    S3[("S3")]
-    KB["Bedrock Knowledge Bases"]
+    DDB[("DynamoDB<br/>single table")]
+    S3[("S3<br/>media")]
+    KB["Bedrock Knowledge Bases<br/>(per-garden memory)"]
   end
   subgraph AI
     BR["Bedrock:<br/>models · Guardrails · Prompt Mgmt"]
   end
   subgraph Ops
-    EB["EventBridge Scheduler"]
-    CW["CloudWatch / X-Ray"]
+    EB["EventBridge<br/>Rules + Scheduler"]
+    CW["CloudWatch Logs<br/>(X-Ray: opt-in, off by default)"]
   end
-  FE --> APIGW
-  FE <--> WSAPI
+  FE -->|polls| APIGW
   APIGW --> L
-  WA --> L
   EB --> L
   L -->|InvokeAgentRuntime| AC
   L --> BR
@@ -287,14 +301,14 @@ flowchart TB
   AC --> DDB
   L --> S3
   AC --> KB
-  L --> WSAPI
   L --> CW
   AC --> CW
 ```
 
-Orchestrator and specialists are separate compute targets: **Lambda** (ingestion, orchestrator,
-tracker, notifier) calls **AgentCore** (specialist agents only) via `InvokeAgentRuntime`
-([ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)).
+Orchestrator and specialists are separate compute targets: **Lambda** (Client API, orchestrator,
+tracker) calls **AgentCore** (specialist agents only) via `InvokeAgentRuntime`
+([ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)). There is no
+WebSocket/push edge component — the frontend polls the Client API (see §7.1's note).
 
 ### 6.2 Delivery view (GitOps + selective deploy)
 
@@ -312,7 +326,10 @@ flowchart LR
 ### 6.3 Cross-cutting concerns
 
 - **Security:** IAM roles (no long-lived keys), secrets in Secrets Manager/SSM, Bedrock Guardrails, least-privilege tool permissions. The orchestrator's execution role is scoped to `bedrock-agentcore:InvokeAgentRuntime` on registered specialist runtime ARNs only.
-- **Observability:** built-in OpenTelemetry + X-Ray traces; CloudWatch for tool latency, token/cost, and error rates.
+- **Observability:** CloudWatch Logs on every Lambda and AgentCore runtime; X-Ray tracing is
+  wired into `AgentCoreStack` but **off by default** in dev, opt-in via CDK context
+  (`--context tracing=true`), since enabling it requires the account's X-Ray trace-segment
+  destination to be set to CloudWatch Logs first.
 - **Multi-tenancy:** memory/storage stores and DynamoDB keys scoped per user/garden.
 - **Data & privacy:** capture-first event log with privacy-by-design (consent, PII minimization, retention/TTL).
 - **Contract governance:** the Client API contract (`app/api/openapi.yaml`) and the agent registry (`agents/registry/*.json`) are both **data, not code** — reviewed in PRs the same way guardrails and prompts already are ([ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md)).
@@ -331,58 +348,51 @@ sequenceDiagram
   participant API as Client API (Lambda)
   participant EB as EventBridge
   participant Orch as Orchestrator (Lambda, Strands)
-  participant Diag as Diagnosis / Vision (AgentCore)
-  participant Pest as Pest (AgentCore)
-  participant Agro as Agronomy (AgentCore)
-  participant Wx as Weather API
+  participant Vis as Vision (AgentCore)
+  participant Irr as Irrigation (AgentCore)
+  participant Wx as Weather (Tool)
   participant State as DynamoDB
-  User->>API: Submit goal + photo ("leaves curling")
-  API->>State: persist goal + garden context
+  User->>API: POST /goals — issue + photo ("lower leaves browning")
+  API->>State: persist Goal (status=Intake) + Media
   API->>EB: goal.submitted event
+  API-->>User: 202 Accepted, status=Intake
   EB->>Orch: invoke (async)
-  Orch->>Diag: InvokeAgentRuntime: analyze photo
-  Diag-->>Orch: "aphids, mild + N imbalance?"
-  Note over Orch: model chooses next steps at runtime
-  Orch->>Pest: InvokeAgentRuntime: organic remedy for aphids?
-  Orch->>Wx: forecast for spray timing
-  Pest-->>Orch: neem-oil plan
-  Wx-->>Orch: dry next 3 days
-  Orch->>Agro: InvokeAgentRuntime: nutrient check (yellowing)
-  Agro-->>Orch: reduce nitrogen, add compost
-  Note over Orch,Agro: inter-agent exchange reconciles<br/>remedy + weather + nutrition
-  Orch->>State: save proposed plan + success criteria
-  Orch-->>User: Propose plan via WebSocket push (HITL confirm)
-  User-->>API: Approve (POST /plans/{id}/approve)
-  API->>State: plan = Approved, schedule follow-ups
+  Orch->>Vis: InvokeAgentRuntime: analyze photo
+  Vis-->>Orch: "crispy lower leaves — inconsistent soil moisture"
+  Note over Orch: model chooses next steps at runtime —<br/>not every issue needs a second specialist (registry's<br/>per-agent tools list decides which ones even *can* call weather)
+  Orch->>Irr: InvokeAgentRuntime: watering guidance?
+  Irr->>Wx: forecast (irrigation's registry entry lists the weather tool)
+  Irr-->>Orch: water only when top inch of soil is dry
+  Orch->>State: write Plan + Tasks + specialist trace (status=PlanProposed)
+  User->>API: GET /goals/{goalId} (polling — no push channel exists)
+  API-->>User: plan + trace once ready
+  User->>API: POST /plans/{planId}/approve
+  API->>State: Plan & Goal = Approved; stamp each pending Task's due_date (+3 days)
 ```
 
 ### 7.2 Long-running tracking loop (pause / resume across sessions)
 
 ```mermaid
 sequenceDiagram
-  participant Sched as Tracker / Scheduler (Lambda)
+  participant Sched as EventBridge Scheduler<br/>(15-min rate)
+  participant Track as Tracker (plain Lambda,<br/>no model/Strands)
   participant EB as EventBridge
   participant Orch as Orchestrator (Lambda, Strands)
   participant State as DynamoDB
-  participant Notif as Notification
   actor User
-  Sched->>EB: follow-up due (plan X)
-  EB->>Orch: invoke (async)
-  Orch->>State: load plan, progress, success criteria
-  Orch->>Notif: "Send a photo of the new leaves"
-  Notif->>User: In-app / web-push reminder (WhatsApp: deprioritized, future channel)
-  Note over Orch: invocation ends — Lambda is stateless;<br/>next invoke reloads context from DynamoDB
-  User->>Notif: replies with a photo (via the app)
-  Notif->>EB: reply.received event
-  EB->>Orch: invoke (async, resume context from DynamoDB)
-  Orch->>Orch: re-evaluate vs success criteria
-  alt Improved
-    Orch->>State: mark milestone / complete
-    Orch->>Notif: "Great progress!"
-  else Not improved
-    Orch->>State: adapt plan
-    Orch->>Notif: revised guidance
-  end
+  Sched->>Track: invoke (ignores its own event payload)
+  Track->>State: query TasksDueIndex (gsi1sk <= now)
+  Track->>EB: followup.due (per overdue task)
+  EB->>Orch: invoke handle_followup_due (async)
+  Note over Orch: deterministic — no Agent, no model call
+  Orch->>State: write nudge message directly into<br/>the goal's existing thread + task.followup_due Event
+  Orch->>State: push that task's due_date forward another 3 days
+  Note over User: sees the nudge next time they open<br/>the goal (poll) — nothing is pushed to them
+  User->>State: POST .../tasks/{taskId}/checkins (photo)
+  Note over State: task.checkin.received event published
+  EB->>Orch: invoke handle_task_checkin_received (async)
+  Note over Orch: THIS turn is real model reasoning —<br/>resumes the same Strands session from Day 1,<br/>may consult specialists again, may revise the plan
+  Orch->>State: write reply into the thread + task.feedback +<br/>(optionally) a revised Plan/Task set
 ```
 
 ### 7.3 Goal / Plan lifecycle (states)
@@ -390,39 +400,42 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
   [*] --> Intake
-  Intake --> Decomposing: goal understood
-  Decomposing --> PlanProposed: tasks + specialists resolved
-  PlanProposed --> Approved: user accepts
-  PlanProposed --> Intake: user revises
-  Approved --> InProgress: schedule follow-ups
-  InProgress --> AwaitingUser: reminder sent
-  AwaitingUser --> InProgress: data received
-  InProgress --> Adapting: off-track
-  Adapting --> InProgress: plan revised
-  InProgress --> Completed: success criteria met
-  InProgress --> Abandoned: user opts out
-  Completed --> [*]
-  Abandoned --> [*]
+  Intake --> Decomposing: goal.submitted (orchestrator invoked)
+  Decomposing --> PlanProposed: plan + tasks written
+  PlanProposed --> Approved: POST /plans/{id}/approve
+  Decomposing --> Intake: orchestration_failed (error path)
 ```
+
+These are the **only** four `Goal`/`Plan` status values any real code ever writes
+(`app/orchestrator/orchestrator.py`, `app/api/garden_handler.py`) — a task's own lifecycle is
+just `pending`/`done` (no due-date once `done`). A richer lifecycle
+(`InProgress`/`AwaitingUser`/`Adapting`/`Completed`/`Abandoned`) was sketched early on and never
+implemented; `InProgress` survives only as a frontend-only display bucket
+(`home.component.ts`'s `IN_PROGRESS_STATUSES` treats `Approved` as "in progress" for UI grouping)
+— the backend never actually emits it. Today, "done" is implicit: once every task under a plan
+is checked in, nothing marks the Goal itself `Completed` — this is a real, open gap, not a
+documented non-goal.
 
 ---
 
 ## 8. Frontend
 
 The Angular PWA ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md)) implements the
-"Tendril App" design across 6 routed screens behind a responsive shell, deployed as a static
+"Tendril App" design across 8 routed screens behind a responsive shell, deployed as a static
 site ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)).
 
 ### 8.1 Screens & shell
 
 | Screen | Route | Purpose |
 |---|---|---|
-| Home | `/home` | Proposal banner (pending plan), today's tasks, goals in progress, plants strip |
-| Capture / Diagnose | `/capture` | Photo capture placeholder → simulated specialist analysis → findings + generated goal |
-| Goal detail | `/goals/:goalId` | Plan approval (HITL), collapsible agent decision trace, plan tasks, follow-up schedule |
+| Garden setup | `/garden-setup` | First-run onboarding — name, geolocation, optional photo |
+| Home | `/home` | Weather chip, pending-plan banner, today's tasks, goals in progress, plants strip |
+| Add plant | `/add-plant` | Record a species/variety/photo, linked to the current garden (OB-02) |
+| Check a plant | `/capture` | Photo + description → real goal submission against the Client API |
+| Goal detail | `/goals/:goalId` | Plan approval (HITL), collapsible specialist trace, plan tasks, full reasoning thread, check-in |
 | Tasks | `/tasks` | Grouped Today / This week / Later task lists |
-| Garden | `/garden` | Garden facts + full plant list |
-| Activity | `/activity` | Event timeline (the EVENT entity, §2) |
+| Garden | `/garden` | Garden hero photo/facts + full plant list, entry point to Add plant |
+| Activity | `/activity` | Real event timeline (the EVENT entity, §2) |
 
 Desktop (≥900px) gets a persistent nav rail; narrower viewports get a bottom tab bar with a
 floating capture action — one `LayoutService` breakpoint
@@ -432,10 +445,17 @@ floating capture action — one `LayoutService` breakpoint
 ### 8.2 Data layer seam
 
 Every screen reads through a small set of DI-swappable service interfaces
-(`GardenApi`/`GoalApi`/`TaskApi`/`ActivityApi` in `frontend/src/app/core/services/`), currently
-bound to in-memory `Mock*Api` implementations (`app.config.ts`). This is the seam
-[ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md)'s OpenAPI-generated types and a real
-`Http*Api` implementation plug into — no component changes required when the Client API lands.
+(`GardenApi`/`GoalApi`/`TaskApi`/`ActivityApi` in `frontend/src/app/core/services/`), bound in
+`app.config.ts` to real `Http*Api` implementations that call the live Client API over HTTP
+(`HttpGardenApi`, `HttpGoalApi`, `HttpTaskApi`, `HttpActivityApi`) — this seam
+([ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md)) is what let the real backend land
+with no component changes. `Mock*Api` implementations still exist and are used only for the
+pre-onboarding case (no garden created yet); a couple of narrow reads without a backend yet
+(`getGardenFacts` — e.g. climate zone) also still fall back to mock data.
+
+Goal-detail polls `GET /goals/{goalId}` on a 2-second interval while a goal is in a
+not-yet-settled state — there is no WebSocket/push channel (§6.1), so this is the only way the
+UI learns a plan or a check-in reply has arrived.
 
 ### 8.3 Design system
 
@@ -457,6 +477,6 @@ CloudFront is the documented upgrade path).
 
 - Concept & vision: [`../project-context.md`](../project-context.md)
 - Engineering standards: [`../engineering-best-practices.md`](../engineering-best-practices.md)
-- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md)
+- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0006 (prompt externalization)](./ADRs/0006-prompt-externalization-bedrock-prompt-management.md), [ADR-0007 (prompt/skill versioning)](./ADRs/0007-prompt-skill-versioning-long-running-tasks.md), [ADR-0008 (guardrails)](./ADRs/0008-guardrails-layered-defense-in-depth.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md), [ADR-0014 (Lambda container images)](./ADRs/0014-lambda-container-image-packaging.md), [ADR-0015 (IoT actuation + HITL, future/proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md)
 - [Strands capability mapping](./strands-capability-mapping.md): Strands SDK capabilities mapped to Tendril's functional/non-functional requirements, docs-verified (supersedes ADR-0001 Appendix A)
 - [Data architecture](./data-architecture.md): entity/key design, session/context/memory management, the agent data-access boundary, and the full Lambda/API/Agent/Event/Data component inventory
