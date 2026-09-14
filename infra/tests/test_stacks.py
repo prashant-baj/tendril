@@ -32,6 +32,7 @@ def _app() -> App:
             "model_id": "global.amazon.nova-2-lite-v1:0",
             "garden_handler_image_repo": "tendril-dev-garden-handler",
             "orchestrator_image_repo": "tendril-dev-orchestrator",
+            "tracker_image_repo": "tendril-dev-tracker",
             "weather_tool_image_repo": "tendril-dev-tool-weather",
         }
     )
@@ -452,6 +453,142 @@ def test_goal_submitted_eventbridge_rule_targets_orchestrator():
     assert "s3:GetObject*" in actions
 
 
+# --- Phase 7.5+: tracker/scheduler + due-date follow-ups ---------------------
+
+
+def test_tracker_lambda_and_schedule_provisioned():
+    import json
+
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac10", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {
+                "FunctionName": "tendril-dev-tracker",
+                "PackageType": "Image",
+                "Environment": Match.object_like(
+                    {"Variables": Match.object_like({"APP_TABLE_NAME": "tendril-dev-app"})}
+                ),
+            }
+        ),
+    )
+    tpl.has_resource_properties(
+        "AWS::Scheduler::Schedule",
+        Match.object_like(
+            {
+                "Name": "tendril-dev-tracker-tick",
+                "ScheduleExpression": "rate(15 minutes)",
+            }
+        ),
+    )
+
+    # Regression test: app_table is Table.from_table_name() (an imported table with no index
+    # metadata) — its grant_read_data() only grants base-table actions, NOT `.../index/*`,
+    # confirmed live via a real AccessDeniedException on dynamodb:Query against TasksDueIndex.
+    # The tracker needs an explicit IAM statement naming the index ARN.
+    found_index_query_grant = False
+    for res in tpl.find_resources("AWS::IAM::Policy").values():
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions = act if isinstance(act, list) else [act]
+            if "dynamodb:Query" not in actions:
+                continue
+            resource = stmt["Resource"]
+            resources = resource if isinstance(resource, list) else [resource]
+            if any("TasksDueIndex" in json.dumps(r) for r in resources):
+                found_index_query_grant = True
+    assert found_index_query_grant, "tracker must have dynamodb:Query scoped to TasksDueIndex"
+
+
+def test_followup_due_rule_targets_orchestrator():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac11", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        Match.object_like(
+            {
+                "EventPattern": {
+                    "source": ["tendril.tracker"],
+                    "detail-type": ["followup.due"],
+                }
+            }
+        ),
+    )
+
+
+def test_orchestrator_receives_agent_state_bucket_env_and_iam():
+    # Phase 7.5+: SnapshotSessionManager's own S3 backend (data-architecture.md §3.1).
+    import json
+
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac12", env_name="dev", env=ENV))
+
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {
+                "FunctionName": "tendril-dev-orchestrator",
+                "Environment": Match.object_like(
+                    {
+                        "Variables": Match.object_like(
+                            {"AGENT_STATE_BUCKET_NAME": "tendril-dev-agent-state"}
+                        )
+                    }
+                ),
+            }
+        ),
+    )
+
+    # Distinguish "orchestrator has the agent-state bucket's IAM" from "orchestrator has the
+    # media bucket's IAM" — both true, for different resources; a resource-string match proves
+    # the grant is actually scoped to the new bucket, not just any s3:GetObject* anywhere.
+    found_agent_state_grant = False
+    for res in tpl.find_resources("AWS::IAM::Policy").values():
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions = act if isinstance(act, list) else [act]
+            if any(a.startswith("s3:") for a in actions):
+                resource = stmt["Resource"]
+                resources = resource if isinstance(resource, list) else [resource]
+                if any("agent-state" in json.dumps(r) for r in resources):
+                    found_agent_state_grant = True
+    assert found_agent_state_grant
+
+
+def test_no_specialist_role_has_dynamodb_or_s3_iam_actions():
+    # ADR-0013 Action Item 4 / data-architecture.md §9 item 6: specialists never get direct IAM
+    # on AppTable/ConnectionsTable/MediaBucket/AgentStateBucket. Checked PER-ROLE (not aggregated
+    # across every role in the stack, which would hide a violation on one specialist role behind
+    # an unrelated pass on the orchestrator's own role) — must fail if a future change ever grants
+    # a specialist dynamodb:/s3: directly.
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "ac13", env_name="dev", env=ENV))
+
+    specialist_role_logical_ids = {
+        logical_id
+        for logical_id, res in tpl.find_resources("AWS::IAM::Role").items()
+        if res["Properties"].get("RoleName", "").endswith("-exec")
+    }
+    assert specialist_role_logical_ids, "expected at least one specialist execution role"
+
+    for logical_id, res in tpl.find_resources("AWS::IAM::Policy").items():
+        role_refs = {
+            r.get("Ref") for r in res["Properties"].get("Roles", []) if isinstance(r, dict)
+        }
+        if not role_refs & specialist_role_logical_ids:
+            continue
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            act = stmt["Action"]
+            actions = act if isinstance(act, list) else [act]
+            for action in actions:
+                assert not action.lower().startswith(("dynamodb:", "s3:")), (
+                    f"specialist role policy {logical_id} grants {action!r}"
+                )
+
+
 # --- pipeline (GitHub OIDC deploy role) --------------------------------------
 
 
@@ -578,6 +715,42 @@ def test_media_bucket_allows_cross_origin_put():
                         [Match.object_like({"AllowedMethods": ["PUT"], "AllowedOrigins": ["*"]})]
                     )
                 },
+            }
+        ),
+    )
+
+
+def test_agent_state_bucket_provisioned():
+    # Phase 7.5+: SnapshotSessionManager's own S3 backend, ADR-0013's trusted-tier exception.
+    app = _app()
+    tpl = Template.from_stack(FoundationStack(app, "fnd2", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::S3::Bucket", Match.object_like({"BucketName": "tendril-dev-agent-state"})
+    )
+
+
+def test_tasks_due_index_gsi_provisioned():
+    # Phase 7.5+: the tracker/scheduler's defining query ("which tasks have a follow-up due").
+    app = _app()
+    tpl = Template.from_stack(FoundationStack(app, "fnd3", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::DynamoDB::Table",
+        Match.object_like(
+            {
+                "TableName": "tendril-dev-app",
+                "GlobalSecondaryIndexes": Match.array_with(
+                    [
+                        Match.object_like(
+                            {
+                                "IndexName": "TasksDueIndex",
+                                "KeySchema": [
+                                    {"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                                    {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
+                                ],
+                            }
+                        )
+                    ]
+                ),
             }
         ),
     )

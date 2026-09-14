@@ -15,6 +15,7 @@ invocation against real DynamoDB.
 """
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -1413,6 +1414,78 @@ def test_approve_plan_missing_path_params():
     assert resp["statusCode"] == 400
 
 
+def test_approve_plan_stamps_due_dates_on_pending_tasks(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"plan_id": "goal-1", "status": "PlanProposed"}},
+        query_response={
+            "Items": [
+                {"pk": "GARDEN#g1", "sk": "TASK#goal-1#t1", "status": "pending"},
+                {"pk": "GARDEN#g1", "sk": "TASK#goal-1#t2", "status": "done"},
+            ]
+        },
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    resp = handler.approve_plan(event)
+
+    assert resp["statusCode"] == 200
+    # 2 status-flip updates (Plan, Goal) + exactly 1 due-date stamp (only the pending task).
+    assert len(fake_table.update_calls) == 3
+    stamp = fake_table.update_calls[2]
+    assert stamp["Key"] == {"pk": "GARDEN#g1", "sk": "TASK#goal-1#t1"}
+    assert stamp["ExpressionAttributeValues"][":p"] == "TASK_STATUS#pending"
+    due = datetime.fromisoformat(stamp["ExpressionAttributeValues"][":d"])
+    assert due > datetime.now(UTC)
+
+
+def test_approve_plan_due_date_stamping_failure_still_returns_200(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"plan_id": "goal-1", "status": "PlanProposed"}},
+        raise_on_query=RuntimeError("boom"),
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    resp = handler.approve_plan(event)
+
+    assert resp["statusCode"] == 200
+    # The two status-flip updates already committed before the stamping step raised.
+    assert len(fake_table.update_calls) == 2
+
+
+def test_approve_plan_revision_then_reapprove_stamps_only_current_tasks(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"plan_id": "goal-1", "status": "PlanProposed"}},
+        query_responses=[
+            {"Items": [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#old-1", "status": "pending"}]},
+            {"Items": [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#new-1", "status": "pending"}]},
+        ],
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/plans/{planId}/approve",
+        path_params={"gardenId": "g1", "planId": "goal-1"},
+    )
+    handler.approve_plan(event)  # first approval: stamps old-1
+    handler.approve_plan(event)  # revision + re-approval: stamps new-1 only
+
+    stamped_task_sks = [
+        c["Key"]["sk"] for c in fake_table.update_calls if c["Key"]["sk"].startswith("TASK#")
+    ]
+    assert stamped_task_sks == ["TASK#goal-1#old-1", "TASK#goal-1#new-1"]
+
+
 # --- post_task_checkin (images-completion: Plant/Goal/Task/Media traceability) -------------
 
 
@@ -1466,6 +1539,8 @@ def test_post_task_checkin_happy_path_no_plant(monkeypatch):
     )
     assert task_update["ExpressionAttributeValues"][":status"]["S"] == "done"
     assert task_update["ExpressionAttributeValues"][":mid"]["S"] == "media-1"
+    # Phase 7.5+: clears TasksDueIndex attributes so a checked-in task drops out of "overdue".
+    assert "REMOVE gsi1pk, gsi1sk, due_date" in task_update["UpdateExpression"]
     assert media_update["ExpressionAttributeValues"][":tid"]["S"] == "task-1"
     assert media_update["ExpressionAttributeValues"][":gid"]["S"] == "goal-1"
     assert ":pid" not in media_update["ExpressionAttributeValues"]

@@ -18,7 +18,7 @@ Per [ADR-0002](./ADRs/0002-context-management-and-durable-state.md):
 | Tier | Mechanism | Keyed by | Lives in |
 |---|---|---|---|
 | Working context (in-model) | Strands `context_manager="auto"` (`SummarizingConversationManager` + `ContextOffloader`) + `ContextInjector` for pinning vision/success-criteria | the current agent invocation | in-memory during the invocation only |
-| Conversational durability | Strands `SnapshotSessionManager` + `S3Storage`; Strands `MemoryManager` + `BedrockKnowledgeBaseStore` | `session_id = goal_id`; memory `scope = "{user_id}:{garden_id}"` | new **`tendril-{env}-agent-state`** S3 bucket (sessions/offload); Bedrock Knowledge Base (memory) |
+| Conversational durability | Strands `SnapshotSessionManager` + `S3Storage` **(Implemented, Phase 7.5+)**; Strands `MemoryManager` + `BedrockKnowledgeBaseStore` | `session_id = goal_id`; memory `scope = "{user_id}:{garden_id}"` | **`tendril-{env}-agent-state`** S3 bucket (sessions; `ContextOffloader` context-offload still not wired, see §3.3); Bedrock Knowledge Base (memory) |
 | Structured domain state | DynamoDB | `pk`/`sk` per entity (§2) | existing **`tendril-{env}-app`** table (`FoundationStack`) |
 
 The orchestrator is the only component that touches all three tiers directly; specialists only
@@ -43,22 +43,26 @@ deliberate GSI below.
 | Plant | `GARDEN#{garden_id}` | `PLANT#{plant_id}` | `species`, `variety`, `stage` | |
 | Goal | `GARDEN#{garden_id}` | `GOAL#{goal_id}` | `description`, `type`, `status`, `plant_id?` | `plant_id` present only if plant-scoped — **`plant_id` now actually written (images-completion pass, 2026-09-13)**; previously reserved but no code path ever set it. |
 | Plan | `GARDEN#{garden_id}` | `PLAN#{goal_id}` | `plan_id`(=`goal_id`), `goal_id`, `success_criteria`, `status` | **Implemented (PA-01)**. `plan_id` reuses `goal_id` directly (always 1:1, avoids a pointless extra id) — a deviation from this table's original sketch of a separate `plan_id`. |
-| Task | `GARDEN#{garden_id}` | `TASK#{goal_id}#{task_id}` | `task_id`, `plan_id`(=`goal_id`), `goal_id`, `title`, `detail`, `scope` (`plant`\|`garden`), `status`, `plant_id?`, `media_id?` | **Implemented (PA-01)**, keyed `TASK#{goal_id}#{task_id}` — a deviation from the flat `TASK#{task_id}` (+ `gsi1pk`/`gsi1sk`) originally sketched here for the `TasksDueIndex` GSI. That GSI is Phase 7+ work and doesn't exist yet; this key instead makes "replace this goal's task set on a plan revision" one cheap prefix `Query`, not a scan. Revisit the key (or add the GSI alongside it) when the tracker/scheduler is actually built. `plant_id`/`media_id` added in the images-completion pass (2026-09-13): `plant_id` is inherited from the Goal's own `plant_id` when the orchestrator proposes the task (`_write_plan_and_tasks`); `media_id` is set by `postTaskCheckin`, which also flips `status` to `done` — one check-in photo per task, not a repeatable progress log (that's the Phase 7+ tracker/outcome loop). **`listTasks` (Phase 6)** reuses this same key for a cross-goal list — `TASK#*` (no goal prefix) under one garden's partition is still a single cheap `Query`, no GSI needed; real due-date-based grouping still waits on the `TasksDueIndex`. |
+| Task | `GARDEN#{garden_id}` | `TASK#{goal_id}#{task_id}` | `task_id`, `plan_id`(=`goal_id`), `goal_id`, `title`, `detail`, `scope` (`plant`\|`garden`), `status`, `plant_id?`, `media_id?`, `feedback?`, `due_date?`, `gsi1pk?`, `gsi1sk?` | **Implemented (PA-01)**, keyed `TASK#{goal_id}#{task_id}` — a deviation from the flat `TASK#{task_id}` (+ `gsi1pk`/`gsi1sk`) originally sketched here for the `TasksDueIndex` GSI; that GSI is now added *alongside* this key rather than replacing it (Phase 7.5+) — this key still makes "replace this goal's task set on a plan revision" one cheap prefix `Query`, not a scan, and the GSI separately answers "which tasks are overdue" without needing to change it. `plant_id`/`media_id` added in the images-completion pass (2026-09-13): `plant_id` is inherited from the Goal's own `plant_id` when the orchestrator proposes the task (`_write_plan_and_tasks`); `media_id` is set by `postTaskCheckin`, which also flips `status` to `done`. `feedback` (PA-05) is the orchestrator's own assessment of a check-in's photo, stamped by `_update_task_feedback`. `due_date`/`gsi1pk`/`gsi1sk` (**Implemented, Phase 7.5+**) are stamped by `approvePlan` on every pending task at approval time and by the orchestrator's `handle_followup_due` on each nudge (pushed forward so the same task doesn't refire every tracker tick), and removed by `postTaskCheckin` on check-in — one check-in per task, not a repeatable progress log (a real progress *log* is still carried-forward work, see `docs/stories/tracker-scheduler.md`). **`listTasks` (Phase 6)** reuses this same key for a cross-goal list — `TASK#*` (no goal prefix) under one garden's partition is still a single cheap `Query`, no GSI needed; real due-date-based *grouping* in the Tasks screen itself is still carried-forward UI work, separate from the GSI now backing the tracker. |
 | Message | `GARDEN#{garden_id}` | `GOALMSG#{goal_id}#{iso_timestamp}#{message_id}` | `message_id`, `goal_id`, `role` (`user`\|`assistant`), `content`, `created_at` | **Implemented (PA-02)** — the chat thread backing conversational plan approval; not in the original design, added when PA-02 was scoped. `sk` is time-sortable, same trick as `Event` below. |
 | Tracking | `GARDEN#{garden_id}` | `TRACKING#{tracking_id}` | `goal_id`, `plan_id?`, `task_id?`, `timestamp`, `observation`, `decision` | Not yet implemented — Phase 6/7+. |
 | Event (capture-first log) | `GARDEN#{garden_id}` | `EVENT#{iso_timestamp}#{event_id}` | `type`, `payload`, `created_at` | **Implemented (Phase 6)**. `sk` is time-sortable — `listActivity` queries it with `ScanIndexForward=False` for a newest-first feed, directly backing the frontend's Activity screen. Written best-effort (never fails the primary request) at 4 call sites: `createGoal` (`goal.submitted`), `approvePlan` (`plan.approved`), `postTaskCheckin` (`task.checkin`), and the orchestrator's `_write_plan_and_tasks` (`plan.updated`, covering both first proposal and every revision). Deliberately UI-agnostic — no icon/tone/title baked in server-side; the frontend maps `type` to presentation (`activity-presentation.util.ts`). |
 | Media | `GARDEN#{garden_id}` | `MEDIA#{media_id}` | `s3_key`, `content_type`, `plant_id?`, `goal_id?`, `task_id?`, `uploaded_at` | `s3_key` points into `MediaBucket`. `getGoalDetail` (PA-03) generates a fresh presigned GET url per read — never stored. `goal_id?` and `task_id?` added in the images-completion pass (2026-09-13) — `goal_id` is set transactionally by `createGoal` for every attached media (alongside `plant_id`, if the goal has one); `task_id` is set by `postTaskCheckin`. A Media record can now be traced to whichever of Plant/Goal/Task it's actually evidence for, completing the traceability chain `data-architecture.md` had reserved fields for but no code had ever populated. |
 | Notification | `USER#{user_id}` | `NOTIFICATION#{sent_at}#{notification_id}` | `channel`, `status`, `related_goal_id?`, `related_task_id?` | scoped by user, not garden — a user may have several gardens. Not yet implemented. |
 
-### GSI: `TasksDueIndex` (on `AppTable`)
+### GSI: `TasksDueIndex` (on `AppTable`) — **Implemented (Phase 7.5+)**
 
 The tracker/scheduler's defining query — "which tasks have a follow-up due right now?" — can't be
-answered by the table's own `pk`/`sk` (that would mean scanning every garden's partition). Add a
-**sparse GSI**: `gsi1pk = "TASK_STATUS#{status}"` (e.g. `TASK_STATUS#pending`), `gsi1sk = due_date`
-(ISO 8601). Only tasks actually awaiting a follow-up carry these two attributes — completed/
-abandoned tasks omit them, so the index stays small. The scheduler queries
-`gsi1pk = "TASK_STATUS#pending" AND gsi1sk <= now` on a schedule (EventBridge Scheduler) and emits
-one `followup.due` event per hit (§6.4).
+answered by the table's own `pk`/`sk` (that would mean scanning every garden's partition). A
+**sparse GSI**: `gsi1pk = "TASK_STATUS#{status}"` (only ever `TASK_STATUS#pending` in practice),
+`gsi1sk = due_date` (ISO 8601). Only tasks actually awaiting a follow-up carry these two
+attributes — completed/abandoned tasks omit them, so the index stays small. `app/tracker/`'s
+scheduled Lambda (`EventBridge Scheduler`, 15-minute rate) queries
+`gsi1pk = "TASK_STATUS#pending" AND gsi1sk <= now` and emits one `followup.due` event per hit
+(§6.4), paginating across `LastEvaluatedKey` so a truncated page never silently drops an overdue
+task. `approvePlan` stamps these attributes onto every pending task at approval time; the
+orchestrator's `handle_followup_due` bumps them forward on each nudge (so the same task doesn't
+refire every tick); `postTaskCheckin` removes them on check-in.
 
 ### `ConnectionsTable` (existing, `FoundationStack.connections_table`)
 
@@ -70,25 +74,38 @@ when pushing a WebSocket update — the reverse lookup ADR-0004's design implies
 
 ## 3. Sessions, context, and memory — where they actually live
 
-### 3.1 Orchestrator session (cross-Lambda-invocation resume)
+### 3.1 Orchestrator session (cross-Lambda-invocation resume) — **Implemented (Phase 7.5+)**
 
 The orchestrator is stateless Lambda, woken repeatedly by EventBridge for the *same* goal (a
-submission, a plan-approval response, a follow-up reply, days apart). Session identity is the
-mechanism that stitches these invocations back into one continuous agent:
+submission, a chat message, a follow-up nudge, days apart). Session identity is the mechanism
+that stitches these invocations back into one continuous agent:
 
 ```python
 session_manager = SnapshotSessionManager(
     session_id=goal_id,
-    storage=S3Storage(bucket=agent_state_bucket, prefix=f"orchestrator-sessions/{env_name}/"),
+    storage=S3Storage(bucket=AGENT_STATE_BUCKET_NAME, prefix="orchestrator-sessions/"),
 )
 agent = Agent(session_manager=session_manager, ...)
 ```
 
+**Deviation from the original sketch above the code block:** no `{env_name}` segment in the S3
+key prefix. The bucket *name* (`tendril-{env}-agent-state`) already physically separates
+environments — repeating `{env_name}` again inside the object-key prefix would be redundant
+nesting with zero isolation benefit, since dev and prod are never the same bucket.
+
 Every EventBridge wake for this `goal_id` reconstitutes the same messages, agent state, and
-conversation-manager state. This is **new infrastructure** — a dedicated S3 bucket,
-`tendril-{env}-agent-state`, separate from `MediaBucket` (different IAM consumers: only the
-orchestrator touches this one; ingestion and the frontend's presigned-upload flow touch
-`MediaBucket`). Not yet in `FoundationStack` — tracked as a follow-up (§10).
+conversation-manager state via `_build_orchestrator_agent` (`app/orchestrator/orchestrator.py`).
+Each handler's prompt is now just the genuinely new information for that turn — not a full
+transcript restatement (`docs/stories/tracker-scheduler.md`'s SR-02/SR-03; `_format_transcript`
+was deleted). A hand-rolled `_strip_trailing_unresolved_tool_use` runs immediately after `Agent`
+construction — no `strip_trailing_tool_use()` function exists in the installed `strands-agents`
+SDK; this implements the documented mitigation pattern directly, removing a trailing unresolved
+`toolUse` block from restored history (defense-in-depth, even though only this orchestrator ever
+writes to its own session today).
+
+Uses the dedicated `tendril-{env}-agent-state` S3 bucket, separate from `MediaBucket` (different
+IAM consumers per ADR-0013: only the orchestrator touches this one; the frontend's
+presigned-upload flow touches `MediaBucket`).
 
 ### 3.2 Memory — two knowledge bases, not one
 
@@ -106,12 +123,14 @@ Both agents and the orchestrator may query **Garden Memory** (scoped to the curr
 `user_id`/`garden_id` from the orchestrator's own invocation context). Only the orchestrator (and
 any specialist needing it) queries **Horticultural Reference** — read-only, no scoping needed.
 
-### 3.3 Context offloading
+### 3.3 Context offloading — **not in scope for Phase 7.5+**
 
-`ContextOffloader` (part of `context_manager="auto"`) must be pointed at the **same**
-`tendril-{env}-agent-state` bucket, under a distinct prefix (`context-offload/{env}/`) — left at
-its default in-memory backend, offloaded content (large vision/weather tool results) would vanish
-between Lambda invocations, defeating the whole point of resuming a paused conversation.
+`ContextOffloader` (part of `context_manager="auto"`) still needs to be pointed at the **same**
+`tendril-{env}-agent-state` bucket, under a distinct prefix (`context-offload/`) — left at its
+default in-memory backend, offloaded content (large vision/weather tool results) would vanish
+between Lambda invocations. Phase 7.5+ only wired session-resume (§3.1); `ContextOffloader`/
+`ContextInjector` pinning remain open (ADR-0002 action item 2), tracked in
+`docs/stories/tracker-scheduler.md`'s "Carried forward" section.
 
 ---
 
@@ -156,7 +175,7 @@ The flow:
 | Client API handlers (media-upload, goal-intake, garden/plant/task CRUD, plan-approve, status) | `app/api/` | API Gateway (`SpecRestApi`, ADR-0011) | `AppTable`, `MediaBucket` (presigned URLs) | WS-01/WS-03: media-upload + goal-intake in scope; the rest of ADR-0004's endpoint table is future work |
 | Ingestion | `app/ingestion/` | Client API calls; `media.uploaded` S3 event | `AppTable`, `MediaBucket` | Named in architecture.md §3; not yet scaffolded |
 | **Orchestrator** | `app/orchestrator/` | EventBridge (`goal.submitted`, `plan.approval.responded`, `followup.due`, `followup.reply.received`) | `AppTable`, `ConnectionsTable`, `MediaBucket`, `AgentStateBucket`, both Knowledge Bases; invokes specialists via `InvokeAgentRuntime` and tools via HTTP | WS-04 (walking-skeleton proof), ADR-0012 |
-| Tracker / Scheduler | `app/tracker/` | EventBridge Scheduler (time-based) | `AppTable` (`TasksDueIndex` GSI, read) | Named in architecture.md §3; not yet scaffolded |
+| Tracker / Scheduler | `app/tracker/` | EventBridge Scheduler (15-minute rate) | `AppTable` (`TasksDueIndex` GSI, read); EventBridge (`followup.due`, write) | **Implemented (Phase 7.5+)** — a plain boto3 Lambda, no `strands-agents`; publishes one `followup.due` event per overdue pending task for the orchestrator's `handle_followup_due` to act on. |
 | Notification | `app/notifier/` | Tracker (direct); Orchestrator (as a Tool API / its HITL `ask` channel); inbound replies | `AppTable` (Notification entity), `ConnectionsTable` (WebSocket push) | In-app/WebSocket + web-push near-term; WhatsApp/email **deprioritized** (ADR-0001 refinement, 2026-09-12) |
 | WebSocket connect/disconnect/route handlers | `app/api/ws/` | API Gateway WebSocket lifecycle | `ConnectionsTable` | ADR-0004; not yet scaffolded |
 | Tool API: **Weather** | `tools/weather/` | API Gateway / Function URL | none of its own (stateless call-through to a weather provider) | AF-03 reference implementation |
@@ -207,10 +226,10 @@ Every orchestrator-bound event carries both `garden_id` and `goal_id` so the orc
 
 | Store | Kind | Owner(s) | Notes |
 |---|---|---|---|
-| `tendril-{env}-app` | DynamoDB (single-table + `TasksDueIndex` GSI) | Client API, Ingestion, Orchestrator, Tracker, Notification | Existing (`FoundationStack`); GSI is new (§2) |
-| `tendril-{env}-ws-connections` | DynamoDB (+ `UserConnectionsIndex` GSI) | WebSocket handlers, Notification | Existing (`FoundationStack`); GSI is new (§2) |
+| `tendril-{env}-app` | DynamoDB (single-table + `TasksDueIndex` GSI) | Client API, Ingestion, Orchestrator, Tracker, Notification | Existing (`FoundationStack`); GSI (`TasksDueIndex`) implemented (§2) |
+| `tendril-{env}-ws-connections` | DynamoDB (+ `UserConnectionsIndex` GSI) | WebSocket handlers, Notification | Existing (`FoundationStack`); GSI still open (§2) |
 | `tendril-{env}-media` | S3 | Client API (presigned URLs), Ingestion, Orchestrator (read) | Existing (`FoundationStack`) |
-| `tendril-{env}-agent-state` | S3 | Orchestrator only | **New** — session snapshots + context offload (§3.1/§3.3) |
+| `tendril-{env}-agent-state` | S3 | Orchestrator only | **Implemented (Phase 7.5+)** — `SnapshotSessionManager` session snapshots wired in (§3.1); context offload (§3.3) still not wired |
 | Garden Memory (Bedrock KB) | Managed | Orchestrator, specialists (scoped) | **New** — per-tenant `scope` (§3.2) |
 | Horticultural Reference (Bedrock KB) | Managed | Orchestrator, specialists (read-only) | **New** — shared, curated (§3.2) |
 | Secrets Manager / SSM | Managed | Any Lambda needing a secret | Existing pattern (`app/common/config.py`, ADR-0008) |
@@ -219,15 +238,15 @@ Every orchestrator-bound event carries both `garden_id` and `goal_id` so the orc
 
 ## 7. Data flow: goal submission → orchestrator → specialist → conversation → approval
 
-**As actually implemented (PA-01/PA-02) — see those stories' Context notes for why this departs
-from the original sketch below it:**
+**As actually implemented (PA-01/PA-02/Phase 7.5+) — see those stories' Context notes for why
+this departs from the original sketch below it:**
 
 ```
 User (UI) --POST /gardens/{id}/media--> Client API --presigned PUT--> MediaBucket
 User (UI) --POST /gardens/{id}/goals--> Client API
     Client API: validate, write Goal (status=Intake) to AppTable, write Media record
     Client API --EventBridge: goal.submitted (garden_id, goal_id)--> Orchestrator
-Orchestrator (fresh Agent — no SnapshotSessionManager; see PA-02's Context note):
+Orchestrator (Agent with a SnapshotSessionManager attached, session_id=goal_id — Phase 7.5+):
     read Goal + Media from AppTable (direct IAM)
     InvokeAgentRuntime -> whichever specialist(s) are relevant, chaining vision's identification
         into the others when a photo is attached
@@ -237,19 +256,23 @@ Orchestrator (fresh Agent — no SnapshotSessionManager; see PA-02's Context not
     Writes an assistant Message either way
 User (UI) --POST /gardens/{id}/goals/{id}/messages--> Client API
     Client API: write a user Message, --EventBridge: goal.message.received (garden_id, goal_id)--> Orchestrator
-Orchestrator: reconstructs a fresh Agent from the goal + current Plan/Tasks + full Message
-    history read back from AppTable (no live session to resume), runs the same turn shape as
-    above — may revise the Plan, or just ask a clarifying question (updated_plan absent)
+Orchestrator: resumes the SAME session (session_id=goal_id) — the prior conversation is already
+    in the restored agent's history, so the prompt for this turn is just the newest Message's
+    text, not a full transcript restatement. Runs the same turn shape as above — may revise the
+    Plan, or just ask a clarifying question (updated_plan absent)
 User (UI) --POST /gardens/{id}/plans/{id}/approve--> Client API
     Client API: synchronous update_item, Plan.status=Approved, Goal.status=Approved — no event,
-    no model call (approval needs no reasoning, only a deterministic status flip)
+    no model call (approval needs no reasoning, only a deterministic status flip); also stamps
+    due_date/gsi1pk/gsi1sk (Phase 7.5+) on every pending Task
+Tracker (EventBridge Scheduler, 15-min rate) --queries TasksDueIndex--> emits followup.due for
+    each overdue task --EventBridge--> Orchestrator
+Orchestrator's handle_followup_due (Phase 7.5+, no model call): writes a deterministic nudge
+    Message + Activity Event, bumps the task's due-date forward
 ```
 
-**As originally sketched (not built — kept for context on what's still open):** a
-`SnapshotSessionManager`-based live session resume, a WebSocket push of the proposed plan, and
-scheduling follow-ups (`Task.due_date` + `gsi1` attributes for `TasksDueIndex`) on approval. All
-three remain real, undone work — the tracker/scheduler and true session-resume are Phase 7.5+
-(`docs/backlog.md`), and the WebSocket push channel is still carried-forward, future work.
+**As originally sketched (not built — kept for context on what's still open):** a WebSocket push
+of the proposed plan — still carried-forward, future work. (Session-resume and the tracker/
+scheduler, also originally sketched here, are now implemented — Phase 7.5+, `docs/backlog.md`.)
 
 ---
 
@@ -274,15 +297,19 @@ convention alone:
 
 ## 9. Open items / follow-ups
 
-1. Provision `tendril-{env}-agent-state` (S3) — not yet in `FoundationStack`.
+1. ~~Provision `tendril-{env}-agent-state` (S3)~~ — **done, Phase 7.5+** (`FoundationStack`).
 2. Provision the two Bedrock Knowledge Bases (Garden Memory, Horticultural Reference) and their
-   IAM — not yet in any stack.
-3. Add `TasksDueIndex` (on `AppTable`) and `UserConnectionsIndex` (on `ConnectionsTable`) GSIs.
+   IAM — Garden Memory done (AF-05, `MemoryStack`); Horticultural Reference still open.
+3. ~~Add `TasksDueIndex` (on `AppTable`)~~ — **done, Phase 7.5+**; `UserConnectionsIndex` (on
+   `ConnectionsTable`) remains open, unrelated to this epic.
 4. Decide the media-to-specialist strategy (bytes-in-payload vs. presigned-URL-fetch, §4) when
-   the Vision/Diagnosis specialist is actually built.
+   the Vision/Diagnosis specialist is actually built. *(Resolved in practice: presigned-URL-fetch
+   — `orchestrator.py`'s `_resolve_image` generates a short-lived GET url and passes it to
+   specialists as `imageUrl`.)*
 5. Decide `tools/` API Gateway topology (one shared Gateway vs. per-tool Function URLs) when the
    second tool (beyond Weather) is built.
-6. CDK assertion tests enforcing ADR-0013 (no specialist role holds `dynamodb:`/`s3:` actions).
+6. ~~CDK assertion tests enforcing ADR-0013~~ — **done, Phase 7.5+**
+   (`test_no_specialist_role_has_dynamodb_or_s3_iam_actions`, `infra/tests/test_stacks.py`).
 
 ## 10. Related documents
 

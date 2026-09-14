@@ -28,7 +28,7 @@ It doesn't replace the story files — it sequences them.
 | **5** | **Conversational plan approval (HITL)** | **PA-02** (new, `stories/plan-approval.md`) | Goal Detail gains a chat thread (ask/adjust, model can ask back) + an explicit Approve button | `POST /gardens/{id}/goals/{goalId}/messages`, `POST /gardens/{id}/plans/{planId}/approve` (new) | Message/approve handlers; **Orchestrator** re-invoked per turn (stateless — see the story's Context note on why this doesn't build `SnapshotSessionManager`/`AgentStateBucket` yet) | `AppTable`: `Plan`/`Task` revisions, new `Message` entity | Yes — first multi-turn round-trip on the same goal |
 | **6** | **Tasks & Activity on real data** | ✅ done — `stories/tasks-activity.md` | Tasks/Activity screens replace `MockTaskApi`/`MockActivityApi`; Tasks groups by status ("To do"/"Done" — real tasks have no due-date concept yet, that's Phase 7+) | `GET /gardens/{id}/tasks`, `GET /gardens/{id}/activity` | `listTasks`/`listActivity` read handlers; `Event` written best-effort at 4 call sites | `AppTable`: Task (reused key, no new GSI), `Event` (newly implemented) | No |
 | **7** | **Agent Factory** — second specialist + first real Tool API + guardrail + memory | **AF-01..AF-05** (existing) | none (backend-only) | — | `AgentCoreStack` registry loop; `tools/weather/` | `agents/registry/agronomy.json`; two Bedrock Knowledge Bases (data-architecture.md §3.2) | Yes — proves the factory scales past one agent |
-| **7.5+** | Real `SnapshotSessionManager`/`AgentStateBucket` session-resume, tracker/scheduler Lambda + `TasksDueIndex` follow-ups | *not yet storied* | — | — | Tracker/Scheduler Lambda (`app/tracker/`, not yet scaffolded) | `AgentStateBucket` (new S3), `TasksDueIndex` GSI | Yes — needed once follow-ups span days, not one chat session |
+| **7.5+** | Real `SnapshotSessionManager`/`AgentStateBucket` session-resume, tracker/scheduler Lambda + `TasksDueIndex` follow-ups | `stories/tracker-scheduler.md` — ✅ **done** (TR-01/02/03, SR-01/02/03 all shipped) | — | — | Tracker/Scheduler Lambda (`app/tracker/`) — ✅ built | `AgentStateBucket` (S3, ✅ wired into the orchestrator via `SnapshotSessionManager`), `TasksDueIndex` GSI (✅ implemented) | Yes — the tracker's nudge is deliberately model-free (TR-03); the orchestrator's three conversational turns now resume a real Strands session instead of reconstructing everything from DynamoDB each time |
 | **8+** | Carried forward | WebSocket live push, remaining 7 specialists + 4 tools, WhatsApp (deprioritized), Cognito auth, aggregated-data flywheel, using photos for progress comparison over time (needs 7.5's tracker) | — | — | — | — | — |
 
 ```mermaid
@@ -44,7 +44,7 @@ flowchart TD
   P5["Phase 5 — PA-02<br/>Conversational plan approval (chat + Approve)"] --> P6
   P6["Phase 6 — Tasks-Activity<br/>Tasks + Activity on real data<br/>✅ done"] --> P7
   P7["Phase 7 — AF-01..05<br/>Agent Factory: 2nd specialist, tools, guardrail, memory"] --> P75
-  P75["Phase 7.5+ — (new epic)<br/>Real session-resume + tracker/scheduler + TasksDueIndex"] --> P8
+  P75["Phase 7.5+ — tracker-scheduler.md<br/>Real session-resume + tracker/scheduler + TasksDueIndex<br/>✅ done"] --> P8
   P8["Phase 8+ — carried forward<br/>WebSocket push, remaining agents/tools,<br/>WhatsApp, auth, data flywheel, photo progress comparison"]
 ```
 
@@ -78,8 +78,9 @@ flowchart TD
   (PA-01, PA-03, PA-02 respectively, written 2026-09-13). Phase 5's design makes one explicit,
   documented scope call: it does **not** build the `SnapshotSessionManager`/`AgentStateBucket`
   session-resume `data-architecture.md` §3.1 designs — each chat turn is a fresh, stateless
-  orchestrator invocation instead (see the story's Context note). True session-resume is deferred
-  to the new **Phase 7.5+** (tracker/scheduler + multi-day follow-ups), where it's actually needed.
+  orchestrator invocation instead (see the story's Context note). True session-resume was deferred
+  to **Phase 7.5+** (tracker/scheduler + multi-day follow-ups), where it was actually needed —
+  since built and shipped, `stories/tracker-scheduler.md`.
 - Phase 6 (Tasks & Activity on real data) is now storied and done — `stories/tasks-activity.md`,
   written and shipped 2026-09-13. Two real gaps surfaced during scoping that the original mockup
   didn't account for: `Task` has no due-date/schedule concept (that's genuinely Phase 7+ tracker
@@ -88,14 +89,16 @@ flowchart TD
 
 ## 4. What to build right now
 
-**(2026-09-13 update, latest)** Phases 1-6 (OB-01/02, WS-01..05, PA-01..05, and Phase 6) are all
-done and live-verified against `dev` — the last of these closed Tasks/Activity on real data,
-including a real Event log and check-in agent feedback + a specialist-trace "How this was
-decided" section that went beyond Phase 6's original scope (PA-05). What remains open, in rough
-priority order: **AF-03/AF-04/AF-05** (rank 10-12, all ◐ partial — each just needs a manual dev
-smoke test or a guardrail retune, not new building); **PG-07** (guardrail eval, 4/6 passing, two
-diagnosed gaps); then **Phase 7.5+** (real session-resume + tracker/scheduler +
-`TasksDueIndex` follow-ups) once one of those is picked up — ask before assuming which.
+**(2026-09-14 update, latest)** Phases 1-6 and 7.5+ are all done and live-verified against `dev`.
+Phase 7.5+ (`stories/tracker-scheduler.md`) closed the tracker/scheduler + due-date follow-up loop
+(a real bug found + fixed live: an imported DynamoDB table's `grant_read_data()` doesn't cover GSI
+actions) and wired real `SnapshotSessionManager` session-resume into the orchestrator, replacing
+the full-DynamoDB-reconstruction-every-turn pattern PA-02 had deliberately deferred. What remains
+open, in rough priority order: **AF-03/AF-04/AF-05** (rank 10-12, all ◐ partial — each just needs
+a manual dev smoke test or a guardrail retune, not new building); **PG-07** (guardrail eval, 4/6
+passing, two diagnosed gaps); then **Phase 8+** carried-forward items (WebSocket push, remaining
+specialists/tools, a real progress log/photo-comparison over time — now unblocked by the
+tracker) — ask before assuming which to pick up next.
 
 ## 5. Related documents
 

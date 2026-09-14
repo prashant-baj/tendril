@@ -1,8 +1,8 @@
 """Orchestrator Lambda — Strands agent loop triggered by `goal.submitted`/`goal.message.received`/
-`task.checkin.received` (WS-02/WS-04, ADR-0012, PA-01/PA-02/PA-05).
+`task.checkin.received`/`followup.due` (WS-02/WS-04, ADR-0012, PA-01/PA-02/PA-05, Phase 7.5+).
 
 Invoked **asynchronously** by EventBridge rules (`AgentCoreStack`) — never reachable from the
-Client API's synchronous request path (ADR-0004). Three entry points share one mechanism:
+Client API's synchronous request path (ADR-0004). Four entry points:
 
 1. `goal.submitted` (`handle_goal_submitted`) — the first turn on a new goal.
 2. `goal.message.received` (`handle_goal_message_received`) — every subsequent turn, after the
@@ -10,13 +10,21 @@ Client API's synchronous request path (ADR-0004). Three entry points share one m
 3. `task.checkin.received` (`handle_task_checkin_received`, PA-05) — after a check-in photo is
    attached to a task (`garden_handler.py::post_task_checkin`), assesses that photo against the
    plan and writes feedback onto the task; may also revise the plan, same as a chat turn.
+4. `followup.due` (`handle_followup_due`, Phase 7.5+) — the tracker/scheduler (`app/tracker/`)
+   found a pending task past its due-date. Unlike the other three, this is deliberately **not**
+   "just a turn" — no `Agent`/model call at all, just a deterministic nudge message + Activity
+   event + due-date bump (see `handle_followup_due`'s own docstring).
 
-All three are "just a turn in an ongoing conversation" — this orchestrator never resumes a live
-Strands session across Lambda invocations (no `SnapshotSessionManager`; see
-`docs/stories/plan-approval.md`'s PA-02 Context note for why that's a deliberate scope decision,
-not an oversight). Instead, every turn after the first reconstructs enough context from DynamoDB
-(the goal, its current `Plan`/`Task`s if any, and the full `Message` history) and feeds it back
-into a **fresh** `Agent`.
+The first three are "just a turn in an ongoing conversation." `_build_orchestrator_agent` attaches
+a real `SnapshotSessionManager` (`session_id=goal_id`, Phase 7.5+ — see its own docstring) so the
+resumed conversation history survives across Lambda invocations, closing the gap
+`docs/stories/plan-approval.md`'s PA-02 Context note deliberately deferred. Each handler's prompt
+is now just the genuinely new information for that turn — the goal's description (first turn),
+the single newest `Message` (chat turn — the resumed session already has every prior one), or a
+fixed check-in framing naming the task (check-in turn) — not a full transcript restatement
+(`docs/stories/tracker-scheduler.md`'s SR-02/SR-03). A `Plan`/`Task`/`Message` read still happens
+where a handler needs a structured-state *fact* the resumed session can't answer (e.g. "does a
+Plan already exist"), never to rebuild conversation text.
 
 Each turn runs in two steps (`_run_turn`): first, a normal call so the model can call whichever
 specialist tools are relevant (agents-as-tools, ADR-0012 — which specialists exist comes from
@@ -48,7 +56,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import boto3
@@ -56,6 +64,8 @@ from boto3.dynamodb.conditions import Key
 from pydantic import BaseModel, Field
 from strands import Agent, tool
 from strands.models import BedrockModel
+from strands.session.snapshot_session_manager import SnapshotSessionManager
+from strands.storage.s3_storage import S3Storage
 
 # force=True: the standard Lambda Python runtime (this is a plain Lambda, not an AgentCore
 # runtime) pre-attaches its own handler to the root logger before user code even runs, and
@@ -68,6 +78,7 @@ logger = logging.getLogger("tendril.orchestrator")
 
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by AgentCoreStack; never hardcoded
 MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by AgentCoreStack; never hardcoded
+AGENT_STATE_BUCKET_NAME = os.getenv("AGENT_STATE_BUCKET_NAME")  # injected by AgentCoreStack
 MODEL_ID = os.getenv("MODEL_ID") or None
 AGENT_MANIFEST: dict[str, dict[str, str]] = json.loads(os.getenv("AGENT_MANIFEST", "{}"))
 
@@ -152,6 +163,11 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
 )
 
 FALLBACK_TASK_TITLE_MAX_CHARS = 60
+# Phase 7.5+: how far forward a followup.due nudge pushes a task's due-date, so the tracker
+# doesn't re-fire for the same task on its next tick before the gardener responds. Own copy, not
+# shared with garden_handler.py's equivalent constant (separate deployable units, no cross-package
+# imports — same convention as GOAL_EVENT_SOURCE's duplication).
+FOLLOWUP_OFFSET_DAYS = 3
 
 
 def _summarize(text: str, max_len: int = 4000) -> str:
@@ -266,14 +282,20 @@ def _load_tasks(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
     return resp.get("Items", [])
 
 
-def _load_messages(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
-    # sk is GOALMSG#{goal_id}#{iso_timestamp}#{message_id} — a Query on this prefix comes back
-    # already time-ordered, same trick architecture.md §2 already uses for EVENT records.
+def _load_latest_message(garden_id: str, goal_id: str) -> dict[str, Any] | None:
+    """The single newest Message for this goal — Phase 7.5+'s session-resume means a handler no
+    longer needs the FULL message history (the resumed Agent's own conversation already has every
+    prior turn); only the just-arrived message is genuinely new input for this turn's prompt.
+    `ScanIndexForward=False` + `Limit=1` makes this a cheap single-item query, not a full-history
+    read."""
     resp = _get_table().query(
         KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
-        & Key("sk").begins_with(f"GOALMSG#{goal_id}#")
+        & Key("sk").begins_with(f"GOALMSG#{goal_id}#"),
+        ScanIndexForward=False,
+        Limit=1,
     )
-    return resp.get("Items", [])
+    items = resp.get("Items", [])
+    return items[0] if items else None
 
 
 def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
@@ -481,47 +503,41 @@ def _run_turn(agent: Agent, prompt: str, *, synthesize_fallback_plan: bool) -> C
     )
 
 
-def _format_transcript(
-    goal: dict[str, Any],
-    plan: dict[str, Any] | None,
-    tasks: list[dict[str, Any]],
-    messages: list[dict[str, Any]],
-    checkin_task: dict[str, Any] | None = None,
-) -> str:
-    """Builds the prompt text for a chat-turn re-invocation. This orchestrator never resumes a
-    live Strands session (plan-approval.md's PA-02 Context note) — every turn after the first
-    reconstructs context from DynamoDB instead.
+def _build_checkin_prompt(checkin_task: dict[str, Any]) -> str:
+    """The new-turn prompt for a task check-in (PA-05/Phase 7.5+) — the resumed session already
+    has the full prior conversation/plan; this is only the genuinely new information (a photo was
+    just attached to this specific task)."""
+    return (
+        f"The gardener just checked in on task '{checkin_task.get('title', '')}' "
+        f"({checkin_task.get('detail', '')}) with a new photo, attached to this message. "
+        "Assess whether this looks like it's progressing toward the plan's success "
+        "criteria. Reply with brief, encouraging feedback either way. If the "
+        "check-in suggests the plan should change, revise it — completed tasks are "
+        "preserved automatically, so it's safe to add or adjust the remaining ones."
+    )
 
-    `checkin_task` (PA-05): set only for a task check-in turn — frames the prompt around
-    assessing that one task's new photo against the plan, rather than around a chat message."""
-    parts = [f"Original issue: {goal.get('description', '')}"]
-    if plan:
-        parts.append(f"\nCurrent plan — success criteria: {plan.get('success_criteria', '')}")
-        if tasks:
-            parts.append("Current tasks:")
-            for t in tasks:
-                parts.append(f"- {t.get('title', '')}: {t.get('detail', '')}")
-    if messages:
-        parts.append("\nConversation so far:")
-        for m in messages:
-            speaker = "Gardener" if m.get("role") == "user" else "Tendril"
-            parts.append(f"{speaker}: {m.get('content', '')}")
-    if checkin_task is not None:
-        parts.append(
-            f"\nThe gardener just checked in on task '{checkin_task.get('title', '')}' "
-            f"({checkin_task.get('detail', '')}) with a new photo, attached to this message. "
-            "Assess whether this looks like it's progressing toward the plan's success "
-            "criteria above. Reply with brief, encouraging feedback either way. If the "
-            "check-in suggests the plan should change, revise it — completed tasks are "
-            "preserved automatically, so it's safe to add or adjust the remaining ones."
-        )
-    else:
-        parts.append(
-            "\nRespond to the gardener's latest message above. If they're asking for a change, "
-            "revise the plan. If you need more information first, ask a clarifying question "
-            "instead of guessing."
-        )
-    return "\n".join(parts)
+
+def _strip_trailing_unresolved_tool_use(agent: Agent) -> None:
+    """Security mitigation (strands-capability-mapping.md's session-resume guidance): a trailing
+    assistant message whose content ends in a toolUse block, with no corresponding toolResult
+    message after it, would otherwise be replayed/executed without model reasoning if left in
+    resumed history — defense-in-depth even though only this orchestrator ever writes to its own
+    session today (a future bug/change could violate that invariant).
+
+    No `strip_trailing_tool_use()` function exists in strands-agents==1.55.1 (verified by
+    inspection) — this is a hand-rolled implementation of a documented pattern, not an SDK
+    guarantee. Called immediately after `Agent(...)` construction: `SnapshotSessionManager`
+    restores messages synchronously during `Agent.__init__` (via its `AgentInitializedEvent`
+    hook), so `agent.messages` is already populated by the time `Agent(...)` returns."""
+    messages = agent.messages
+    if not messages:
+        return
+    last = messages[-1]
+    if last.get("role") != "assistant":
+        return
+    content = last.get("content") or []
+    if content and isinstance(content[-1], dict) and "toolUse" in content[-1]:
+        agent.messages = messages[:-1]
 
 
 def _build_orchestrator_agent(
@@ -531,12 +547,25 @@ def _build_orchestrator_agent(
     image_format,
     trace: list[dict[str, Any]] | None = None,
 ) -> Agent:
-    return Agent(
+    # Phase 7.5+: SnapshotSessionManager keyed by goal_id (data-architecture.md §3.1,
+    # strands-capability-mapping.md's recommendation) — every EventBridge wake for this goal_id
+    # resumes the same messages/agent state instead of starting from a blank conversation. No
+    # {env_name} segment in the prefix: the bucket NAME already physically separates
+    # environments, so repeating it in the object-key prefix would be redundant nesting with zero
+    # isolation benefit.
+    session_manager = SnapshotSessionManager(
+        session_id=goal_id,
+        storage=S3Storage(bucket=AGENT_STATE_BUCKET_NAME, prefix="orchestrator-sessions/"),
+    )
+    agent = Agent(
         model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
         tools=_build_tools(garden_id, image_url, image_format, trace),
+        session_manager=session_manager,
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},
     )
+    _strip_trailing_unresolved_tool_use(agent)
+    return agent
 
 
 def _finalize_trace(trace: list[dict[str, Any]], turn: ChatTurnResult, turn_ms: int) -> None:
@@ -615,22 +644,22 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
         logger.error("goal_not_found garden_id=%s goal_id=%s", garden_id, goal_id)
         return
 
+    # Phase 7.5+: the resumed session already has every prior turn — `plan` is only read here to
+    # decide `synthesize_fallback_plan` (a structured-state fact the session can't answer), not to
+    # rebuild a transcript. Only the just-arrived message is genuinely new input for this turn.
     plan = _load_plan(garden_id, goal_id)
-    tasks = _load_tasks(garden_id, goal_id)
-    # Already includes the newest user message — the Client API writes it before publishing this
-    # event, the same ordering create_goal already relies on for goal.submitted.
-    messages = _load_messages(garden_id, goal_id)
+    latest_message = _load_latest_message(garden_id, goal_id)
+    prompt = (latest_message or {}).get("content", "")
 
     image = _resolve_image(garden_id, goal.get("media_ids") or [])
     image_url, image_format = image if image else (None, None)
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
-    transcript = _format_transcript(goal, plan, tasks, messages)
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, transcript, synthesize_fallback_plan=plan is None)
+        turn = _run_turn(agent, prompt, synthesize_fallback_plan=plan is None)
         logger.info(
             "chat_turn_result garden_id=%s goal_id=%s has_plan=%s reply=%r",
             garden_id,
@@ -667,7 +696,9 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
         logger.error("goal_not_found garden_id=%s goal_id=%s", garden_id, goal_id)
         return
 
-    plan = _load_plan(garden_id, goal_id)
+    # Phase 7.5+: only the check-in's own task lookup is needed (a structured-state fact) — the
+    # resumed session already has the full prior conversation/plan, so no `plan`/message-history
+    # read is needed here at all.
     tasks = _load_tasks(garden_id, goal_id)
     checkin_task = next((t for t in tasks if t.get("task_id") == task_id), None)
     if not checkin_task:
@@ -675,7 +706,6 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
             "checkin_task_not_found garden_id=%s goal_id=%s task_id=%s", garden_id, goal_id, task_id
         )
         return
-    messages = _load_messages(garden_id, goal_id)
 
     image = _resolve_image(
         garden_id, [checkin_task["media_id"]] if checkin_task.get("media_id") else []
@@ -684,11 +714,10 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
-    transcript = _format_transcript(goal, plan, tasks, messages, checkin_task=checkin_task)
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, transcript, synthesize_fallback_plan=False)
+        turn = _run_turn(agent, _build_checkin_prompt(checkin_task), synthesize_fallback_plan=False)
         logger.info(
             "checkin_feedback_result garden_id=%s goal_id=%s task_id=%s has_plan=%s reply=%r",
             garden_id,
@@ -710,6 +739,95 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
         )
 
 
+def _bump_task_due_date(garden_id: str, goal_id: str, task_id: str) -> None:
+    """Pushes due_date/gsi1sk forward by FOLLOWUP_OFFSET_DAYS. Correctness-critical: without
+    this, the tracker would re-emit followup.due for the SAME task on every subsequent tick until
+    the gardener checks in, since the task would remain visible in TasksDueIndex at its old
+    (now-past) due_date."""
+    due = (datetime.now(UTC) + timedelta(days=FOLLOWUP_OFFSET_DAYS)).isoformat()
+    _get_table().update_item(
+        Key={"pk": f"GARDEN#{garden_id}", "sk": f"TASK#{goal_id}#{task_id}"},
+        UpdateExpression="SET due_date = :d, gsi1pk = :p, gsi1sk = :d",
+        ExpressionAttributeValues={":d": due, ":p": "TASK_STATUS#pending"},
+    )
+
+
+def handle_followup_due(detail: dict[str, Any]) -> None:
+    """`followup.due` (Phase 7.5+): the tracker/scheduler found a pending task past its due-date.
+    Deliberately NOT "just a turn" like the other three handlers — no Agent/BedrockModel, no
+    specialist consultation, no _run_turn. A proactive nudge is a deterministic, non-model action:
+    write a chat message, log an Activity event, and push the due-date forward so this same task
+    doesn't refire next tick before the gardener responds."""
+    garden_id = detail["gardenId"]
+    goal_id = detail["goalId"]
+    task_id = detail["taskId"]
+
+    task_item = (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"TASK#{goal_id}#{task_id}"})
+        .get("Item")
+    )
+    if not task_item or task_item.get("status") != "pending":
+        # Missing, or already checked in between the tracker's query and this invocation (a real
+        # race given the tracker's own at-least-once/no-dedupe posture) — post_task_checkin
+        # already removed gsi1pk/gsi1sk/due_date in that case; re-bumping here would incorrectly
+        # resurrect a done task into the sparse index.
+        logger.info(
+            "followup_due_skipped garden_id=%s goal_id=%s task_id=%s status=%s",
+            garden_id,
+            goal_id,
+            task_id,
+            task_item.get("status") if task_item else "not_found",
+        )
+        return
+
+    try:
+        _write_message(
+            garden_id,
+            goal_id,
+            role="assistant",
+            content=(
+                f"Just checking in — how's '{task_item.get('title', '')}' going? Check in with "
+                "a quick photo whenever you get to it."
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "followup_due_message_failed garden_id=%s goal_id=%s task_id=%s",
+            garden_id,
+            goal_id,
+            task_id,
+        )
+
+    try:
+        _write_event(
+            garden_id,
+            "task.followup_due",
+            {"goalId": goal_id, "taskId": task_id, "taskTitle": task_item.get("title", "")},
+        )
+    except Exception:
+        logger.exception(
+            "followup_due_event_failed garden_id=%s goal_id=%s task_id=%s",
+            garden_id,
+            goal_id,
+            task_id,
+        )
+
+    try:
+        _bump_task_due_date(garden_id, goal_id, task_id)
+    except Exception:
+        # The one failure mode that must be loud: silence here directly causes the "refires
+        # forever" bug this whole design otherwise prevents. Never re-raise though — a raise
+        # would trigger EventBridge's automatic retry, re-running the message/event writes above
+        # too (double-nudging), which is worse than logging and moving on.
+        logger.exception(
+            "followup_due_bump_failed garden_id=%s goal_id=%s task_id=%s",
+            garden_id,
+            goal_id,
+            task_id,
+        )
+
+
 def handler(event: dict[str, Any], _context: Any) -> None:
     detail_type = event.get("detail-type")
     detail = event.get("detail") or {}
@@ -719,5 +837,7 @@ def handler(event: dict[str, Any], _context: Any) -> None:
         handle_goal_message_received(detail)
     elif detail_type == "task.checkin.received":
         handle_task_checkin_received(detail)
+    elif detail_type == "followup.due":
+        handle_followup_due(detail)
     else:
         logger.warning("unhandled_event detail_type=%s", detail_type)

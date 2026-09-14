@@ -89,7 +89,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
@@ -113,6 +113,11 @@ GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
 GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
 TASK_CHECKIN_RECEIVED_DETAIL_TYPE = "task.checkin.received"
+
+# Phase 7.5+: how far out approve_plan schedules a fresh follow-up for each pending task. Own
+# copy, not shared with orchestrator.py's equivalent FOLLOWUP_OFFSET_DAYS constant (separate
+# deployable units, no cross-package imports).
+APPROVAL_FOLLOWUP_OFFSET_DAYS = 3
 
 # Same free, keyless Open-Meteo endpoints app/tools/weather/handler.py already calls for
 # specialists — duplicated here (not shared) since app/api and app/tools/weather are separate
@@ -907,13 +912,44 @@ def approve_plan(event: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception("Failed to write plan.approved event for plan %s", plan_id)
 
+    # Phase 7.5+: stamp a follow-up due-date onto every still-pending task for this goal — the
+    # tracker/scheduler (app/tracker/) polls TasksDueIndex for exactly these. Best-effort: a
+    # stamping failure must never turn a successful approval into a 500; the approval itself
+    # (Plan/Goal -> Approved, above) is the correctness-critical part.
+    #
+    # Plan-revision self-correction: a later chat/check-in turn producing an updated_plan causes
+    # _write_plan_and_tasks (orchestrator.py) to delete all non-done tasks and create fresh ones
+    # with no due-date, flipping Goal.status back to PlanProposed — which forces re-approval
+    # through this SAME endpoint before those new tasks can proceed. Since this queries the
+    # CURRENT task set at call time (not a cached snapshot from first approval), calling
+    # approve_plan again after a revision naturally re-stamps whatever pending tasks exist then —
+    # no special-casing needed for "revision after approval."
+    try:
+        tasks_resp = table.query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(f"TASK#{plan_id}#")
+        )
+        due_date = (datetime.now(UTC) + timedelta(days=APPROVAL_FOLLOWUP_OFFSET_DAYS)).isoformat()
+        for task_item in tasks_resp.get("Items", []):
+            if task_item.get("status") != "pending":
+                continue
+            table.update_item(
+                Key={"pk": task_item["pk"], "sk": task_item["sk"]},
+                UpdateExpression="SET due_date = :d, gsi1pk = :p, gsi1sk = :d",
+                ExpressionAttributeValues={":d": due_date, ":p": "TASK_STATUS#pending"},
+            )
+    except Exception:
+        logger.exception("Failed to stamp task due-dates for plan %s", plan_id)
+
     return _response(200, {"planId": plan_id, "status": "Approved"})
 
 
 def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
     """Attaches a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
     chain and marks the task done in the same write. One check-in per task, not a repeatable
-    progress log — that's the Phase 7+ tracker/outcome loop, not this."""
+    progress log — that's the Phase 7+ tracker/outcome loop, not this. Also clears the task's
+    TasksDueIndex attributes (Phase 7.5+) — a done task must never still appear in "which tasks
+    are overdue" once it's been checked in."""
     path_params = event.get("pathParameters") or {}
     garden_id = path_params.get("gardenId")
     goal_id = path_params.get("goalId")
@@ -962,7 +998,13 @@ def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
                     "Update": {
                         "TableName": APP_TABLE_NAME,
                         "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": task_sk}),
-                        "UpdateExpression": "SET #status = :status, media_id = :mid",
+                        # REMOVE is a safe no-op for tasks that never had these attributes (e.g.
+                        # a plan never approved through approve_plan) — no ConditionExpression
+                        # change needed. Keeps TasksDueIndex sparse (Phase 7.5+): a checked-in
+                        # task drops out of "awaiting follow-up" immediately.
+                        "UpdateExpression": (
+                            "SET #status = :status, media_id = :mid REMOVE gsi1pk, gsi1sk, due_date"
+                        ),
                         "ExpressionAttributeNames": {"#status": "status"},
                         "ExpressionAttributeValues": {
                             ":status": {"S": "done"},

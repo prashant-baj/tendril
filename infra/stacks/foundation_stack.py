@@ -61,6 +61,33 @@ class FoundationStack(Stack):
             removal_policy=removal,
         )
 
+        # Phase 7.5+: sparse GSI backing the tracker/scheduler's defining query ("which tasks
+        # have a follow-up due right now?"). Only tasks actually awaiting a follow-up carry
+        # gsi1pk/gsi1sk (stamped by approve_plan, cleared by post_task_checkin) — data-architecture.md §2.
+        self.app_table.add_global_secondary_index(
+            index_name="TasksDueIndex",
+            partition_key=ddb.Attribute(name="gsi1pk", type=ddb.AttributeType.STRING),
+            sort_key=ddb.Attribute(name="gsi1sk", type=ddb.AttributeType.STRING),
+            projection_type=ddb.ProjectionType.ALL,
+        )
+
+        # Phase 7.5+: the orchestrator's own cross-invocation session state (SnapshotSessionManager
+        # + S3Storage, data-architecture.md §3.1) — separate from MediaBucket since only the
+        # orchestrator ever touches this one (ADR-0013: specialists get no IAM on it at all). No
+        # CORS rules — nothing outside the orchestrator's own Lambda reads/writes this bucket, so
+        # there's no browser-facing presigned flow to allow.
+        self.agent_state_bucket = s3.Bucket(
+            self,
+            "AgentStateBucket",
+            bucket_name=f"{prefix}-agent-state",
+            versioned=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            removal_policy=removal,
+            auto_delete_objects=not retain,
+        )
+
         # WebSocket connection registry (ADR-0004).
         self.connections_table = ddb.Table(
             self,
@@ -74,3 +101,4 @@ class FoundationStack(Stack):
 
         CfnOutput(self, "MediaBucketName", value=self.media_bucket.bucket_name)
         CfnOutput(self, "AppTableName", value=self.app_table.table_name)
+        CfnOutput(self, "AgentStateBucketName", value=self.agent_state_bucket.bucket_name)

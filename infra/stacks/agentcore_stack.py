@@ -33,6 +33,14 @@ Per AF-05, a registry entry's `memory` block (`{"enabled": true, "scope": "..."}
 same per-specialist role read/write access to `MemoryStack`'s Bedrock Knowledge Base — resolved
 by stable name at runtime (`KNOWLEDGE_BASE_NAME`/`MEMORY_DATA_SOURCE_NAME`), same posture as
 prompts/guardrails, never a cross-stack reference to the (separately deployed) memory stack.
+
+Phase 7.5+ adds two more things to this stack: the orchestrator gets IAM + an env var for its own
+session-state bucket (`AgentStateBucket`, `SnapshotSessionManager`, data-architecture.md §3.1;
+ADR-0013's trusted-tier exception — never granted to any specialist role); and a Tracker/Scheduler
+Lambda (`app/tracker/`) on an EventBridge Scheduler rate schedule, publishing `followup.due`
+events under its own `tendril.tracker` source (not `tendril.client-api`, since it's a scheduled
+tick, not a user action) to a fourth Rule targeting the orchestrator, mirroring the existing three
+Rules exactly.
 """
 
 import json
@@ -51,6 +59,8 @@ from aws_cdk import (
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_s3 as s3,
+    aws_scheduler as scheduler,
+    aws_scheduler_targets as scheduler_targets,
 )
 from constructs import Construct
 
@@ -58,6 +68,7 @@ AGENTS_DIR = Path(__file__).resolve().parents[2] / "agents"
 REGISTRY_DIR = AGENTS_DIR / "registry"
 ORCHESTRATOR_DIR = Path(__file__).resolve().parents[2] / "app" / "orchestrator"
 TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
+TRACKER_DIR = Path(__file__).resolve().parents[2] / "app" / "tracker"
 
 # The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
 # source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
@@ -68,6 +79,11 @@ GOAL_EVENT_SOURCE = "tendril.client-api"
 GOAL_SUBMITTED_DETAIL_TYPE = "goal.submitted"
 GOAL_MESSAGE_RECEIVED_DETAIL_TYPE = "goal.message.received"
 TASK_CHECKIN_RECEIVED_DETAIL_TYPE = "task.checkin.received"
+
+# Phase 7.5+: the tracker/scheduler Lambda publishes this under its OWN source (not
+# GOAL_EVENT_SOURCE) since the Client API never publishes it — a scheduled tick, not a user action.
+FOLLOWUP_DUE_EVENT_SOURCE = "tendril.tracker"
+FOLLOWUP_DUE_DETAIL_TYPE = "followup.due"
 
 
 class AgentCoreStack(Stack):
@@ -145,6 +161,10 @@ class AgentCoreStack(Stack):
         # --- Orchestrator Lambda (WS-02 infra + WS-04 application: Strands agent loop) ---
         app_table = ddb.Table.from_table_name(self, "AppTable", f"{prefix}-app")
         media_bucket = s3.Bucket.from_bucket_name(self, "MediaBucket", f"{prefix}-media")
+        # Phase 7.5+: SnapshotSessionManager's own S3 backend (data-architecture.md §3.1).
+        agent_state_bucket = s3.Bucket.from_bucket_name(
+            self, "AgentStateBucket", f"{prefix}-agent-state"
+        )
 
         orchestrator_image_repo = self.node.try_get_context("orchestrator_image_repo")
         if orchestrator_image_repo:
@@ -179,6 +199,7 @@ class AgentCoreStack(Stack):
             environment={
                 "APP_TABLE_NAME": app_table.table_name,
                 "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
+                "AGENT_STATE_BUCKET_NAME": agent_state_bucket.bucket_name,
                 "MODEL_ID": context_model_id,
                 "LOG_LEVEL": "INFO",
                 "AGENT_MANIFEST": self.to_json_string(agent_manifest),
@@ -189,6 +210,10 @@ class AgentCoreStack(Stack):
         # can generate a short-lived presigned GET URL for a goal's attached photo and pass
         # *that* to specialists (who get no S3 IAM at all) — never the bucket access itself.
         media_bucket.grant_read(self.orchestrator)
+        # ADR-0013: the orchestrator is the ONLY component with IAM on its own session-state
+        # bucket (SnapshotSessionManager, Phase 7.5+) — specialists never get it; no grant exists
+        # anywhere in _make_agent_role.
+        agent_state_bucket.grant_read_write(self.orchestrator)
         self.orchestrator.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
@@ -256,6 +281,66 @@ class AgentCoreStack(Stack):
         task_checkin_received_rule.add_target(targets.LambdaFunction(self.orchestrator))
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
+
+        # --- Tracker/Scheduler Lambda (Phase 7.5+: due-date follow-ups) ---
+        tracker_image_repo = self.node.try_get_context("tracker_image_repo")
+        if tracker_image_repo:
+            repo = ecr.Repository.from_repository_name(self, "TrackerRepo", tracker_image_repo)
+            tracker_image_tag = self.node.try_get_context("tracker_image_tag") or "latest"
+            tracker_code = lambda_.DockerImageCode.from_ecr(repo, tag=tracker_image_tag)
+        else:
+            tracker_code = lambda_.DockerImageCode.from_image_asset(
+                str(TRACKER_DIR), platform=ecr_assets.Platform.LINUX_ARM64
+            )
+
+        self.tracker = lambda_.DockerImageFunction(
+            self,
+            "Tracker",
+            function_name=f"{prefix}-tracker",
+            code=tracker_code,
+            architecture=lambda_.Architecture.ARM_64,
+            timeout=Duration.minutes(2),
+            memory_size=256,
+            environment={"APP_TABLE_NAME": app_table.table_name, "LOG_LEVEL": "INFO"},
+        )
+        # Read-only: the tracker only queries TasksDueIndex, never writes AppTable.
+        # NOT app_table.grant_read_data() — app_table is Table.from_table_name(), an imported
+        # table with no index metadata, so grant_read_data() only grants base-table actions, not
+        # `.../index/*` — confirmed live via a real AccessDeniedException on dynamodb:Query
+        # against the index. Grant the index ARN explicitly instead.
+        self.tracker.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:Query"],
+                resources=[f"{app_table.table_arn}/index/TasksDueIndex"],
+            )
+        )
+        self.tracker.add_to_role_policy(
+            iam.PolicyStatement(actions=["events:PutEvents"], resources=["*"])
+        )
+
+        scheduler.Schedule(
+            self,
+            "TrackerSchedule",
+            schedule_name=f"{prefix}-tracker-tick",
+            schedule=scheduler.ScheduleExpression.rate(Duration.minutes(15)),
+            target=scheduler_targets.LambdaInvoke(self.tracker),
+            description="Polls TasksDueIndex for overdue pending tasks and emits followup.due events.",
+        )
+
+        # EventBridge: followup.due -> orchestrator (Phase 7.5+) — a NEW source
+        # ("tendril.tracker", not "tendril.client-api") since the tracker, not the Client API,
+        # publishes it. Mirrors the other three orchestrator-bound Rules exactly in shape.
+        followup_due_rule = events.Rule(
+            self,
+            "FollowupDueRule",
+            rule_name=f"{prefix}-followup-due",
+            event_pattern=events.EventPattern(
+                source=[FOLLOWUP_DUE_EVENT_SOURCE], detail_type=[FOLLOWUP_DUE_DETAIL_TYPE]
+            ),
+        )
+        followup_due_rule.add_target(targets.LambdaFunction(self.orchestrator))
+
+        CfnOutput(self, "TrackerArn", value=self.tracker.function_arn)
 
     def _make_agent_role(
         self, name: str, tool_names: list[str], memory_config: dict | None = None

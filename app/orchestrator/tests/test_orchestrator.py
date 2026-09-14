@@ -89,6 +89,7 @@ class FakeAgent:
     structured_output = None  # a ChatTurnResult, or None to simulate no/failed structuring
     raise_on_structured = False
     raise_on_call: Exception | None = None  # set to make the first (tool-calling) call raise
+    messages: list = []  # Phase 7.5+: _strip_trailing_unresolved_tool_use reads this
 
     def __init__(self, **kwargs):
         FakeAgent.last_kwargs = kwargs
@@ -408,7 +409,7 @@ def test_run_turn_does_not_clobber_existing_plan_when_structuring_fails():
     assert result.updated_plan is None
 
 
-# --- _load_plan / _load_tasks / _load_messages / _write_plan_and_tasks (PA-01/PA-02) -------
+# --- _load_plan / _load_tasks / _load_latest_message / _write_plan_and_tasks (PA-01/PA-02) -
 
 
 def test_load_plan_returns_none_when_absent(monkeypatch):
@@ -423,6 +424,26 @@ def test_load_tasks_queries_by_goal_scoped_prefix(monkeypatch):
     tasks = handler._load_tasks("g1", "goal-1")
 
     assert tasks == [{"task_id": "t1"}]
+
+
+def test_load_latest_message_queries_with_scan_index_forward_false_and_limit_one(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": [{"content": "latest"}]})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    message = handler._load_latest_message("g1", "goal-1")
+
+    assert message == {"content": "latest"}
+    assert len(fake_table.query_calls) == 1
+    call = fake_table.query_calls[0]
+    assert call["ScanIndexForward"] is False
+    assert call["Limit"] == 1
+
+
+def test_load_latest_message_returns_none_when_no_messages(monkeypatch):
+    fake_table = FakeTable(query_response={"Items": []})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    assert handler._load_latest_message("g1", "goal-1") is None
 
 
 def test_write_plan_and_tasks_clears_previous_tasks_then_writes_fresh_set(monkeypatch):
@@ -543,6 +564,62 @@ def test_write_plan_and_tasks_survives_event_write_failure(monkeypatch):
     handler._write_plan_and_tasks("g1", "goal-1", plan)
 
     assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
+
+
+# --- _build_orchestrator_agent (Phase 7.5+: SnapshotSessionManager wiring) -----------------
+
+
+def test_build_orchestrator_agent_wires_session_manager_with_goal_id_as_session_id(monkeypatch):
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    monkeypatch.setattr(handler, "AGENT_STATE_BUCKET_NAME", "tendril-dev-agent-state")
+
+    handler._build_orchestrator_agent("g1", "goal-1", None, None)
+
+    session_manager = FakeAgent.last_kwargs["session_manager"]
+    assert session_manager.session_id == "goal-1"
+    # SnapshotSessionManager wraps the given storage in a _NamespacedStorage — the real S3Storage
+    # we constructed is nested one level deeper, at ._storage._storage.
+    s3_storage = session_manager._storage._storage
+    assert s3_storage._bucket == "tendril-dev-agent-state"
+    assert s3_storage._prefix == "orchestrator-sessions//"
+
+
+def test_strip_trailing_unresolved_tool_use_removes_trailing_tool_use_message():
+    class _StubAgent:
+        messages = [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"toolUse": {"name": "x"}}]},
+        ]
+
+    agent = _StubAgent()
+    handler._strip_trailing_unresolved_tool_use(agent)
+
+    assert agent.messages == [{"role": "user", "content": [{"text": "hi"}]}]
+
+
+def test_strip_trailing_unresolved_tool_use_is_a_no_op_for_normal_trailing_text():
+    class _StubAgent:
+        messages = [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "hello there"}]},
+        ]
+
+    agent = _StubAgent()
+    original = list(agent.messages)
+    handler._strip_trailing_unresolved_tool_use(agent)
+
+    assert agent.messages == original
+
+
+def test_strip_trailing_unresolved_tool_use_handles_empty_messages():
+    class _StubAgent:
+        messages: list = []
+
+    agent = _StubAgent()
+    handler._strip_trailing_unresolved_tool_use(agent)  # must not raise
+
+    assert agent.messages == []
 
 
 # --- handle_goal_submitted (agent-loop wiring; Agent/BedrockModel mocked) ------------------
@@ -758,7 +835,16 @@ def test_handle_goal_message_received_revises_plan(monkeypatch):
                 }
             },
         },
-        query_response={"Items": []},
+        query_response={
+            "Items": [
+                {
+                    "pk": "GARDEN#g1",
+                    "sk": "GOALMSG#goal-1#2026-01-01T00:00:00#m1",
+                    "role": "user",
+                    "content": "actually water it less often",
+                }
+            ]
+        },
     )
     monkeypatch.setattr(handler, "_table", fake_table)
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
@@ -773,8 +859,9 @@ def test_handle_goal_message_received_revises_plan(monkeypatch):
 
     handler.handle_goal_message_received({"gardenId": "g1", "goalId": "goal-1"})
 
-    assert "leaves yellow" in FakeAgent.last_prompt
-    assert "Leaves green" in FakeAgent.last_prompt
+    # Phase 7.5+: the prompt is just the newest message's text, not a full-transcript restatement
+    # (the resumed session already has the goal description/plan/prior history).
+    assert FakeAgent.last_prompt == "actually water it less often"
     assert any(i["sk"] == "PLAN#goal-1" for i in fake_table.put_calls)
     statuses = [c["ExpressionAttributeValues"][":status"] for c in fake_table.update_calls]
     assert statuses == ["PlanProposed"]
@@ -876,6 +963,13 @@ def test_handle_task_checkin_received_writes_task_feedback(monkeypatch):
     feedback_calls = [c for c in fake_table.update_calls if c["Key"]["sk"] == "TASK#goal-1#task-1"]
     assert len(feedback_calls) == 1
     assert feedback_calls[0]["ExpressionAttributeValues"][":f"] == "Looking good, keep it up!"
+
+    # Phase 7.5+: the prompt is the fixed check-in framing (naming the task), not a full
+    # transcript restatement — and no message-history query happens for this handler at all
+    # (only the one TASK# query, to find the checked-in task).
+    assert "Water deeply" in FakeAgent.last_prompt
+    assert "Soak the soil" in FakeAgent.last_prompt
+    assert len(fake_table.query_calls) == 1
 
 
 def test_handle_task_checkin_received_with_plan_revision_preserves_checked_in_task(monkeypatch):
@@ -1001,6 +1095,95 @@ def test_handle_task_checkin_received_agent_failure_writes_no_feedback(monkeypat
     assert fake_table.update_calls == []
 
 
+# --- handle_followup_due (Phase 7.5+) --------------------------------------------------------
+
+
+def test_handle_followup_due_writes_nudge_message_and_event_and_bumps_due_date(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={
+            "Item": {
+                "task_id": "task-1",
+                "title": "Water deeply",
+                "status": "pending",
+            }
+        }
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_followup_due({"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"})
+
+    # No model call at all for a nudge.
+    assert FakeAgent.last_kwargs is None
+
+    message_puts = [i for i in fake_table.put_calls if i["sk"].startswith("GOALMSG#")]
+    assert len(message_puts) == 1
+    assert "Water deeply" in message_puts[0]["content"]
+    assert message_puts[0]["role"] == "assistant"
+
+    event_puts = [i for i in fake_table.put_calls if i["sk"].startswith("EVENT#")]
+    assert len(event_puts) == 1
+    assert event_puts[0]["type"] == "task.followup_due"
+    assert event_puts[0]["payload"] == {
+        "goalId": "goal-1",
+        "taskId": "task-1",
+        "taskTitle": "Water deeply",
+    }
+
+    assert len(fake_table.update_calls) == 1
+    bump = fake_table.update_calls[0]
+    assert bump["Key"] == {"pk": "GARDEN#g1", "sk": "TASK#goal-1#task-1"}
+    assert bump["ExpressionAttributeValues"][":p"] == "TASK_STATUS#pending"
+    # The new due-date must be in the future relative to "now".
+    from datetime import UTC, datetime
+
+    new_due = datetime.fromisoformat(bump["ExpressionAttributeValues"][":d"])
+    assert new_due > datetime.now(UTC)
+
+
+def test_handle_followup_due_skips_when_task_already_done(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"task_id": "task-1", "title": "Water", "status": "done"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_followup_due({"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"})
+
+    assert fake_table.put_calls == []
+    assert fake_table.update_calls == []
+
+
+def test_handle_followup_due_skips_when_task_not_found(monkeypatch):
+    fake_table = FakeTable(get_item_response={})
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_followup_due({"gardenId": "g1", "goalId": "goal-1", "taskId": "missing"})
+
+    assert fake_table.put_calls == []
+    assert fake_table.update_calls == []
+
+
+def test_handle_followup_due_message_write_failure_does_not_block_due_date_bump(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"task_id": "task-1", "title": "Water", "status": "pending"}}
+    )
+
+    def _raise_on_message(Item):
+        if Item["sk"].startswith("GOALMSG#"):
+            raise RuntimeError("write failed")
+        fake_table.put_calls.append(Item)
+
+    monkeypatch.setattr(fake_table, "put_item", _raise_on_message)
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handle_followup_due(
+        {"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"}
+    )  # no raise
+
+    # The message write failed, but the Event write and the due-date bump still happened.
+    assert any(i["sk"].startswith("EVENT#") for i in fake_table.put_calls)
+    assert len(fake_table.update_calls) == 1
+
+
 # --- handler() routing ----------------------------------------------------------------------
 
 
@@ -1073,6 +1256,24 @@ def test_handler_routes_task_checkin_received(monkeypatch):
     )
 
     assert any(c["Key"]["sk"] == "TASK#goal-1#task-1" for c in fake_table.update_calls)
+
+
+def test_handler_routes_followup_due(monkeypatch):
+    fake_table = FakeTable(
+        get_item_response={"Item": {"task_id": "task-1", "title": "Water", "status": "pending"}}
+    )
+    monkeypatch.setattr(handler, "_table", fake_table)
+
+    handler.handler(
+        {
+            "detail-type": "followup.due",
+            "detail": {"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
+        },
+        None,
+    )
+
+    assert len(fake_table.update_calls) == 1
+    assert fake_table.update_calls[0]["Key"] == {"pk": "GARDEN#g1", "sk": "TASK#goal-1#task-1"}
 
 
 def test_handler_ignores_unknown_detail_type(monkeypatch):

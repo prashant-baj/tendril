@@ -59,12 +59,12 @@ Strands APIs" guidance.
 - **AF-05 (memory & context):** pin the garden's vision/success-criteria via **`ContextInjector`**, not the `agentic` mode's model-invoked `pin_context` tool — deterministic beats "hope the model chooses to pin it." Memory scoping should use the store's native `scope` parameter directly (`scope=f"{user_id}:{garden_id}"`), not a bespoke isolation scheme.
 - **WS-04/AF-03 (orchestrator ↔ specialist invocation):** evaluate the SDK's native `A2AAgent` class before hand-writing an `InvokeAgentRuntime`-calling `@tool` wrapper — it may remove custom code, if AgentCore's runtime can be reached over A2A.
 - **AF-03 (tools):** consider exposing Tool APIs via **MCP** (stdio/HTTP) instead of one bespoke `@tool` per tool, if the tool count grows past the ~5 currently planned — new tools would need zero new binding code in the template agent.
-- **The orchestrator's cross-invocation resume** (implied by ADR-0004/0012, not yet a story) should explicitly use `SnapshotSessionManager` keyed by `goal_id`, rather than a bespoke DynamoDB pause-state schema — this is new, concrete guidance not previously captured anywhere.
+- ~~**The orchestrator's cross-invocation resume**~~ — **done (Phase 7.5+, `docs/stories/tracker-scheduler.md`'s SR-01/02/03)**: `SnapshotSessionManager` keyed by `goal_id`, exactly as recommended here, wired into `_build_orchestrator_agent` and live-verified (session isolation across two goals, correct context retention across turns).
 - **PG-07 / ADR-0008's eval requirement**: adopt `strands-evals` (deterministic evaluators + Red Teaming) as the implementation, rather than continuing to extend the hand-rolled `scripts/eval_guardrail.py`.
 
 ## 4. Follow-up items (not stories yet — flagging for a future backlog pass)
 
-1. Wire `SnapshotSessionManager` (keyed by `goal_id`) into `app/orchestrator/` for HITL + multi-day resume — this is more central than a footnote and probably deserves its own story before/alongside WS-04.
+1. ~~Wire `SnapshotSessionManager` (keyed by `goal_id`) into `app/orchestrator/`~~ — **done, Phase 7.5+** (`docs/stories/tracker-scheduler.md`).
 2. Evaluate `A2AAgent` vs. a hand-written `InvokeAgentRuntime` tool wrapper for AF-03/WS-04 before implementing either.
 3. Migrate `scripts/eval_guardrail.py`'s scenarios onto `strands-evals` (deterministic evaluators + one Red Teaming pass) — likely supersedes part of PG-07.
 4. Decide whether Cedar Authorization is worth adding as a per-tenant tool-access layer beyond IAM.
