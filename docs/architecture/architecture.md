@@ -367,7 +367,7 @@ sequenceDiagram
   User->>API: GET /goals/{goalId} (polling — no push channel exists)
   API-->>User: plan + trace once ready
   User->>API: POST /plans/{planId}/approve
-  API->>State: Plan & Goal = Approved; stamp each pending Task's due_date (+3 days)
+  API->>State: Plan and Goal set to Approved, stamp each pending Task's due date 3 days out
 ```
 
 ### 7.2 Long-running tracking loop (pause / resume across sessions)
