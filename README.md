@@ -8,7 +8,7 @@
 
 Tendril is two things at once:
 
-1. **A working organic-gardening agent.** Snap a photo of a plant, ask a question ("why are the leaves yellowing?", "is this ready to harvest?"), and Tendril figures out what's wrong, builds a care plan, and *stays with you* — sending reminders and asking for follow-up photos over days and weeks — until the goal (a healthy, thriving plant) is reached.
+1. **A working organic-gardening agent.** Snap a photo of a plant, ask a question ("why are the leaves yellowing?", "is this ready to harvest?"), and Tendril figures out what's wrong, builds a care plan, and *stays with you* — proactively checking back in and asking for follow-up photos over days and weeks — until the goal (a healthy, thriving plant) is reached.
 
 2. **A domain-agnostic multi-agent engine underneath it.** Tendril is built on a reusable engine: swap the prompts, skills, and tool bindings and the same framework powers an entirely different application — the framework itself doesn't change.
 
@@ -19,30 +19,39 @@ Most plant apps are static: they identify a plant, look up a generic care templa
 ## Example: from photo to a thriving plant
 
 ```
-Day 1  You upload a photo of a chili plant + "leaves are curling."
-       → Orchestrator calls: vision/diagnosis → pest specialist → organic-remedy
-         specialist → weather API. Diagnosis: aphids. It proposes a neem-oil
-         spray plan and a 14-day recovery goal (you tap to confirm).
+Day 1  You submit a photo of a curry leaf plant + "looks sparse and stressed."
+       → Orchestrator calls the vision specialist, which diagnoses likely
+         overwatering/root stress from the photo alone — no fixed pipeline of
+         specialists runs; the model decides who else (if anyone) to consult
+         per issue. It proposes a 4-task plan ("Done when: leaves perk up and
+         stems stop drooping within 2 weeks") and you approve it.
 
-Day 3  Tracker agent (scheduled) checks in via WhatsApp: "How do the new
-       leaves look? Send a photo." You reply with a photo.
+Day 4  A scheduled Tracker Lambda finds the task overdue and nudges — right
+       inside the same chat thread you started on Day 1: "Just checking in —
+       how's 'Check soil moisture' going?" Next time you open the app, it's
+       there waiting.
 
-Day 5  New photo shows no improvement → orchestrator re-reasons, escalates:
-       revises the plan, checks humidity forecast, adjusts spray timing.
+Day 4  You check in with a new photo. The orchestrator resumes that exact
+       session (not a new conversation), looks at the new photo, and reports
+       back honestly: "still needs a bit more time... hold off on watering
+       and focus on improving drainage."
 
-Day 12 Follow-up photo shows healthy new growth → goal met. Tracker closes
-       the loop and logs the outcome.
+Day 18 The Activity tab shows the whole arc — issue, plan, nudge, check-in —
+       as one continuous, timestamped thread.
 ```
 
-No two runs take the same path — the workflow is *composed*, not selected from a fixed graph.
+No two runs take the same path — the workflow is *composed*, not selected from a fixed graph. And
+today, every follow-up happens **in-app** (the gardener sees it next time they open Tendril) —
+there's no push notification channel (WhatsApp/SMS/web-push) wired up yet; that's a real,
+tracked gap, not a design choice (see [ADR-0004](docs/architecture/ADRs/0004-backend-api-serverless-storage.md)).
 
 ## How it works
 
-- **Tools are APIs.** Weather, market prices, plant-ID/vision, notifications (WhatsApp/email) — each exposed behind a uniform contract the agents can discover and call.
-- **Agents come from a factory.** One agent template, specialized purely by configuration (model, tools, and a prompt/skill loaded from S3 / Bedrock Prompt Management). Adding a specialist = a new prompt + a config entry, not a new codebase.
-- **A model-driven orchestrator** dynamically selects and sequences the specialists per request and per user context (urban gardener vs. farmer).
-- **An outcome loop** persists the plan, success criteria, and progress (DynamoDB / AgentCore Memory), and a scheduled tracker agent drives follow-ups until the goal is reached.
-- **Deterministic plumbing, model-driven brain** — S3 ingestion, scheduling, persistence, and notifications are deterministic; the intelligence lives in the model-driven orchestration.
+- **Tools are APIs.** Today that's a real Weather tool (a Lambda behind an IAM-authenticated Function URL); the pattern is built to add more (market prices, notifications, IoT actuators) behind the same uniform contract without touching agent code.
+- **Agents come from a factory.** One shared agent codebase (`agents/hello_agent/`), specialized purely by a declarative registry entry (`agents/registry/*.json`: model, tools, prompt, guardrail, per-garden memory). Adding a specialist = a new registry entry, not a new codebase — 5 specialists exist today (vision, agronomy, irrigation, pest/disease, pruning).
+- **A model-driven orchestrator** (Strands, on Lambda) dynamically decides which of the registered specialists to consult per issue, and in what order — never a fixed pipeline.
+- **An outcome loop** persists the goal, plan, tasks, and event history in DynamoDB, gives each specialist a real per-garden memory via a Bedrock Knowledge Base, and a scheduled Tracker Lambda finds overdue tasks and nudges — right into the same chat thread — until the goal is reached.
+- **Deterministic plumbing, model-driven brain** — ingestion, scheduling, and persistence are plain code; the reasoning lives entirely in the model-driven orchestration.
 
 ## Architecture
 
@@ -50,24 +59,31 @@ _High-level architecture, domain model, services, APIs, and sequence diagrams: s
 
 ## Built with
 
-- [AWS Strands Agents SDK](https://strandsagents.com/) — model-driven agent loop & multi-agent patterns
-- Amazon Bedrock AgentCore — runtime, sessions, memory, observability
-- Amazon Bedrock (Anthropic Claude) — reasoning & vision
-- Amazon S3 / Bedrock Prompt Management — externalized prompts & skills
-- Amazon DynamoDB — outcome-loop state
-- Amazon EventBridge — scheduled follow-ups
-- OpenTelemetry / AWS X-Ray — tracing & observability
-- AWS CDK — infrastructure as code
+- [AWS Strands Agents SDK](https://strandsagents.com/) — model-driven agent loop, agents-as-tools orchestration, session persistence
+- Amazon Bedrock AgentCore — one runtime per specialist agent, provisioned by CDK from a declarative registry
+- Amazon Bedrock — foundation models (reasoning + vision), Guardrails (one per specialist), Prompt Management (externalized prompts)
+- Amazon Bedrock Knowledge Bases (S3 Vectors) — real per-garden memory for every specialist
+- Amazon API Gateway + AWS Lambda (container images) — the Client API, orchestrator, and Tracker
+- Amazon DynamoDB — single-table domain state + event log
+- Amazon EventBridge (Rules + Scheduler) — async goal/check-in routing and the Tracker's follow-up polling
+- Amazon S3 — media storage and the frontend's static hosting
+- Angular PWA — the web frontend
+- AWS CDK — infrastructure as code, one stack per concern
+- AWS X-Ray — available on every AgentCore runtime, opt-in via CDK context (off by default in dev)
 
-## Repo structure (planned)
+## Repo structure
 
 ```
 tendril/
 ├── docs/          # vision, architecture, user stories, ADRs
-├── agents/        # agent template + specialist agents (factory)
-├── app/           # orchestrator, ingestion, tracker, tools
-├── infra/         # AWS CDK stacks
-└── prompts/       # externalized skills/prompts (the "application")
+├── agents/        # shared agent template (factory) + declarative agent registry
+├── app/           # Client API, orchestrator, tracker, tools (weather)
+├── frontend/      # Angular PWA
+├── infra/         # AWS CDK stacks (one per concern)
+├── prompts/       # externalized prompts (Bedrock Prompt Management source)
+├── guardrails/    # externalized guardrail policies (Bedrock Guardrails source)
+├── scripts/       # local dev/eval scripts (e.g. guardrail evaluation)
+└── tests/         # cross-cutting tests (most live alongside their own package)
 ```
 
 ## Documentation

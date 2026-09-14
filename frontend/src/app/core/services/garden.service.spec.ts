@@ -1,0 +1,306 @@
+import { TestBed } from '@angular/core/testing';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { CLIENT_API_BASE_URL } from '../config/client-api.config';
+import { HttpGardenApi, MockGardenApi } from './garden.service';
+
+describe('MockGardenApi', () => {
+  let api: MockGardenApi;
+
+  beforeEach(() => {
+    api = new MockGardenApi();
+  });
+
+  it('createGarden() then getGardenById() round-trips the given fields', (done) => {
+    api.createGarden({ name: 'New Garden', geolocation: 'Mumbai', vision: 'herbs' }).subscribe(({ gardenId }) => {
+      expect(gardenId).toBeTruthy();
+      api.getGardenById(gardenId).subscribe((garden) => {
+        expect(garden).toEqual({
+          gardenId,
+          name: 'New Garden',
+          vision: 'herbs',
+          geolocation: 'Mumbai',
+          climateZone: '',
+        });
+        done();
+      });
+    });
+  });
+
+  it('createGarden() honors a client-supplied gardenId (photo-upload flow)', (done) => {
+    api
+      .createGarden({ name: 'New Garden', geolocation: 'Mumbai', gardenId: 'client-g-1' })
+      .subscribe(({ gardenId }) => {
+        expect(gardenId).toBe('client-g-1');
+        done();
+      });
+  });
+
+  it('getGardenWeather() returns a static fixture', (done) => {
+    api.getGardenWeather('balcony-kitchen-garden').subscribe((weather) => {
+      expect(weather).toBeTruthy();
+      done();
+    });
+  });
+
+  it('getGardenById() falls back to the default fixture for an unknown id', (done) => {
+    api.getGardenById('nonexistent').subscribe((garden) => {
+      expect(garden.gardenId).toBe('balcony-kitchen-garden');
+      done();
+    });
+  });
+
+  it('getGardens() includes the default fixture plus any created gardens', (done) => {
+    api.createGarden({ name: 'Second Garden', geolocation: 'Delhi' }).subscribe(({ gardenId }) => {
+      api.getGardens().subscribe((gardens) => {
+        expect(gardens).toContain(
+          jasmine.objectContaining({ gardenId: 'balcony-kitchen-garden', name: 'Balcony Kitchen Garden' }),
+        );
+        expect(gardens).toContain(jasmine.objectContaining({ gardenId, name: 'Second Garden' }));
+        done();
+      });
+    });
+  });
+});
+
+describe('HttpGardenApi', () => {
+  let api: HttpGardenApi;
+  let httpMock: HttpTestingController;
+  const baseUrl = 'https://api.example.test';
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: CLIENT_API_BASE_URL, useValue: baseUrl },
+      ],
+    });
+    api = TestBed.inject(HttpGardenApi);
+    httpMock = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => httpMock.verify());
+
+  it('createGarden() POSTs to /gardens and returns the created id', () => {
+    let result: { gardenId: string } | undefined;
+    api.createGarden({ name: 'G', geolocation: 'Pune' }).subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ name: 'G', geolocation: 'Pune' });
+    req.flush({ gardenId: 'g-1' });
+
+    expect(result).toEqual({ gardenId: 'g-1' });
+  });
+
+  it('getGardenById() GETs /gardens/{id} and maps the response', () => {
+    let result: unknown;
+    api.getGardenById('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1`);
+    expect(req.request.method).toBe('GET');
+    req.flush({
+      gardenId: 'g-1',
+      name: 'G',
+      geolocation: 'Pune',
+      vision: 'veggies',
+      ownerUserId: 'u-1',
+      createdAt: '2026-09-12T00:00:00+00:00',
+    });
+
+    expect(result).toEqual({
+      gardenId: 'g-1',
+      name: 'G',
+      geolocation: 'Pune',
+      vision: 'veggies',
+      climateZone: '',
+      photoUrl: undefined,
+    });
+  });
+
+  it('getGardenById() maps a DTO photoUrl through onto the Garden', () => {
+    let result: unknown;
+    api.getGardenById('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1`);
+    req.flush({
+      gardenId: 'g-1',
+      name: 'G',
+      geolocation: 'Pune',
+      ownerUserId: 'u-1',
+      createdAt: '2026-09-12T00:00:00+00:00',
+      photoUrl: 'https://example.test/banner.jpg',
+    });
+
+    expect((result as { photoUrl?: string }).photoUrl).toBe('https://example.test/banner.jpg');
+  });
+
+  it('getGardenWeather() GETs /gardens/{id}/weather and returns the raw forecast', () => {
+    let result: unknown;
+    api.getGardenWeather('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/weather`);
+    expect(req.request.method).toBe('GET');
+    req.flush({ temperatureC: 26.4, weatherCode: 1 });
+
+    expect(result).toEqual({ temperatureC: 26.4, weatherCode: 1 });
+  });
+
+  it('getGardenWeather() resolves undefined instead of erroring when the backend fails', () => {
+    let result: unknown = 'not-yet-set';
+    api.getGardenWeather('g-1').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/weather`);
+    req.flush({ message: 'geocode failed' }, { status: 404, statusText: 'Not Found' });
+
+    expect(result).toBeUndefined();
+  });
+
+  it('getGardens() GETs /gardens (multi-garden switcher)', () => {
+    let result: unknown;
+    api.getGardens().subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens`);
+    expect(req.request.method).toBe('GET');
+    const body = [
+      { gardenId: 'g-1', name: 'My Terrace Garden' },
+      { gardenId: 'g-2', name: 'Balcony Garden' },
+    ];
+    req.flush(body);
+
+    expect(result).toEqual(body);
+  });
+
+  it('getGarden() still delegates to the mock (not backed by a real endpoint yet)', (done) => {
+    api.getGarden().subscribe((garden) => {
+      expect(garden.gardenId).toBe('balcony-kitchen-garden');
+      done();
+    });
+  });
+
+  it('requestMediaUpload() POSTs to /gardens/{id}/media', () => {
+    let result: unknown;
+    api
+      .requestMediaUpload('g-1', { contentType: 'image/jpeg', fileName: 'tomato.jpg' })
+      .subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/media`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ contentType: 'image/jpeg', fileName: 'tomato.jpg' });
+    req.flush({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });
+
+    expect(result).toEqual({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });
+  });
+
+  it('uploadMedia() PUTs the file directly to the presigned URL with its content-type', () => {
+    const file = new File(['x'], 'tomato.jpg', { type: 'image/jpeg' });
+    let completed = false;
+    api.uploadMedia('https://s3.example/upload', file).subscribe(() => (completed = true));
+
+    const req = httpMock.expectOne('https://s3.example/upload');
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toBe(file);
+    expect(req.request.headers.get('Content-Type')).toBe('image/jpeg');
+    req.flush(null);
+
+    expect(completed).toBe(true);
+  });
+
+  it('createPlant() POSTs to /gardens/{id}/plants', () => {
+    let result: { plantId: string } | undefined;
+    api.createPlant('g-1', { species: 'Tomato', variety: 'Pusa Ruby' }).subscribe((r) => {
+      result = r;
+    });
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ species: 'Tomato', variety: 'Pusa Ruby' });
+    req.flush({ plantId: 'p-1' });
+
+    expect(result).toEqual({ plantId: 'p-1' });
+  });
+
+  it('createPlant() surfaces photoUrl (OB-03) when the backend returns one', () => {
+    let result: { plantId: string; photoUrl?: string } | undefined;
+    api.createPlant('g-1', { species: 'Tomato', mediaId: 'media-1' }).subscribe((r) => {
+      result = r;
+    });
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    req.flush({ plantId: 'p-1', photoUrl: 'https://example.test/p-1.jpg' });
+
+    expect(result).toEqual({ plantId: 'p-1', photoUrl: 'https://example.test/p-1.jpg' });
+  });
+
+  it('getPlants(gardenId) GETs /gardens/{id}/plants and maps each Plant DTO', () => {
+    let result: unknown;
+    api.getPlants('g-1').subscribe((plants) => (result = plants));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    expect(req.request.method).toBe('GET');
+    req.flush([{ plantId: 'p-1', species: 'Tomato', variety: 'Pusa Ruby', stage: 'fruiting' }]);
+
+    expect(result).toEqual([
+      jasmine.objectContaining({
+        plantId: 'p-1',
+        name: 'Tomato',
+        species: 'Tomato',
+        variety: 'Pusa Ruby',
+        stage: 'fruiting',
+      }),
+    ]);
+  });
+
+  it('getPlants(gardenId) maps a DTO photoUrl through onto the Plant', () => {
+    let result: unknown;
+    api.getPlants('g-1').subscribe((plants) => (result = plants));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    req.flush([
+      {
+        plantId: 'p-1',
+        species: 'Tomato',
+        stage: 'fruiting',
+        photoUrl: 'https://example.test/p-1.jpg',
+      },
+    ]);
+
+    expect((result as { photoUrl?: string }[])[0].photoUrl).toBe('https://example.test/p-1.jpg');
+  });
+
+  it('getPlants(null) falls back to the mock fixture (no garden created yet)', (done) => {
+    api.getPlants(null).subscribe((plants) => {
+      expect(plants.length).toBeGreaterThan(0);
+      done();
+    });
+  });
+
+  it('deletePlant() DELETEs /gardens/{id}/plants/{plantId}', () => {
+    let completed = false;
+    api.deletePlant('g-1', 'p-1').subscribe(() => (completed = true));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants/p-1`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush(null);
+
+    expect(completed).toBe(true);
+  });
+
+  it('createGoal() POSTs to /gardens/{id}/goals', () => {
+    let result: { goalId: string; status: string } | undefined;
+    api
+      .createGoal('g-1', { description: 'leaves turning yellow', mediaIds: ['media-1'] })
+      .subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/goals`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({
+      description: 'leaves turning yellow',
+      mediaIds: ['media-1'],
+    });
+    req.flush({ goalId: 'goal-1', status: 'Intake' });
+
+    expect(result).toEqual({ goalId: 'goal-1', status: 'Intake' });
+  });
+});

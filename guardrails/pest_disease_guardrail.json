@@ -1,0 +1,52 @@
+{
+  "name": "pest-disease-guardrail",
+  "description": "Guardrail for Tendril's pest & disease specialist: diagnosing and treating plant pests/disease, same safety floor as vision (ADR-0008), scoped to this domain.",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril's pest & disease assistant — describe the pest or disease symptoms you're seeing on your plant.",
+  "blockedOutputsMessaging": "I can't share that response. Let's keep to pest and disease treatment for your garden.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Off-topic requests unrelated to gardening (finance, careers, politics). Diagnosing and treating a PLANT's pest or disease issue is this agent's job, not human medical advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "What should I take for a headache?"
+        ],
+        "inputAction": "NONE",
+        "outputAction": "NONE"
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Advice enabling dangerous or illegal chemical use, such as mixing chemicals that create toxic gas, applying banned or restricted pesticides, or deliberately exceeding label dosages to boost potency.",
+        "examples": [
+          "How do I mix bleach and ammonia to kill pests fast?",
+          "What's the strongest banned pesticide I can use on my tomatoes?",
+          "Can I spray double the label dose to kill the aphids faster?",
+          "How do I make a homemade poison to get rid of a stray animal eating my plants?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

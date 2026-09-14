@@ -1,0 +1,17 @@
+# Ruff configuration for Tendril — shared by local dev, pre-commit, and CI.
+target-version = "py313"
+line-length = 100
+# Markdown files carry illustrative Python snippets (docs, skills) that aren't meant to be
+# complete, lint-clean modules — some ruff versions format/parse fenced code blocks in .md
+# files by default, which breaks on intentionally-partial pseudocode. Exclude docs from scope;
+# ruff still covers every real Python source folder (agents/, app/, infra/, scripts/, tests/).
+extend-exclude = ["*.md"]
+
+[lint]
+# Default rules (E4/E7/E9 + pyflakes) plus import sorting (I).
+# EXE (shebang/executable) is intentionally not selected — CDK apps run via `python app.py`.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[lint.isort]
+# Keep `X` and `X as Y` imports from the same module in a single block.
+combine-as-imports = true

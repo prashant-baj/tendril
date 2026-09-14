@@ -1,13 +1,13 @@
 # Tendril — AI Assistant Rules (Build with AI)
 
-This file governs AI-assisted development on Tendril. Read it, the docs it links, and the ADRs **before generating any code**. Use the **Strands Agents MCP docs server** (configured in `.mcp.json`) for authoritative Strands APIs; fall back to `llms.txt` / `llms-full.txt`.
+This file governs AI-assisted development on Tendril. Read it, the docs it links, and the ADRs **before generating any code**. Use the **Strands Agents MCP docs server** (configured in `.mcp.json`) for authoritative Strands APIs; if it is unavailable, fall back to the repo's [`llms.txt`](./llms.txt), which links the canonical Strands docs indexes (`https://strandsagents.com/llms.txt` and `llms-full.txt`).
 
 ## Read first (context)
 - Concept & vision: `docs/project-context.md`
 - Architecture: `docs/architecture/architecture.md`
 - Decisions (binding): `docs/architecture/ADRs/`
 - Standards: `docs/engineering-best-practices.md`
-- Backlog: `docs/stories/`
+- Backlog (priority-ranked): `docs/backlog.md`; stories: `docs/stories/`
 
 ## Architectural guardrails (non-negotiable)
 - **ADRs are binding constraints.** All generated designs and code must conform to the accepted ADRs. Do **not** silently violate one.
@@ -25,3 +25,34 @@ This file governs AI-assisted development on Tendril. Read it, the docs it links
 - Python 3.13 (ruff format/lint); Node 22 / Angular for frontend.
 - Every deployable unit is a self-contained folder with its own `Dockerfile` + `requirements.txt`.
 - Update relevant docs/ADRs as part of the change (Definition of Done in the best-practices checklist).
+
+<!-- BEGIN AWS Agent Toolkit rules -->
+## AWS Guidance
+
+- Where these AWS rules conflict with the project's own instructions, the
+  project's instructions take precedence.
+- Prefer the AWS MCP Server for AWS interactions — it provides sandboxed
+  execution, observability, and audit logging. If unavailable, use the
+  AWS CLI directly.
+- Before starting a task, check whether a relevant AWS skill is available.
+  Load the skill with `retrieve_skill` and prefer its guidance over
+  general knowledge.
+- When uncertain about specific AWS details (API parameters, permissions,
+  limits, error codes), verify against documentation rather than guessing.
+  State uncertainty explicitly if you cannot confirm.
+- When creating infrastructure, prefer infrastructure-as-code (AWS CDK or
+  CloudFormation) over direct CLI commands.
+- When working with infrastructure, follow AWS Well-Architected Framework
+  principles.
+- Do not use em dashes in AWS resource names or descriptions. Use
+  hyphens instead.
+
+### Secret Safety
+
+- MUST load the `aws-secrets-manager` skill first for any secret,
+  credential, API key, token, or password task. MUST NOT call
+  `secretsmanager get-secret-value` or `batch-get-secret-value`, and MUST
+  NOT hit the Secrets Manager Agent daemon directly. MUST use
+  `{{resolve:secretsmanager:secret-id:SecretString:json-key}}` with
+  `asm-exec` so the secret resolves at runtime without entering context.
+<!-- END AWS Agent Toolkit rules -->

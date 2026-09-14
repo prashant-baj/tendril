@@ -1,0 +1,57 @@
+// Custom Theming for Angular Material
+// For more information: https://material.angular.dev/guide/theming
+@use '@angular/material' as mat;
+@use './app/styles/tokens';
+
+html {
+  @include mat.theme((
+    color: (
+      theme-type: light,
+      primary: mat.$green-palette,
+      tertiary: mat.$blue-palette,
+    ),
+    typography: Inter,
+    density: 0,
+  ));
+}
+
+// Global reset + base typography, matching the "Tendril App" design (see
+// frontend/src/app/styles/_tokens.scss for the token values).
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--td-color-bg-page);
+  font-family: var(--td-font-sans);
+  color: var(--td-color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--td-color-primary);
+  text-decoration: none;
+  &:hover { color: var(--td-color-primary-hover); }
+}
+
+button { font-family: inherit; }
+
+// Material Symbols Rounded icon glyphs — see shared IconComponent.
+.ms {
+  font-family: 'Material Symbols Rounded';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  display: inline-block;
+  user-select: none;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+.msf {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.scrollable {
+  &::-webkit-scrollbar { width: 6px; }
+  &::-webkit-scrollbar-thumb { background: var(--td-color-line); border-radius: var(--td-radius-pill); }
+}

@@ -1,0 +1,60 @@
+<div class="screen">
+  @if (phase() === 'submitted') {
+    <section class="card pending">
+      <td-icon name="check_circle" [filled]="true" size="40px" class="pending-icon" />
+      <h2>Submitted — your garden agent is on it</h2>
+      <p>We'll let you know once there's a plan to review.</p>
+      <button type="button" class="btn-primary" (click)="retake()">Report another issue</button>
+    </section>
+  } @else {
+    <section class="card">
+      <div class="intro">
+        <h2>Check a plant</h2>
+        <p>Take a photo of anything that worries you, and describe what you're seeing.</p>
+      </div>
+
+      <td-photo-picker (fileSelected)="onFileSelected($event)" />
+
+      @if (plants().length > 0) {
+        <label class="field">
+          <span class="field-label">Which plant?</span>
+          <select
+            [value]="selectedPlantId()"
+            (change)="onPlantSelected($any($event.target).value)"
+          >
+            <option value="">Whole garden / not sure</option>
+            @for (plant of plants(); track plant.plantId) {
+              <option [value]="plant.plantId">{{ plant.name }}</option>
+            }
+          </select>
+        </label>
+      }
+
+      <label class="field">
+        <span class="field-label">What's going on?</span>
+        <textarea
+          rows="4"
+          placeholder="e.g. Leaves turning yellow on the lower branches"
+          [value]="description()"
+          (input)="onDescriptionInput($any($event.target).value)"
+        ></textarea>
+      </label>
+
+      @if (phase() === 'error') {
+        <div class="form-error">
+          <td-icon name="error" size="18px" />
+          <span>{{ errorMessage() }}</span>
+        </div>
+      }
+
+      <button
+        type="button"
+        class="btn-primary"
+        [disabled]="phase() === 'submitting' || !description().trim()"
+        (click)="submit()"
+      >
+        {{ phase() === 'submitting' ? 'Submitting…' : 'Submit' }}
+      </button>
+    </section>
+  }
+</div>

@@ -46,3 +46,6 @@ tmp/
 # Local invoke test artifacts
 response.json
 payload.json
+
+# Hackathon presentation prep — local only, never committed
+docs/presentation prompts/

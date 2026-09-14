@@ -1,0 +1,19 @@
+<div class="item">
+  <div class="rail">
+    <span class="node" [class]="'tone-' + presentation.tone">
+      <td-icon [name]="presentation.icon" size="16px" />
+    </span>
+    <span class="line" [class.hidden]="last"></span>
+  </div>
+  <div class="body">
+    <div class="when">{{ event.createdAt | date: "MMM d, h:mm a" }}</div>
+    @if (event.goalId) {
+      <a class="title" [routerLink]="['/goals', event.goalId]">{{ presentation.title }}</a>
+    } @else {
+      <div class="title">{{ presentation.title }}</div>
+    }
+    @if (presentation.detail) {
+      <div class="detail">{{ presentation.detail }}</div>
+    }
+  </div>
+</div>

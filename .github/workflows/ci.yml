@@ -1,0 +1,149 @@
+name: CI
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+  push:
+    branches: [main, dev]
+    paths-ignore:
+      - 'docs/**'
+permissions:
+  id-token: write   # OIDC federation to AWS (no static keys)
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan every commit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Every testpaths dir (pytest.ini) imports its own deployable unit's real dependencies
+      # (boto3, strands-agents, aws-cdk-lib, ...) — installing each folder's own
+      # requirements.txt keeps this in sync automatically instead of a second, driftable list
+      # hardcoded here. jsonschema is test-only (WS-03's OpenAPI contract tests).
+      - run: >-
+          pip install ruff pytest openapi-spec-validator jsonschema
+          -r infra/requirements.txt
+          -r agents/hello_agent/requirements.txt
+          -r app/api/requirements.txt
+          -r app/orchestrator/requirements.txt
+          -r app/tools/weather/requirements.txt
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Lint OpenAPI spec (WS-01)
+        run: python -m openapi_spec_validator app/api/openapi.yaml
+      - name: Tests
+        # No `|| echo` fallback: that was masking a real bug (pytest was failing to even
+        # *collect* app/api/tests — ModuleNotFoundError: boto3 — silently, every run, since
+        # boto3 was never installed here) rather than reporting a genuine "no tests" state.
+        # Real tests exist across every testpaths dir now; a failure here must fail CI.
+        run: pytest -q
+      - name: Secret scan (gitleaks)
+        # Plain CLI, not gitleaks/gitleaks-action@v2: that action now requires a
+        # GITLEAKS_LICENSE for org-owned repos (gitleaks.io signup). The CLI itself is
+        # still fully open-source — same version pre-commit uses (.pre-commit-config.yaml).
+        run: |
+          GITLEAKS_VERSION=8.30.1
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact -v
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+      agents: ${{ steps.filter.outputs.agents }}
+      app: ${{ steps.filter.outputs.app }}
+      prompts: ${{ steps.filter.outputs.prompts }}
+      guardrails: ${{ steps.filter.outputs.guardrails }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            infra:
+              - 'infra/**'
+            agents:
+              - 'agents/**'
+            app:
+              - 'app/**'
+            prompts:
+              - 'prompts/**'
+            guardrails:
+              - 'guardrails/**'
+            frontend:
+              - 'frontend/**'
+  deploy-dev:
+    needs: [quality, changes]
+    if: >-
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') &&
+      (needs.changes.outputs.infra == 'true' ||
+       needs.changes.outputs.agents == 'true' ||
+       needs.changes.outputs.app == 'true' ||
+       needs.changes.outputs.prompts == 'true' ||
+       needs.changes.outputs.guardrails == 'true' ||
+       needs.changes.outputs.frontend == 'true')
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install CDK + deps
+        run: npm install -g aws-cdk && pip install -r infra/requirements.txt
+      # Deploy the app stacks. Order matters on a cold environment: foundation (the DynamoDB
+      # table) must exist before client-api, which resolves it by stable name; prompts,
+      # guardrails, and memory (AF-05's Knowledge Base) must exist before the agent runtime,
+      # which resolves all three by name at cold start; frontend must exist (bucket created)
+      # before the sync step below. CDK no-ops any stack whose template is unchanged, so listing
+      # all seven is safe regardless of which folder triggered the run.
+      - name: Deploy dev (app stacks)
+        run: >-
+          cd infra && cdk deploy
+          tendril-dev-foundation
+          tendril-dev-client-api
+          tendril-dev-prompts
+          tendril-dev-guardrails
+          tendril-dev-memory
+          tendril-dev-agentcore
+          tendril-dev-frontend
+          --context env_name=dev --require-approval never
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.frontend == 'true'
+        with:
+          node-version: "22"
+      - name: Build frontend
+        if: needs.changes.outputs.frontend == 'true'
+        run: npm ci && npx ng build
+        working-directory: frontend
+      # CLIENT_API_BASE_URL (frontend/src/app/core/config/client-api.config.ts) is baked into
+      # the build as the literal placeholder "__CLIENT_API_BASE_URL__" — there's no
+      # environments/ pipeline, so the real per-env API Gateway URL is substituted into the
+      # already-built JS here, post-build, using this stack's own CfnOutput.
+      - name: Inject Client API URL
+        if: needs.changes.outputs.frontend == 'true'
+        run: |
+          API_URL=$(aws cloudformation describe-stacks --stack-name tendril-dev-client-api \
+            --region ${{ vars.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" --output text)
+          API_URL="${API_URL%/}"
+          grep -rl "__CLIENT_API_BASE_URL__" frontend/dist/tendril-web/browser/ \
+            | xargs -r sed -i "s|__CLIENT_API_BASE_URL__|$API_URL|g"
+      - name: Sync frontend to S3
+        if: needs.changes.outputs.frontend == 'true'
+        run: aws s3 sync frontend/dist/tendril-web/browser/ s3://tendril-dev-web --delete
+# prod deploys are gated separately (tag/manual approval) - added in a later story.

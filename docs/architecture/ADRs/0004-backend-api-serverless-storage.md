@@ -64,6 +64,13 @@ The decisive requirement is **asynchronous, long-running work with push updates*
 - **Harder:** WebSocket connection management (connect/disconnect handlers, connection store, reconnection); more moving parts; eventual consistency between push and stored state to handle in the client.
 - **To revisit:** Migrating to AppSync if GraphQL is adopted broadly; adding Cognito auth (planned); web-push for browser notifications.
 
+> **Refinement (2026-09-11):** the Client API's contract is now built **contract-first** on
+> OpenAPI 3.x (see [ADR-0011](./0011-openapi-contract-first-client-api.md)). The **orchestrator's**
+> compute target is refined to **Lambda** (async, EventBridge-triggered, off the Client API's
+> request path) rather than AgentCore, per [ADR-0012](./0012-orchestrator-lambda-declarative-agent-registry.md)
+> — specialist agents remain on AgentCore, unchanged from ADR-0001. Both refinements narrow this
+> ADR's decisions; they don't reverse them.
+
 ## Action Items
 
 1. [ ] Implement the Client API (endpoints per [`../architecture.md`](../architecture.md)) on API Gateway + Lambda.

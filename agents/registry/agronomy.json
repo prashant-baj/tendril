@@ -1,0 +1,10 @@
+{
+  "name": "agronomy",
+  "template": "hello_agent",
+  "model_id": "",
+  "prompt_name": "agronomy-system",
+  "guardrail_name": "agronomy-guardrail",
+  "description": "Advises on soil health, nutrition, and feeding schedules for a plant, tied to its growth stage. Call this when a goal involves feeding, fertilizing, soil amendments, or a nutrient-deficiency-looking symptom (yellowing, poor growth) that isn't clearly a watering or pest/disease issue.",
+  "tools": [],
+  "memory": { "enabled": true, "scope": "garden" }
+}

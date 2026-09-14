@@ -1,0 +1,101 @@
+@if (detail(); as d) {
+  <div class="screen">
+    <a routerLink="/home" class="back">
+      <td-icon name="arrow_back" size="18px" />Home
+    </a>
+
+    <section class="card header">
+      <td-chip [tone]="planStatusTone" shape="pill">{{ d.goal.status }}</td-chip>
+      <h1>{{ d.goal.description }}</h1>
+      @if (d.plan) {
+        <p><strong>Done when:</strong> {{ d.plan.successCriteria }}</p>
+      }
+    </section>
+
+    @if (d.media.length > 0) {
+      <section class="card photos">
+        @for (m of d.media; track m.mediaId) {
+          <img [src]="m.downloadUrl" alt="Photo of the affected plant" (error)="onImageError($event)" />
+        }
+      </section>
+    }
+
+    @if (d.plan?.trace?.length) {
+      <section class="card">
+        <button type="button" class="trace-toggle" (click)="toggleTrace()" [attr.aria-expanded]="traceOpen()">
+          <td-icon name="graph_3" size="20px" class="trace-icon" />
+          <span class="trace-toggle-body">
+            <span class="trace-toggle-title">How this was decided</span>
+            <span class="trace-toggle-sub">{{ traceSpecialistCount }} specialists · {{ traceTotalSeconds }}s · resolved at runtime</span>
+          </span>
+          <td-icon name="expand_more" size="22px" class="chevron" [class.open]="traceOpen()" />
+        </button>
+        @if (traceOpen()) {
+          <div class="trace-body">
+            @for (entry of d.plan!.trace; track $index; let last = $last) {
+              <td-trace-entry [entry]="entry" [last]="last" />
+            }
+            <div class="trace-note">
+              <td-icon name="info" size="17px" />
+              <span>No fixed sequence — the orchestrator picked these specialists from your garden's context and what the photo showed.</span>
+            </div>
+          </div>
+        }
+      </section>
+    }
+
+    @if (d.plan) {
+      <section>
+        <div class="section-head">
+          <h2>The plan · {{ d.tasks.length }} tasks</h2>
+          @if (!planIsApproved) {
+            <button type="button" class="btn-primary" [disabled]="approving()" (click)="approve()">
+              {{ approving() ? 'Approving…' : 'Approve' }}
+            </button>
+          }
+        </div>
+        <div class="plan-list">
+          @for (task of d.tasks; track task.taskId) {
+            <td-plan-task-card
+              [task]="task"
+              [awaitingFeedback]="awaitingFeedbackForTaskId() === task.taskId"
+              (checkin)="onTaskCheckin(task.taskId, $event)"
+            />
+          }
+        </div>
+      </section>
+    }
+
+    <section class="card chat">
+      <h2>Conversation</h2>
+      <div class="messages">
+        @for (m of d.messages; track $index) {
+          <div class="message" [class.assistant]="m.role === 'assistant'">
+            <span class="content" [innerHTML]="m.content | markdown"></span>
+          </div>
+        }
+        @if (waitingForReply()) {
+          <div class="message assistant typing">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+        }
+        @if (d.messages.length === 0 && !waitingForReply()) {
+          <p class="empty">No messages yet.</p>
+        }
+      </div>
+      <form [formGroup]="replyForm" (ngSubmit)="sendMessage()" class="reply">
+        <input
+          type="text"
+          formControlName="content"
+          placeholder="Ask a question or request a change…"
+          autocomplete="off"
+        />
+        <button type="submit" class="btn-primary" [disabled]="sending()">
+          {{ sending() ? 'Sending…' : 'Send' }}
+        </button>
+      </form>
+    </section>
+  </div>
+} @else {
+  <p class="not-found">Goal not found.</p>
+}

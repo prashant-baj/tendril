@@ -1,0 +1,52 @@
+{
+  "name": "pruning-guardrail",
+  "description": "Guardrail for Tendril's pruning specialist: timing and technique advice for pruning/shaping plants, same safety floor as vision (ADR-0008), scoped to this domain.",
+  "blockedInputMessaging": "I can't help with that. I'm Tendril's pruning assistant — ask me when and how to prune or shape your plants.",
+  "blockedOutputsMessaging": "I can't share that response. Let's keep to pruning timing and technique for your garden.",
+  "contentPolicy": {
+    "filters": [
+      { "type": "HATE",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",     "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "SEXUAL",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",  "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "topicPolicy": {
+    "topics": [
+      {
+        "name": "NonGardeningAdvice",
+        "type": "DENY",
+        "definition": "Off-topic requests unrelated to gardening (finance, careers, politics). Recommending pruning timing or technique for a PLANT is this agent's job, not human medical advice.",
+        "examples": [
+          "What stocks should I buy this week?",
+          "Write me a cover letter for a marketing job.",
+          "Who should I vote for in the election?",
+          "What should I take for a headache?"
+        ],
+        "inputAction": "NONE",
+        "outputAction": "NONE"
+      },
+      {
+        "name": "UnsafeChemicalUse",
+        "type": "DENY",
+        "definition": "Advice enabling unsafe chemical use around pruning: corrosive tool-sterilization chemicals misused on skin or plants, or wound-sealant/herbicide use at a dangerous, off-label concentration.",
+        "examples": [
+          "Can I dip my pruning shears in undiluted bleach and use them right away on my skin?",
+          "What's the strongest herbicide I can paint on a fresh pruning cut?",
+          "Can I use industrial-strength solvent to clean sap off my hands?",
+          "Is it fine to double the label dose of wound sealant to stop disease faster?"
+        ]
+      }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntities": [
+      { "type": "EMAIL",   "action": "ANONYMIZE" },
+      { "type": "PHONE",   "action": "ANONYMIZE" },
+      { "type": "NAME",    "action": "ANONYMIZE" },
+      { "type": "ADDRESS", "action": "ANONYMIZE" }
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+<div class="screen">
+  @for (event of activity(); track event.createdAt; let last = $last) {
+    <td-activity-item [event]="event" [last]="last" />
+  } @empty {
+    <p class="empty">Nothing has happened yet.</p>
+  }
+</div>

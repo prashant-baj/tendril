@@ -1,0 +1,56 @@
+:host {
+  display: block;
+  min-height: 100%;
+}
+
+.page-bg {
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  background: var(--td-color-bg-page);
+}
+
+.device {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 430px;
+  min-height: 100vh;
+  max-height: 100vh;
+  background: var(--td-color-bg-app);
+  box-shadow: var(--td-shadow-float);
+
+  &.wide {
+    flex-direction: row;
+    max-width: none;
+    max-height: none;
+    box-shadow: none;
+  }
+}
+
+.app-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--td-color-bg-app);
+  position: relative;
+  overflow: hidden;
+}
+
+.content-area {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.content-inner {
+  padding: 16px 16px 32px 16px;
+
+  &.wide {
+    max-width: var(--td-content-max-width);
+    margin: 0 auto;
+    padding: 24px 32px 48px 32px;
+  }
+}

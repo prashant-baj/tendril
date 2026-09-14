@@ -1,0 +1,53 @@
+<div class="screen">
+
+  <!-- today -->
+  <section>
+    <div class="section-head">
+      <h2>Today</h2>
+      <a routerLink="/tasks" class="link">All tasks</a>
+    </div>
+    <div class="card list">
+      @for (task of todayTasks(); track task.taskId) {
+        <td-task-row [task]="task" />
+      } @empty {
+        <p class="empty">Nothing pending — you're all caught up.</p>
+      }
+    </div>
+  </section>
+
+  <!-- goals needing your attention -->
+  @if (goalsNeedingAttention().length > 0) {
+    <section>
+      <h2 class="section-title">Needs your attention</h2>
+      <div class="goal-grid">
+        @for (goal of goalsNeedingAttention(); track goal.goalId) {
+          <td-goal-card [goal]="goal" />
+        }
+      </div>
+    </section>
+  }
+
+  <!-- goals -->
+  <section>
+    <h2 class="section-title">Goals in progress</h2>
+    <div class="goal-grid">
+      @for (goal of goalsInProgress(); track goal.goalId) {
+        <td-goal-card [goal]="goal" />
+      }
+    </div>
+  </section>
+
+  <!-- plants strip -->
+  <section>
+    <div class="section-head">
+      <h2>Plants</h2>
+      <a routerLink="/garden" class="link">See all {{ plants().length }}</a>
+    </div>
+    <div class="scrollable plant-strip">
+      @for (plant of plants(); track plant.plantId) {
+        <td-plant-card [plant]="plant" (activate)="goToGarden()" />
+      }
+    </div>
+  </section>
+
+</div>

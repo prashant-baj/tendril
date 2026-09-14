@@ -1,0 +1,888 @@
+openapi: 3.0.1
+info:
+  title: Tendril Client API
+  version: "0.1.0"
+  description: >
+    Tendril's user-facing Client API. Contract-first per ADR-0011: this file is the actual
+    deploy artifact — infra/stacks/client_api_stack.py imports it directly via
+    apigateway.SpecRestApi, patching each operation's x-amazon-apigateway-integration.uri
+    with the real Lambda ARN at synth time. Covers OB-01 (Setup My Garden), OB-02 (Add a Plant,
+    with a photo), and WS-01's goal-intake operation (the media op WS-01 originally scoped is
+    already covered by OB-02, per docs/roadmap.md's resequencing note); the rest of ADR-0004's
+    endpoint table is added incrementally as later stories land.
+
+paths:
+  /gardens:
+    post:
+      operationId: createGarden
+      summary: Create a named garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GardenCreateRequest"
+      responses:
+        "201":
+          description: Garden created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    get:
+      operationId: listGardens
+      summary: List every garden the caller owns (multi-garden switcher)
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: The caller's gardens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GardenSummary"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: &cors-preflight
+      summary: CORS preflight
+      responses:
+        "200":
+          description: CORS preflight response
+          headers:
+            Access-Control-Allow-Origin:
+              schema: {type: string}
+            Access-Control-Allow-Methods:
+              schema: {type: string}
+            Access-Control-Allow-Headers:
+              schema: {type: string}
+          content: {}
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id'"
+
+  /gardens/{gardenId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: getGarden
+      summary: Read a garden by id
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: The garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Garden"
+        "404":
+          description: No such garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/weather:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: getGardenWeather
+      summary: Real current weather for this garden's own location
+      responses:
+        "200":
+          description: Current weather
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GardenWeather"
+        "404":
+          description: No such garden, or its location couldn't be resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The upstream geocoding/weather service is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/media:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: createMediaUpload
+      summary: Get a presigned URL to upload a photo directly to S3
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaUploadRequest"
+      responses:
+        "201":
+          description: Presigned upload URL issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaUploadResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: createPlant
+      summary: Add a plant to a garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlantCreateRequest"
+      responses:
+        "201":
+          description: Plant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlantCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    get:
+      operationId: listPlants
+      summary: List every plant in a garden
+      responses:
+        "200":
+          description: The garden's plants
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Plant"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants/{plantId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/PlantId"
+    delete:
+      operationId: deletePlant
+      summary: Remove a plant from a garden
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: Plant deleted (idempotent — also returned if it didn't exist)
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: createGoal
+      summary: Submit an issue/goal for a garden — triggers the orchestrator asynchronously
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalCreateRequest"
+      responses:
+        "202":
+          description: >
+            Goal accepted — persisted and handed off for async orchestration (ADR-0004/
+            ADR-0012). Not a synchronous result; nothing about the goal's eventual plan is
+            known yet at this point.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoalCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    get:
+      operationId: listGoals
+      summary: List every goal submitted for a garden
+      responses:
+        "200":
+          description: The garden's goals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Goal"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+    get:
+      operationId: getGoalDetail
+      summary: >
+        Read a goal's full detail — its proposed/approved Plan and Tasks (if any), its attached
+        media (with freshly-generated presigned download URLs), and its chat message thread
+        (PA-01/PA-02/PA-03)
+      responses:
+        "200":
+          description: The goal's full detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoalDetail"
+        "404":
+          description: No such goal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+    post:
+      operationId: postGoalMessage
+      summary: >
+        Send a chat message about a goal — asks/adjusts the proposed plan; triggers the
+        orchestrator asynchronously (PA-02)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalMessageCreateRequest"
+      responses:
+        "202":
+          description: >
+            Message accepted — persisted and handed off for async orchestration, same posture
+            as createGoal. Not a synchronous result.
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      operationId: postTaskCheckin
+      summary: >
+        Attach a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
+        chain and marks the task done (one check-in per task; not a repeatable progress log)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCheckinRequest"
+      responses:
+        "200":
+          description: Task checked in
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such task or media
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plans/{planId}/approve:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/PlanId"
+    post:
+      operationId: approvePlan
+      summary: >
+        Approve a proposed plan (PA-02). A pure, deterministic status flip — never depends on
+        model behavior, so this is handled synchronously, not routed through the orchestrator.
+      responses:
+        "200":
+          description: Plan approved
+        "404":
+          description: No such plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: listTasks
+      summary: List every task across every goal in a garden (Phase 6)
+      responses:
+        "200":
+          description: The garden's tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/activity:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: listActivity
+      summary: The garden's event timeline, newest first (Phase 6)
+      responses:
+        "200":
+          description: The garden's activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityEvent"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+components:
+  parameters:
+    GardenId:
+      name: gardenId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    PlantId:
+      name: plantId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    GoalId:
+      name: goalId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    PlanId:
+      name: planId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    UserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: >
+        Per-browser anonymous identifier (crypto.randomUUID(), persisted client-side) until
+        Cognito auth lands (ADR-0004's auth seam). Not validated as an identity here — only
+        required to be present, so every Garden record has a stable owner key.
+      schema:
+        type: string
+
+  schemas:
+    GardenCreateRequest:
+      type: object
+      required: [name, geolocation]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        geolocation:
+          type: string
+          minLength: 1
+          description: Free-text location (e.g. "Pune, India") — getGardenWeather geocodes this
+            on demand; no separate lat/lon is stored.
+        vision:
+          type: string
+          description: Optional short description of what this garden is for.
+        gardenId:
+          type: string
+          description: Client-supplied id, used only when a garden photo was uploaded first (that
+            upload needs an existing gardenId, so the frontend generates one up front for this
+            case). Omit to let the server generate one, as for every garden without a photo.
+        mediaId:
+          type: string
+          description: Id from a prior createMediaUpload call (uploaded under the same gardenId
+            given above) — becomes this garden's banner photo.
+
+    GardenCreateResponse:
+      type: object
+      required: [gardenId]
+      properties:
+        gardenId:
+          type: string
+
+    Garden:
+      type: object
+      required: [gardenId, name, geolocation, ownerUserId, createdAt]
+      properties:
+        gardenId:
+          type: string
+        name:
+          type: string
+        geolocation:
+          type: string
+        vision:
+          type: string
+        ownerUserId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url (per read, never stored/reused) for
+            this garden's banner photo, present only if one was set at creation.
+
+    GardenWeather:
+      type: object
+      required: [temperatureC, weatherCode]
+      properties:
+        temperatureC:
+          type: number
+        weatherCode:
+          type: integer
+          description: Raw Open-Meteo WMO weather code — deliberately not resolved to an
+            icon/label server-side; the frontend maps it to presentation.
+
+    GardenSummary:
+      type: object
+      required: [gardenId, name]
+      properties:
+        gardenId:
+          type: string
+        name:
+          type: string
+          description: Denormalized onto the USER#{id}/GARDEN#{id} ownership index at creation
+            time (data-architecture.md §2) — lets listGardens be one cheap Query, no GSI/scan.
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    MediaUploadRequest:
+      type: object
+      required: [contentType, fileName]
+      properties:
+        contentType:
+          type: string
+          description: MIME type of the file being uploaded (e.g. "image/jpeg").
+        fileName:
+          type: string
+          minLength: 1
+
+    MediaUploadResponse:
+      type: object
+      required: [uploadUrl, mediaId]
+      properties:
+        uploadUrl:
+          type: string
+          description: Presigned S3 PUT URL — the frontend uploads directly to it, never via
+            the Lambda.
+        mediaId:
+          type: string
+
+    PlantCreateRequest:
+      type: object
+      required: [species]
+      properties:
+        species:
+          type: string
+          minLength: 1
+        variety:
+          type: string
+        mediaId:
+          type: string
+          description: Id returned by a prior createMediaUpload call, once the upload itself
+            has completed.
+
+    PlantCreateResponse:
+      type: object
+      required: [plantId]
+      properties:
+        plantId:
+          type: string
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url for the plant's linked photo (OB-03),
+            present only if a mediaId was given at creation.
+
+    Plant:
+      type: object
+      required: [plantId, species, stage]
+      properties:
+        plantId:
+          type: string
+        species:
+          type: string
+        variety:
+          type: string
+        stage:
+          type: string
+        photoUrl:
+          type: string
+          description: Freshly-generated presigned GET url per read (OB-03) — never stored, same
+            posture as GoalMedia's downloadUrl. Absent if the plant has no linked photo.
+
+    GoalCreateRequest:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+          minLength: 1
+          description: The issue/prompt text in plain language (e.g. "leaves turning yellow").
+        mediaIds:
+          type: array
+          items:
+            type: string
+          description: Ids from prior createMediaUpload calls, referencing attached photos.
+        plantId:
+          type: string
+          description: >
+            Optional — which plant this goal is about, if any (not every issue is plant-specific).
+            When set, propagates onto every attached Media record and every Task the orchestrator
+            later proposes for this goal.
+
+    GoalCreateResponse:
+      type: object
+      required: [goalId, status]
+      properties:
+        goalId:
+          type: string
+        status:
+          type: string
+          description: Always "Intake" at creation — architecture.md §7.3's Goal lifecycle.
+
+    Goal:
+      type: object
+      required: [goalId, description, type, status]
+      properties:
+        goalId:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          description: >
+            Goal classification (e.g. "diagnosis", "planning") — reserved for the orchestrator
+            to set once it understands the goal; always a generic default at Intake time.
+        status:
+          type: string
+        mediaIds:
+          type: array
+          items:
+            type: string
+        plantId:
+          type: string
+
+    Plan:
+      type: object
+      required: [planId, goalId, successCriteria, status]
+      properties:
+        planId:
+          type: string
+        goalId:
+          type: string
+        successCriteria:
+          type: string
+        status:
+          type: string
+          description: "\"PlanProposed\" or \"Approved\" (architecture.md §7.3)."
+        trace:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEntry"
+          description: The specialist-consultation record behind this plan's current version
+            (PA-05) — "How this was decided". Absent for an older goal, or a plan that was
+            synthesized from a fallback (no specialist actually consulted).
+
+    TraceEntry:
+      type: object
+      required: [agent, says, ms]
+      properties:
+        agent:
+          type: string
+          description: Specialist name (registry `name`, e.g. "agronomy"), or "orchestrator" for
+            the final synthesis step.
+        says:
+          type: string
+          description: The full text of what this specialist (or the orchestrator's own
+            synthesis) concluded — not display-truncated server-side; the frontend collapses
+            long entries with a "Show more" toggle.
+        ms:
+          type: integer
+          description: How long this step took, in milliseconds.
+        isOrchestrator:
+          type: boolean
+          description: True only for the final synthesis entry, not a specialist call.
+
+    Task:
+      type: object
+      required: [taskId, title, detail, scope, status]
+      properties:
+        taskId:
+          type: string
+        goalId:
+          type: string
+          description: The goal this task belongs to — always set (Phase 6), load-bearing for
+            listTasks' cross-goal list to link a task back to its goal.
+        title:
+          type: string
+        detail:
+          type: string
+        scope:
+          type: string
+          description: "\"plant\" or \"garden\"."
+        status:
+          type: string
+          description: "\"pending\" or \"done\" — flips to \"done\" the moment a check-in photo is attached."
+        plantId:
+          type: string
+          description: Inherited from the goal's plantId, if any, when this task was proposed.
+        media:
+          $ref: "#/components/schemas/GoalMedia"
+          description: Present once a check-in photo has been attached (postTaskCheckin).
+        feedback:
+          type: string
+          description: The orchestrator's assessment of this task's check-in photo against the
+            plan (PA-05) — written asynchronously after postTaskCheckin, may take a few seconds
+            to appear.
+
+    TaskCheckinRequest:
+      type: object
+      required: [mediaId]
+      properties:
+        mediaId:
+          type: string
+          description: Id from a prior createMediaUpload call, once the upload itself has completed.
+
+    Message:
+      type: object
+      required: [role, content, createdAt]
+      properties:
+        role:
+          type: string
+          description: "\"user\" or \"assistant\"."
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    GoalMedia:
+      type: object
+      required: [mediaId, downloadUrl]
+      properties:
+        mediaId:
+          type: string
+        downloadUrl:
+          type: string
+          description: Freshly-generated, short-lived presigned S3 GET URL — never stored/reused.
+
+    ActivityEvent:
+      type: object
+      required: [type, payload, createdAt]
+      properties:
+        type:
+          type: string
+          description: "One of \"goal.submitted\", \"plan.updated\", \"plan.approved\",
+            \"task.checkin\" (Phase 6). Deliberately UI-agnostic — no icon/tone/title baked in
+            server-side; the frontend maps type -> presentation."
+        payload:
+          type: object
+          description: Event-specific context, e.g. {goalId, description} for goal.submitted.
+        createdAt:
+          type: string
+          format: date-time
+        goalId:
+          type: string
+          description: Present whenever the event's payload carries one — lets the frontend link
+            an activity entry back to its goal.
+
+    GoalDetail:
+      type: object
+      required: [goal, tasks, media, messages]
+      properties:
+        goal:
+          $ref: "#/components/schemas/Goal"
+        plan:
+          $ref: "#/components/schemas/Plan"
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/GoalMedia"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+
+    GoalMessageCreateRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1

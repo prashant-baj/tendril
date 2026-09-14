@@ -1,0 +1,14 @@
+<button type="button" class="card" (click)="activate.emit()">
+  <span class="thumb">
+    @if (plant.photoUrl && !photoFailed()) {
+      <img class="photo" [src]="plant.photoUrl" alt="" (error)="onPhotoError()" />
+    } @else {
+      <td-icon [name]="plant.icon" size="30px" />
+    }
+  </span>
+  <span class="name">{{ plant.name }}</span>
+  <span class="state">
+    <span class="dot" [class]="dotTone"></span>
+    <span>{{ healthLabel }}</span>
+  </span>
+</button>

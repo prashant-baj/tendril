@@ -4,9 +4,10 @@ CI assumes this role via OIDC and then assumes the CDK bootstrap roles to
 deploy. Set `github_org` / `github_repo` via context (cdk.json) — do not
 hardcode. See docs/engineering-best-practices.md (GitOps).
 """
+
 from aws_cdk import (
-    Stack,
     CfnOutput,
+    Stack,
     aws_iam as iam,
 )
 from constructs import Construct
@@ -45,7 +46,13 @@ class PipelineStack(Stack):
                         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                     },
                     "StringLike": {
-                        "token.actions.githubusercontent.com:sub": f"repo:{org}/{repo}:*"
+                        # GitHub's OIDC token now embeds immutable numeric owner/repo IDs
+                        # into `sub` (e.g. `repo:org@123/repo@456:environment:dev`), not
+                        # just `repo:org/repo:...` — the `@*` wildcards absorb those ID
+                        # segments. Confirmed against the actual denied claim via
+                        # CloudTrail (`aws cloudtrail lookup-events` for
+                        # AssumeRoleWithWebIdentity) rather than assumed.
+                        "token.actions.githubusercontent.com:sub": f"repo:{org}@*/{repo}@*:*"
                     },
                 },
             ),
@@ -66,6 +73,20 @@ class PipelineStack(Stack):
                     "cloudformation:GetTemplate",
                 ],
                 resources=["*"],
+            )
+        )
+
+        # `aws s3 sync` of the built frontend runs directly (outside CDK) after
+        # FrontendStack provisions the bucket — grant CI just enough S3 access to sync
+        # into it. Scoped by the env-prefixed naming convention (no cross-stack import;
+        # same "resolve by stable name" posture as prompts/guardrails, see ADR-0008).
+        deploy_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+                resources=[
+                    "arn:aws:s3:::tendril-*-web",
+                    "arn:aws:s3:::tendril-*-web/*",
+                ],
             )
         )
 

@@ -1,0 +1,20 @@
+<div class="entry">
+  <div class="rail">
+    <span class="node" [class.orchestrator]="entry.isOrchestrator">
+      <td-icon [name]="icon" size="15px" />
+    </span>
+    <span class="line" [class.hidden]="last"></span>
+  </div>
+  <div class="body">
+    <div class="head">
+      <span class="agent">{{ label }}</span>
+      <span class="duration">{{ durationLabel }}</span>
+    </div>
+    <div class="says" [class.clamped]="isTruncatable && !expanded()" [innerHTML]="entry.says | markdown"></div>
+    @if (isTruncatable) {
+      <button type="button" class="show-more" (click)="toggle()">
+        {{ expanded() ? 'Show less' : 'Show more' }}
+      </button>
+    }
+  </div>
+</div>

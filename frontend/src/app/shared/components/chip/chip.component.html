@@ -1,0 +1,9 @@
+<span
+  class="chip"
+  [class]="'tone-' + tone + ' shape-' + shape + ' variant-' + variant"
+>
+  @if (icon) {
+    <td-icon [name]="icon" [filled]="iconFilled" size="14px" />
+  }
+  <ng-content></ng-content>
+</span>

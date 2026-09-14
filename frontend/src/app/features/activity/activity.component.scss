@@ -1,0 +1,9 @@
+.screen {
+  display: flex;
+  flex-direction: column;
+}
+
+.empty {
+  font-size: 13px;
+  color: var(--td-color-ink-tertiary);
+}

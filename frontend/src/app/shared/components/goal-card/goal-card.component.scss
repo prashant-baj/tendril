@@ -1,0 +1,30 @@
+.card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--td-color-bg-surface);
+  border: 1px solid var(--td-color-line);
+  border-radius: var(--td-radius-lg);
+  box-shadow: var(--td-shadow-card);
+  padding: 16px;
+  cursor: pointer;
+
+  &:hover { border-color: var(--td-color-primary-border); }
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.title {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+  color: var(--td-color-ink);
+  margin-top: 10px;
+  text-wrap: pretty;
+}

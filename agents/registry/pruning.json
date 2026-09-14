@@ -1,0 +1,10 @@
+{
+  "name": "pruning",
+  "template": "hello_agent",
+  "model_id": "",
+  "prompt_name": "pruning-system",
+  "guardrail_name": "pruning-guardrail",
+  "description": "Advises on when and how to prune or shape a plant to encourage blooming/fruiting or maintain its shape, factoring in the weather forecast when the garden's location is known. Call this when a goal mentions a bloom/fruit-timing target, shaping, or overgrowth.",
+  "tools": ["weather"],
+  "memory": { "enabled": true, "scope": "garden" }
+}

@@ -1,0 +1,99 @@
+.entry {
+  display: flex;
+  gap: 12px;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 28px;
+}
+
+.node {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--td-radius-pill);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  background: var(--td-color-primary-surface);
+  color: var(--td-color-primary-hover);
+
+  &.orchestrator {
+    background: var(--td-color-primary);
+    color: var(--td-color-bg-surface);
+  }
+}
+
+.line {
+  flex: 1;
+  width: 2px;
+  background: var(--td-color-line);
+  min-height: 8px;
+  &.hidden { background: transparent; }
+}
+
+.body {
+  padding: 12px 0 0 0;
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--td-color-ink);
+}
+
+.duration {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--td-color-ink-tertiary);
+  font-family: var(--td-font-mono);
+}
+
+.says {
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--td-color-ink-secondary);
+  margin-top: 3px;
+  text-wrap: pretty;
+
+  // Rendered via [innerHTML] (MarkdownPipe) — same "style dynamically-inserted HTML" case as
+  // goal-detail.component.scss's `.content`, and the same child styling, since both render a
+  // specialist/orchestrator's markdown.
+  ::ng-deep {
+    p { margin: 0 0 8px 0; &:last-child { margin-bottom: 0; } }
+    h1, h2, h3, h4 { font-size: 13px; font-weight: 700; margin: 0 0 4px 0; color: var(--td-color-ink); }
+    strong { font-weight: 700; color: var(--td-color-ink); }
+    ul, ol { margin: 4px 0 8px 0; padding-left: 18px; }
+    li { margin-bottom: 2px; }
+    code { background: var(--td-color-bg-page); border-radius: 4px; padding: 1px 4px; font-size: 12px; }
+  }
+
+  &.clamped {
+    max-height: 96px;
+    overflow: hidden;
+    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+  }
+}
+
+.show-more {
+  display: block;
+  margin-top: 4px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--td-color-primary);
+  cursor: pointer;
+}

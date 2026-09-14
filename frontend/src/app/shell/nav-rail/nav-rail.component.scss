@@ -1,0 +1,113 @@
+.rail {
+  width: var(--td-rail-width);
+  flex: 0 0 var(--td-rail-width);
+  background: var(--td-color-bg-surface);
+  border-right: 1px solid var(--td-color-line);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 12px;
+  gap: 4px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 20px 8px;
+}
+
+.logo {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--td-radius-pill);
+  background: var(--td-color-primary);
+  color: var(--td-color-bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.name {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--td-color-ink);
+}
+
+.tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--td-color-ink-tertiary);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--td-radius-md);
+  cursor: pointer;
+  text-align: left;
+  background: transparent;
+  color: var(--td-color-ink-secondary);
+  font-size: 14px;
+  font-weight: 600;
+
+  &:hover { background: var(--td-color-primary-surface); }
+  &.active {
+    background: var(--td-color-primary-surface);
+    color: var(--td-color-primary-hover);
+  }
+}
+
+.spacer { flex: 1; }
+
+.capture-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 48px;
+  border: none;
+  border-radius: var(--td-radius-pill);
+  background: var(--td-color-primary);
+  color: var(--td-color-bg-surface);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover { background: var(--td-color-primary-hover); }
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 8px 0 8px;
+  margin-top: 12px;
+  border-top: 1px solid var(--td-color-line);
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: var(--td-radius-pill);
+    background: var(--td-color-avatar-bg);
+    color: var(--td-color-avatar-ink);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--td-color-ink-secondary);
+    text-transform: none;
+    letter-spacing: normal;
+  }
+}

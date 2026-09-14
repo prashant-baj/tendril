@@ -1,0 +1,20 @@
+@if (previewUrl(); as url) {
+  <div class="preview">
+    <img [src]="url" alt="Selected photo preview" />
+    <button type="button" class="retake" (click)="clear()">
+      <td-icon name="close" size="16px" />
+      Remove photo
+    </button>
+  </div>
+} @else {
+  <label class="picker">
+    <input
+      type="file"
+      accept="image/*"
+      capture="environment"
+      (change)="onFileChange($event)"
+    />
+    <td-icon name="photo_camera" size="28px" />
+    <span>Take or choose a photo</span>
+  </label>
+}

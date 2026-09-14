@@ -6,6 +6,7 @@ Rules (see docs/engineering-best-practices.md):
   from AWS Secrets Manager / SSM Parameter Store via `get_secret`.
 - No AWS account IDs, ARNs, or keys are hardcoded here.
 """
+
 from __future__ import annotations
 
 import os

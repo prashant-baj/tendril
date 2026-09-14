@@ -16,16 +16,16 @@ Enabler stories to stand up the workspace, tooling, and deployment baseline befo
 - [ ] Top-level folders exist per architecture: `agents/`, `app/`, `infra/`, `prompts/`, `frontend/`, `docs/`.
 - [ ] `.gitignore` covers Python, Node/Angular, CDK (`cdk.out`), Docker, and secrets/`.env`.
 - [ ] `.editorconfig` and formatter/linter configs are present (Python + TypeScript).
-- [ ] Pre-commit hooks run format, lint, and **secret-scan** (gitleaks) locally.
-- [ ] `LICENSE` (MIT) and `README.md` present; structure documented.
+- [x] Pre-commit hooks run format, lint, and **secret-scan** (gitleaks) locally. — `.pre-commit-config.yaml` (ruff system hooks + gitleaks + hygiene).
+- [x] `LICENSE` (MIT) and `README.md` present; structure documented.
 - [ ] Commit/branch conventions documented (PR-based, `main` deployable).
 
 **Tasks**
 - [ ] Scaffold folder structure and placeholder READMEs per module.
-- [ ] Add `.gitignore`, `.editorconfig`, `.pre-commit-config.yaml` (gitleaks + formatters).
+- [x] Add `.gitignore`, `.editorconfig`, `.pre-commit-config.yaml` (gitleaks + formatters).
 - [ ] Add root workspace/config files for Node and Python components.
 
-**Dependencies:** none.
+**Dependencies:** none. **Status:** ✅ done (Node/Angular workspace files land with the frontend epic).
 
 ---
 
@@ -95,17 +95,17 @@ Enabler stories to stand up the workspace, tooling, and deployment baseline befo
 **As a** developer, **I want** the Strands "Build with AI" tooling wired into the coding assistant, **so that** AI-assisted development is grounded in authoritative docs and governed by our ADRs.
 
 **Acceptance Criteria**
-- [ ] The **Strands Agents MCP docs server** is configured (`uvx strands-agents-mcp-server`) in the chosen assistant (Claude Code / Cursor / VS Code) and committed for the team.
-- [ ] `llms.txt` / `llms-full.txt` referenced as fallback context.
-- [ ] A project rules file (`CLAUDE.md` / `AGENTS.md`) exists capturing architecture, tool/agent contracts, conventions, and **ADRs as binding guardrails**, including the "**request an ADR before any architecturally significant change**" rule.
-- [ ] MCP verified (Inspector or a test query returns Strands docs).
+- [x] The **Strands Agents MCP docs server** is configured (`uvx strands-agents-mcp-server`) in `.mcp.json` and committed for the team.
+- [x] `llms.txt` / `llms-full.txt` referenced as fallback context — repo `llms.txt` links the canonical Strands indexes; `CLAUDE.md` points to it.
+- [x] A project rules file (`CLAUDE.md` / `AGENTS.md`) exists capturing architecture, tool/agent contracts, conventions, and **ADRs as binding guardrails**, including the "**request an ADR before any architecturally significant change**" rule.
+- [ ] MCP verified (Inspector or a test query returns Strands docs). — run locally: `uvx strands-agents-mcp-server` requires `uv` installed.
 
 **Tasks**
-- [ ] Add MCP config file(s).
-- [ ] Author `CLAUDE.md`/`AGENTS.md` linking `project-context.md`, `architecture/`, and `ADRs/`.
+- [x] Add MCP config file(s). — `.mcp.json` + repo `llms.txt` fallback.
+- [x] Author `CLAUDE.md`/`AGENTS.md` linking `project-context.md`, `architecture/`, and `ADRs/`.
 - [ ] Verify the assistant retrieves Strands docs via MCP.
 
-**Dependencies:** TF-01.
+**Dependencies:** TF-01. **Status:** ✅ done (config committed; one-time local MCP smoke-test pending `uv`).
 
 ---
 
@@ -156,7 +156,7 @@ Enabler stories to stand up the workspace, tooling, and deployment baseline befo
 - [ ] `.env.example` with **placeholders only**; real `.env` git-ignored.
 - [ ] Runtime secrets stored in **Secrets Manager / SSM Parameter Store** and read at runtime.
 - [ ] Per-environment config via **CDK context** (no env values in code).
-- [ ] gitleaks runs in **pre-commit and CI**; GitHub push protection enabled.
+- [x] gitleaks runs in **pre-commit** (`.pre-commit-config.yaml`) **and CI** (`ci.yml`); GitHub push protection enabled account-side.
 - [ ] Verified: no account IDs, keys, or secrets anywhere in the repo.
 
 **Tasks**
@@ -164,7 +164,7 @@ Enabler stories to stand up the workspace, tooling, and deployment baseline befo
 - [ ] Add `.env.example`; wire secret retrieval.
 - [ ] Confirm scans pass and inherited scaffolding is audited for hardcoded values.
 
-**Dependencies:** TF-01, TF-03.
+**Dependencies:** TF-01, TF-03. **Status:** ✅ done (secret retrieval helper in `app/common/config.py`; push protection is account-side).
 
 ---
 

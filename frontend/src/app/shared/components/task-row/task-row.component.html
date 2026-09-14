@@ -1,0 +1,14 @@
+<a class="row" [routerLink]="detailRoute">
+  <td-icon
+    [name]="done ? 'check_circle' : 'radio_button_unchecked'"
+    [filled]="done"
+    size="22px"
+    class="check"
+    [class.done]="done"
+  />
+  <span class="body">
+    <span class="label" [class.done]="done">{{ task.title }}</span>
+    <span class="meta">{{ task.detail }}</span>
+  </span>
+  <td-chip [tone]="chipTone" shape="rect">{{ done ? 'Done' : task.scope }}</td-chip>
+</a>

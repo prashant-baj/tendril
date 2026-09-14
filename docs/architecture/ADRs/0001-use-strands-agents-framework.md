@@ -120,11 +120,19 @@ The secondary axis is **AWS-native deployment and observability**. Because the p
 2. [ ] Configure the Strands MCP docs server (Build with AI) for the coding assistant to offset ecosystem newness.
 3. [ ] Implement durable outcome-loop state on DynamoDB / AgentCore Memory (tracked in a separate ADR).
 4. [ ] Establish eval scenarios + OpenTelemetry tracing as the testing approach for model-driven behavior.
-5. [ ] Validate agents-as-tools vs. in-process Swarm/Graph for the orchestrator↔specialist topology (candidate for its own ADR).
+5. [x] Validate agents-as-tools vs. in-process Swarm/Graph for the orchestrator↔specialist topology (candidate for its own ADR) — **resolved by [ADR-0012](./0012-orchestrator-lambda-declarative-agent-registry.md)**: agents-as-tools over remote AgentCore `InvokeAgentRuntime`, driven by a declarative agent registry.
 6. [ ] Adopt Strands **Memory** (Bedrock Knowledge Bases backend) + **S3Storage**, with stores scoped per user/garden for multi-tenant isolation.
-7. [ ] Implement plan approval and confirm-before-action via the **HumanInTheLoop** intervention (interrupt/resume) with a **WhatsApp custom callback**.
+7. [ ] Implement plan approval and confirm-before-action via the **HumanInTheLoop** intervention (interrupt/resume), with the `ask` callback targeting **the web UI first** (REST `/plans/{id}/approve` + WebSocket push, ADR-0004) — a WhatsApp callback is a later, additive channel, not the initial implementation.
 8. [ ] Configure **context management** (auto summarization + ContextOffloader; pin garden vision & success criteria) to bound context over multi-week histories.
 9. [ ] Apply production settings: explicit tool lists, explicit model params (temperature/max_tokens/top_p), **Bedrock Guardrails** on outputs, `stream_async` streaming, and CloudWatch metrics.
+
+> **Reprioritization (2026-09-12):** WhatsApp remains in scope long-term (project-context.md's
+> vision), but is **deprioritized to a future backlog item**. HITL (plan approval,
+> confirm-before-action) must work via the **web UI first** — the frontend already has the
+> approve-plan screen (`frontend/src/app/features/goal-detail/`); the `HumanInTheLoop` `ask`
+> callback should call into the Client API / WebSocket channel ADR-0004 already decided, not a
+> WhatsApp integration that doesn't exist yet. See `docs/backlog.md`'s "Carried forward" list for
+> the deprioritized WhatsApp item.
 
 ---
 
@@ -142,6 +150,14 @@ The following native Strands capabilities were reviewed for fit. Several materia
 | **[Steering](https://strandsagents.com/docs/user-guide/concepts/agents/interventions/steering/)** | Runtime correction — before-tool (`proceed`/`guide`/`confirm`) and after-model (`proceed`/`guide`); `SteeringHandler` (code) or `LLMSteeringHandler` (natural-language rules); `ToolLedgerProvider` tracks tool calls/outcomes | Keep agents on-domain without prompt bloat; **experts express constraints in prose** (reinforces the expert-configured-agents moat); detect retry loops / repeated tool failures and redirect (resilience) |
 
 > **Reconciliation with the trade-off analysis:** the "no native checkpointing / pause-resume" con noted against LangGraph is **narrower than first stated**. Strands' **interrupt/resume** (Interventions + Human-in-the-Loop) provides pause-and-resume, and **Storage + Session Management + Memory** provide cross-session durability with S3 / Bedrock Knowledge Bases backends. Tendril still externalizes the *structured* outcome-loop state (plan, success criteria, progress) to **DynamoDB** for queryability and the future data flywheel — but Strands covers more of the conversational durability and human-gating than the raw comparison implied, further strengthening this decision.
+
+> **Superseded by a docs-verified review (2026-09-12):** this Appendix was written by reasoning
+> about Strands' likely capabilities before fetching the live docs. It held up well, but
+> [`docs/architecture/strands-capability-mapping.md`](../strands-capability-mapping.md) is now
+> the authoritative version — verified against the actual API (`SnapshotSessionManager` +
+> interrupt/resume for cross-Lambda-invocation HITL, `ContextInjector` for deterministic vision
+> pinning, memory `scope` for tenant isolation, `strands-evals` for PG-07-style testing, and
+> more). Prefer that document; this table is kept for history.
 
 ## Appendix B: Non-Functional Requirements & Production Operations
 

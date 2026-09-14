@@ -1,0 +1,19 @@
+<div class="row">
+  <button type="button" class="row-main" (click)="activate.emit()">
+    <span class="thumb">
+      @if (plant.photoUrl && !photoFailed()) {
+        <img class="photo" [src]="plant.photoUrl" alt="" (error)="onPhotoError()" />
+      } @else {
+        <td-icon [name]="plant.icon" size="24px" />
+      }
+    </span>
+    <span class="body">
+      <span class="name">{{ plant.name }}</span>
+      <span class="meta">{{ plant.meta }}</span>
+    </span>
+    <td-chip [tone]="healthTone" shape="pill" [icon]="healthIcon" [iconFilled]="true">{{ healthLabel }}</td-chip>
+  </button>
+  <button type="button" class="delete" aria-label="Delete plant" (click)="delete.emit()">
+    <td-icon name="delete" size="18px" />
+  </button>
+</div>
