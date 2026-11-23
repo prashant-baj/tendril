@@ -53,7 +53,6 @@ export class PlantDetailComponent {
   private readonly fb = inject(FormBuilder);
 
   readonly statuses: PlantStatus[] = ['healthy', 'ok', 'watch'];
-  readonly kindLabel = KIND_LABEL;
   readonly today = new Date().toISOString().slice(0, 10);
 
   readonly plant = signal<Plant | undefined>(undefined);
@@ -145,6 +144,11 @@ export class PlantDetailComponent {
 
   title(plant: Plant): string {
     return plant.stakeNo != null ? `#${plant.stakeNo} ${plant.species}` : plant.species;
+  }
+
+  /** "Note from Tendril" for Tendril's saved notes (ADR-0037), else the entry kind. */
+  entryLabel(entry: PlantLogEntry): string {
+    return entry.source === 'tendril' ? 'Note from Tendril' : KIND_LABEL[entry.kind];
   }
 
   statusTone(status: PlantStatus): ChipTone {

@@ -2113,11 +2113,13 @@ def _confirmed_photo_items(
     plant_id: str,
     media_id: str,
     media: dict[str, Any] | None,
+    entry: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """What a confirmed photo-to-plant link writes (ADR-0034 + ADR-0035 §2–3): the photo entry on
     the new plant (+ its count, which also guards the plant exists), the Media link, and — if the
-    photo was filed under another plant — that plant's retraction."""
-    entry = ph.new_entry(
+    photo was filed under another plant — that plant's retraction. `entry` replaces the plain
+    photo entry (ADR-0037: Tendril's saved note, carrying the photo)."""
+    entry = entry or ph.new_entry(
         garden_id,
         plant_id,
         kind="photo",
@@ -2239,9 +2241,58 @@ def _apply_set_plant(garden_id: str, goal_id: str, action_id: str, params: dict)
     _after_confirmed_photo(garden_id, plant_id, media_id, media, entry)
 
 
+def _saved_note_entry(
+    garden_id: str,
+    goal_id: str,
+    plant_id: str,
+    media_id: str | None,
+    media: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """ADR-0037: when a goal that ended as `InformationSaved` gets its plant confirmed, Tendril's
+    latest reply joins the plant's history as a note (`source: tendril`, never a status) — the
+    same entry the orchestrator writes when it files a confident read itself. None otherwise."""
+    goal = (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{goal_id}"})
+        .get("Item")
+    )
+    if not goal or goal.get("status") != "InformationSaved":
+        return None
+    reply = next(
+        (
+            m
+            for m in sorted(
+                _query_all(
+                    KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+                    & Key("sk").begins_with(f"GOALMSG#{goal_id}#")
+                ),
+                key=lambda m: m["sk"],
+                reverse=True,
+            )
+            if m.get("role") == "assistant" and m.get("content")
+        ),
+        None,
+    )
+    if not reply:
+        return None
+    return ph.new_entry(
+        garden_id,
+        plant_id,
+        kind="log",
+        source="tendril",
+        observed_on=ph.observed_on_for_media(media) if media else ph.today(),
+        observed_at=ph.observed_at_for_media(media),
+        entry_id=reply["message_id"],
+        media_ids=[media_id] if media_id else None,
+        note=reply["content"][: ph.NOTE_MAX_CHARS],
+        goal_id=goal_id,
+    )
+
+
 def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
     plant_id, media_id = params["plant_id"], params.get("media_id")
     media = _get_media(garden_id, media_id) if media_id else None
+    note = _saved_note_entry(garden_id, goal_id, plant_id, media_id, media)
     items = [
         _confirm_action_item(garden_id, goal_id, action_id),
         {
@@ -2257,14 +2308,20 @@ def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: 
     entry = None
     if media_id:
         photo_items, entry = _confirmed_photo_items(
-            garden_id, goal_id, action_id, plant_id, media_id, media
+            garden_id, goal_id, action_id, plant_id, media_id, media, entry=note
         )
         items += photo_items
+    elif note:
+        # A saved goal without a photo: Tendril's note alone (its count also guards the plant).
+        items += [_entry_put(note), _plant_count_item(garden_id, plant_id, 1)]
+        entry = note
     else:
         items.append(_plant_exists_check(garden_id, plant_id))
     _transact(items)
     if media_id and entry:
         _after_confirmed_photo(garden_id, plant_id, media_id, media, entry)
+    elif entry:
+        _bump_latest(garden_id, plant_id, entry["observed_on"])
     # Tasks proposed before the plant was known inherit it now (best-effort, like Goal → Task).
     try:
         for task in _query_all(

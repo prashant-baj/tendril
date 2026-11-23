@@ -7,7 +7,7 @@ import { GoalCardComponent } from '../../shared/components/goal-card/goal-card.c
 import { PlantCardComponent } from '../../shared/components/plant-card/plant-card.component';
 import { TaskApi } from '../../core/services/task.service';
 import { GoalApi } from '../../core/services/goal.service';
-import { IN_PROGRESS_STATUSES, goalNeedsAttention } from '../../shared/components/goal-status.util';
+import { INFORMATION_SAVED, IN_PROGRESS_STATUSES, goalNeedsAttention } from '../../shared/components/goal-status.util';
 import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
@@ -58,6 +58,12 @@ export class HomeComponent {
   // by actual Goal status, not a static string.
   readonly goalsNeedingAttention = computed(() =>
     this.allGoals().filter((g) => goalNeedsAttention(g.status)),
+  );
+  // ADR-0036: saved check-ins/notes get their own short list instead of disappearing from Home.
+  readonly savedGoals = computed(() =>
+    this.allGoals()
+      .filter((g) => g.status === INFORMATION_SAVED)
+      .slice(0, 5),
   );
 
   readonly plants = toSignal(

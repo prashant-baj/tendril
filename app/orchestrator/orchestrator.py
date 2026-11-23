@@ -174,6 +174,57 @@ class ChatTurnResult(BaseModel):
         ),
     )
     proposed_action: ProposedAction | None = None
+    # TurnOutput.outcome when the model gave one ("plan" | "question" | "noted"); None if the
+    # structured call failed.
+    outcome: str | None = None
+
+
+REPLY_DESCRIPTION = ChatTurnResult.model_fields["reply"].description
+
+
+class TurnOutput(BaseModel):
+    """What the model fills in after each turn (the structured-output schema). The plan decision is
+    a **required** `outcome` plus a required `tasks` list, not an optional nested plan: in dev
+    (2026-11-23, plant #8) Nova 2 Lite wrote "updated_plan with tasks: …" in its own notes and
+    still returned no plan when the plan was an optional field. `to_result()` turns it into the
+    internal `ChatTurnResult` the rest of the orchestrator uses."""
+
+    reply: str = Field(description=REPLY_DESCRIPTION)
+    outcome: Literal["plan", "question", "noted"] = Field(
+        description=(
+            "'plan' when your reply recommends concrete steps for the gardener (or changes the "
+            "current plan) — then list every step in `tasks`. 'question' when you asked the "
+            "gardener something and need the answer before planning. 'noted' when there is "
+            "genuinely nothing for them to do (e.g. the plant looks fine)."
+        )
+    )
+    success_criteria: str = Field(
+        description="For 'plan': one short sentence, how the gardener will know it worked. "
+        "Otherwise an empty string."
+    )
+    tasks: list[TaskProposal] = Field(
+        description="For 'plan': the concrete steps, one task each, a handful at most. "
+        "Otherwise an empty list."
+    )
+    proposed_action: ProposedAction | None = None
+
+    def to_result(self) -> ChatTurnResult:
+        plan = None
+        if self.outcome == "plan" and self.tasks:
+            plan = PlanProposal(
+                success_criteria=self.success_criteria.strip()
+                or "Confirm with the gardener that this helped.",
+                tasks=self.tasks,
+            )
+        elif self.outcome == "plan":
+            logger.warning("turn_outcome_plan_without_tasks; treating as no plan")
+        logger.info("turn_outcome outcome=%s tasks=%d", self.outcome, len(self.tasks))
+        return ChatTurnResult(
+            reply=self.reply,
+            updated_plan=plan,
+            proposed_action=self.proposed_action,
+            outcome=self.outcome,
+        )
 
 
 ORCHESTRATOR_SYSTEM_PROMPT = (
@@ -194,7 +245,8 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
     "concluded and why in a sentence or two. If you genuinely need more information "
     "first, ask one specific clarifying question instead of guessing — it's fine not "
     "to propose a plan on this turn. But whenever your reply recommends concrete steps "
-    "for the gardener to take, those steps ARE the plan: put them in updated_plan as tasks, "
+    "for the gardener to take, those steps ARE the plan: set outcome to 'plan' and list them "
+    "as tasks, "
     "never only in the reply text. You never change anything yourself: when the gardener "
     "says they finished a task, or tells you which numbered plant a photo is about, set "
     "proposed_action and tell them to tap Confirm; a typed 'yes' does not confirm anything. "
@@ -557,6 +609,13 @@ ACTION_TYPES = ("complete_task", "set_plant", "set_goal_plant", "create_plant")
 class IdentityOutcome(BaseModel):
     note: str = ""  # appended to the model's prompt for this turn
     action_id: str | None = None  # a proposal shown with the reply
+    # ADR-0037 §2: a confident read on a goal without a plant — filed directly if the turn ends
+    # without a plan (information only), else proposed as "Link to #NN?" as before.
+    deferred_plant_id: str | None = None
+    deferred_stake_no: int | None = None
+    # ADR-0037 §1: a photo filed to the goal's plant whose history entry is written after the
+    # turn — folded into Tendril's note when the turn is saved, else a plain photo entry.
+    history_media_id: str | None = None
 
 
 def _key(garden_id: str, sk: str) -> dict[str, str]:
@@ -792,6 +851,8 @@ def _append_photo_history(
     """One `photo` entry `PLANTLOG#{plant_id}#{date}#{media_id}` — id = the media id, so the same
     photo filed twice (createGoal, then this identity match) is written once. Then the plant's
     count and latest photo, each only moving forward in time. Best-effort, like every link here."""
+    if _history_shows(garden_id, plant_id, media_id):
+        return  # already in the history (e.g. inside Tendril's note)
     media = _get(garden_id, f"MEDIA#{media_id}") or {}
     observed_on = _photo_observed_on(media)
     entry = {
@@ -809,12 +870,41 @@ def _append_photo_history(
         entry["observed_at"] = media["taken_at"]
     if goal_id:
         entry["goal_id"] = goal_id
+    if _put_history_entry(garden_id, entry, media_id):
+        logger.info(
+            "plant_history_photo plant_id=%s media_id=%s source=%s", plant_id, media_id, source
+        )
+
+
+def _history_shows(garden_id: str, plant_id: str, media_id: str) -> bool:
+    """Whether the plant's history already shows this photo (not moved away)."""
+    history = (
+        _get_table()
+        .query(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(f"PLANTLOG#{plant_id}#")
+        )
+        .get("Items", [])
+    )
+    return any(
+        media_id in (e.get("media_ids") or [])
+        and media_id not in (e.get("retracted_media_ids") or [])
+        for e in history
+    )
+
+
+def _put_history_entry(garden_id: str, entry: dict[str, Any], media_id: str | None) -> bool:
+    """Puts one PlantLog entry (never overwriting — `attribute_not_exists`), then the plant's
+    `history_count` and latest date/photo, each only moving forward in time. False if it existed."""
+    plant_id, observed_on = entry["plant_id"], entry["observed_on"]
     try:
         _get_table().put_item(Item=entry, ConditionExpression="attribute_not_exists(pk)")
     except Exception as e:
         if _error_code(e) != "ConditionalCheckFailedException":
-            logger.exception("plant_history_failed plant_id=%s media_id=%s", plant_id, media_id)
-        return
+            logger.exception(
+                "plant_history_failed plant_id=%s entry_id=%s", plant_id, entry["entry_id"]
+            )
+        return False
     updates = [
         ("ADD history_count :d", {":d": 1}, "attribute_exists(pk)"),
         (
@@ -823,13 +913,16 @@ def _append_photo_history(
             "attribute_exists(pk) AND (attribute_not_exists(latest_observed_on) "
             "OR latest_observed_on <= :o)",
         ),
-        (
-            "SET media_id = :m, latest_photo_on = :o",
-            {":m": media_id, ":o": observed_on},
-            "attribute_exists(pk) AND (attribute_not_exists(latest_photo_on) "
-            "OR latest_photo_on <= :o)",
-        ),
     ]
+    if media_id:
+        updates.append(
+            (
+                "SET media_id = :m, latest_photo_on = :o",
+                {":m": media_id, ":o": observed_on},
+                "attribute_exists(pk) AND (attribute_not_exists(latest_photo_on) "
+                "OR latest_photo_on <= :o)",
+            )
+        )
     for expression, values, condition in updates:
         try:
             _get_table().update_item(
@@ -841,7 +934,43 @@ def _append_photo_history(
         except Exception as e:
             if _error_code(e) != "ConditionalCheckFailedException":
                 logger.exception("plant_latest_failed plant_id=%s", plant_id)
-    logger.info("plant_history_photo plant_id=%s media_id=%s source=%s", plant_id, media_id, source)
+    return True
+
+
+def _append_saved_note(
+    garden_id: str,
+    goal_id: str,
+    plant_id: str,
+    media_id: str | None,
+    note: str,
+    message_id: str,
+) -> None:
+    """ADR-0037 §1: Tendril's reply for a saved turn becomes a `log` entry in the plant's history,
+    `source: tendril`, with the turn's photo (unless that photo already has its own entry, e.g.
+    filed by the gardener when creating the goal). One entry per reply (`entry_id` = message id);
+    never sets the plant's status — only the gardener does."""
+    media = _get(garden_id, f"MEDIA#{media_id}") if media_id else None
+    if media_id and _history_shows(garden_id, plant_id, media_id):
+        media_id = None  # already shown in the history: the note alone
+    observed_on = _photo_observed_on(media) if media else datetime.now(UTC).date().isoformat()
+    entry = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"PLANTLOG#{plant_id}#{observed_on}#{message_id}",
+        "entry_id": message_id,
+        "plant_id": plant_id,
+        "observed_on": observed_on,
+        "kind": "log",
+        "source": "tendril",
+        "note": note[:1000],
+        "goal_id": goal_id,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if media_id:
+        entry["media_ids"] = [media_id]
+        if isinstance((media or {}).get("taken_at"), str) and len(media["taken_at"]) > 10:
+            entry["observed_at"] = media["taken_at"]
+    if _put_history_entry(garden_id, entry, media_id):
+        logger.info("plant_history_note plant_id=%s goal_id=%s", plant_id, goal_id)
 
 
 def _error_code(e: Exception) -> str | None:
@@ -888,14 +1017,10 @@ def _identify_photo(
 
     if decision.kind in ("match", "no_stake"):
         if expected_plant:
+            # The history entry comes after the turn (ADR-0037): a check-in photo joins as the
+            # confirmed check-in; any other photo is folded into Tendril's note or added as a photo.
             _link_media_to_plant(
-                garden_id,
-                media_id,
-                expected_plant,
-                "user",
-                goal_id=goal_id,
-                # A check-in photo joins the history as the confirmed check-in, not twice.
-                add_to_history=task is None,
+                garden_id, media_id, expected_plant, "user", goal_id=goal_id, add_to_history=False
             )
         if task:
             action_id = _propose_action(
@@ -918,7 +1043,7 @@ def _identify_photo(
                 note="(No plant stake number is visible in this photo. If it matters which "
                 "numbered plant this is, ask the gardener.)"
             )
-        return IdentityOutcome()
+        return IdentityOutcome(history_media_id=media_id if expected_plant else None)
 
     if decision.kind == "mismatch" and decision.plant_id:
         action_id = _propose_action(
@@ -955,22 +1080,26 @@ def _identify_photo(
                 UpdateExpression="SET plant_id = :p",
                 ExpressionAttributeValues={":p": decision.plant_id},
             )
-            _link_media_to_plant(garden_id, media_id, decision.plant_id, "auto", goal_id=goal_id)
+            _link_media_to_plant(
+                garden_id,
+                media_id,
+                decision.plant_id,
+                "auto",
+                goal_id=goal_id,
+                add_to_history=False,
+            )
+            goal["plant_id"] = decision.plant_id  # this turn's history entry goes to it
             return IdentityOutcome(
                 note=f"(Filed this photo and goal under {_label(n)} from its stake number. "
-                "Mention it briefly; the gardener can tell you if it's a different plant.)"
+                "Mention it briefly; the gardener can tell you if it's a different plant.)",
+                history_media_id=media_id,
             )
-        action_id = _propose_action(
-            garden_id,
-            goal_id,
-            "set_goal_plant",
-            {"plant_id": decision.plant_id, "media_id": media_id},
-            f"This looks like {_label(n)}. Link this goal and photo to {_label(n)}?",
-        )
+        # ADR-0037 §2: decided after the turn — saved information is filed directly; a plan
+        # still asks first (`_finish_turn`).
         return IdentityOutcome(
-            action_id=action_id,
-            note=f"(The stake in this photo reads {_label(n)}. A Confirm button to link this goal "
-            f"to {_label(n)} has been shown. Treat it as {_label(n)} provisionally.)",
+            note=f"(The stake in this photo reads {_label(n)}. Treat this goal as {_label(n)}.)",
+            deferred_plant_id=decision.plant_id,
+            deferred_stake_no=n,
         )
 
     if decision.kind == "ask":
@@ -1193,20 +1322,78 @@ def _apply_turn_result(
     plant_id: str | None = None,
     trace: list[dict[str, Any]] | None = None,
     action_id: str | None = None,
-) -> None:
-    _write_message(garden_id, goal_id, role="assistant", content=turn.reply, action_id=action_id)
+    reply: str | None = None,
+) -> tuple[str, bool]:
+    """Writes the reply (or `reply`, when the caller added to it) and the plan/status. Returns
+    (assistant message id, whether the goal ended as InformationSaved)."""
+    message_id = _write_message(
+        garden_id, goal_id, role="assistant", content=reply or turn.reply, action_id=action_id
+    )
     now = datetime.now(UTC).isoformat()
     if turn.updated_plan is not None:
         _write_plan_and_tasks(garden_id, goal_id, turn.updated_plan, plant_id, trace)
         _update_goal(garden_id, goal_id, status="PlanProposed", updated_at=now)
-    elif _get(garden_id, f"PLAN#{goal_id}") is None:
+        return message_id, False
+    if _get(garden_id, f"PLAN#{goal_id}") is None:
         # ADR-0036: no plan this turn and none before — what the gardener shared is recorded
         # (reply, photo link, plant history) and there is nothing to approve. Never "stuck in
         # Decomposing"; a later turn that proposes a plan moves the goal to PlanProposed.
         _update_goal(garden_id, goal_id, status=GOAL_INFORMATION_SAVED, updated_at=now)
-    else:
-        # A goal that already has a plan keeps its status on a turn that doesn't revise it.
-        _update_goal(garden_id, goal_id, updated_at=now)
+        return message_id, True
+    # A goal that already has a plan keeps its status on a turn that doesn't revise it.
+    _update_goal(garden_id, goal_id, updated_at=now)
+    return message_id, False
+
+
+def _finish_turn(
+    garden_id: str,
+    goal: dict[str, Any],
+    turn: ChatTurnResult,
+    trace: list[dict[str, Any]],
+    identity: IdentityOutcome,
+    action_id: str | None,
+    media_id: str | None,
+) -> None:
+    """Applies a goal turn (intake or chat), then ADR-0037: information that is only being
+    saved goes into the plant's history with no confirm tap.
+
+    - A confident stake read on a goal without a plant: filed directly when the turn saves
+      information; proposed as "Link to #NN?" when it produced a plan (a plan creates tasks).
+    - A saved turn on a goal with a plant writes Tendril's note to that plant's history, with the
+      turn's photo — unless the turn only asked a question and had no photo."""
+    goal_id = goal["goal_id"]
+    plant_id = goal.get("plant_id")
+    saving = turn.updated_plan is None and _get(garden_id, f"PLAN#{goal_id}") is None
+    reply = turn.reply
+    if identity.deferred_plant_id:
+        label = _label(identity.deferred_stake_no)
+        if saving:
+            plant_id = identity.deferred_plant_id
+            _update_goal(garden_id, goal_id, plant_id=plant_id)
+            if media_id:
+                _link_media_to_plant(
+                    garden_id, media_id, plant_id, "auto", goal_id=goal_id, add_to_history=False
+                )
+            reply = f"{turn.reply}\n\nSaved to {label}'s history. If that's the wrong palm, tell me its number."
+            logger.info("information_auto_filed goal_id=%s plant_id=%s", goal_id, plant_id)
+        elif action_id is None:
+            action_id = _propose_action(
+                garden_id,
+                goal_id,
+                "set_goal_plant",
+                {"plant_id": identity.deferred_plant_id, "media_id": media_id},
+                f"This looks like {label}. Link this goal and photo to {label}?",
+            )
+    message_id, saved = _apply_turn_result(
+        garden_id, goal_id, turn, plant_id, trace, action_id=action_id, reply=reply
+    )
+    history_media = identity.history_media_id or (media_id if identity.deferred_plant_id else None)
+    if not plant_id:
+        return
+    if saved and (history_media or turn.outcome == "noted"):
+        _append_saved_note(garden_id, goal_id, plant_id, history_media, turn.reply, message_id)
+    elif history_media and identity.history_media_id:
+        _append_photo_history(garden_id, plant_id, history_media, "user", goal_id)
 
 
 def _update_task_feedback(garden_id: str, goal_id: str, task_id: str, feedback: str) -> None:
@@ -1234,9 +1421,12 @@ def _run_turn(agent: Agent, prompt: str) -> ChatTurnResult:
     first = agent(prompt)
     free_text = str(first).strip()
     try:
-        structured = agent(structured_output_model=ChatTurnResult)
-        if structured.structured_output is not None:
-            return structured.structured_output
+        structured = agent(structured_output_model=TurnOutput)
+        output = structured.structured_output
+        if isinstance(output, TurnOutput):
+            return output.to_result()
+        if output is not None:  # already a ChatTurnResult (test doubles)
+            return output
         logger.warning("structured_output_empty; falling back to raw text")
     except Exception:
         logger.exception("structured_output_failed; falling back to raw text")
@@ -1390,8 +1580,8 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         action_id = identity.action_id
         if action_id is None and turn.proposed_action is not None:
             action_id = _propose_from_model(garden_id, goal, [], turn.proposed_action)
-        _apply_turn_result(
-            garden_id, goal_id, turn, goal.get("plant_id"), trace, action_id=action_id
+        _finish_turn(
+            garden_id, goal, turn, trace, identity, action_id, media_ids[0] if media_ids else None
         )
     except Exception as e:
         logger.exception("orchestration_failed garden_id=%s goal_id=%s", garden_id, goal_id)
@@ -1490,8 +1680,14 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
             )
         elif action_id and checkin_task:
             _set_action_feedback(garden_id, goal_id, action_id, turn.reply)
-        _apply_turn_result(
-            garden_id, goal_id, turn, goal.get("plant_id"), trace, action_id=action_id
+        _finish_turn(
+            garden_id,
+            goal,
+            turn,
+            trace,
+            identity,
+            action_id,
+            message_media[0] if message_media else None,
         )
     except Exception as e:
         logger.exception("chat_turn_failed garden_id=%s goal_id=%s", garden_id, goal_id)

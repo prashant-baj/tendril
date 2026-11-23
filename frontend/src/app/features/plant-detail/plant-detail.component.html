@@ -80,7 +80,7 @@
           @for (e of day.entries; track e.entryId) {
             <div class="entry">
               <div class="entry-head">
-                <span class="kind">{{ kindLabel[e.kind] }}</span>
+                <span class="kind">{{ entryLabel(e) }}</span>
                 @if (e.status) {
                   <td-chip shape="pill" [tone]="statusTone(e.status)">{{ e.status }}</td-chip>
                 }

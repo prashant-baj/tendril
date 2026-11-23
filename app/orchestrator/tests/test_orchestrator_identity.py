@@ -109,6 +109,7 @@ class _Result:
 class FakeAgent:
     reply = "Nice work — the drip line looks clear."
     proposed_action = None
+    outcome = None
     last_prompt = None
     last_kwargs = None
     messages: list = []
@@ -120,7 +121,9 @@ class FakeAgent:
         if structured_output_model is not None:
             return _Result(
                 handler.ChatTurnResult(
-                    reply=FakeAgent.reply, proposed_action=FakeAgent.proposed_action
+                    reply=FakeAgent.reply,
+                    proposed_action=FakeAgent.proposed_action,
+                    outcome=FakeAgent.outcome,
                 )
             )
         FakeAgent.last_prompt = prompt
@@ -291,7 +294,52 @@ def test_text_only_checkin_proposes_without_a_photo(env):
     assert not [c for c in core.calls if c[0] == "arn:pid"]  # no photo, no stake read
 
 
-def test_goal_photo_without_a_plant_proposes_linking_when_confident(env):
+def _with_plan(monkeypatch):
+    plan = handler.PlanProposal(
+        success_criteria="Soil stays moist", tasks=[handler.TaskProposal(title="Mulch", detail="d")]
+    )
+    original = FakeAgent.__call__
+
+    def call(self, prompt=None, *, structured_output_model=None, **kw):
+        if structured_output_model is not None:
+            return _Result(
+                handler.ChatTurnResult(reply="Here's a plan.", updated_plan=plan, outcome="plan")
+            )
+        return original(self, prompt, **kw)
+
+    monkeypatch.setattr(FakeAgent, "__call__", call)
+
+
+def test_information_only_goal_is_filed_by_a_confident_read_without_a_tap(env):
+    """ADR-0037 §2 (dev, #8 "Track this"): saved information needs no confirm — the goal and
+    photo go to the read plant, with Tendril's note in its history and a Move hint in the reply."""
+    items = _garden_items()
+    items[1]["media_ids"] = ["m10"]
+    table, _ = env(items, _stake(10))
+    handler.handle_goal_submitted({"gardenId": G, "goalId": "goal-1"})
+
+    assert _actions(table) == []  # no "Link to #10?" card
+    goal = table.items[(f"GARDEN#{G}", "GOAL#goal-1")]
+    assert goal["plant_id"] == "p10" and goal["status"] == "InformationSaved"
+    media = table.items[(f"GARDEN#{G}", "MEDIA#m10")]
+    assert media["plant_id"] == "p10" and media["plant_link_source"] == "auto"
+    (entry,) = table.of_prefix("PLANTLOG#p10#")
+    assert entry["kind"] == "log" and entry["source"] == "tendril"
+    assert entry["note"] == FakeAgent.reply and entry["media_ids"] == ["m10"]
+    assert "status" not in entry  # Tendril never sets a plant's status
+    (reply,) = _assistant(table)
+    assert reply["content"].endswith(
+        "Saved to #10's history. If that's the wrong palm, tell me its number."
+    )
+    assert entry["entry_id"] == reply["message_id"]
+    assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["history_count"] == 1
+    stored = media["stake_read"]
+    assert stored["stake_no"] == 10 and stored["confidence"] == "high"
+
+
+def test_a_confident_read_still_asks_when_the_turn_makes_a_plan(env, monkeypatch):
+    """A plan creates tasks against the plant — that's a change, so the link still asks first."""
+    _with_plan(monkeypatch)
     items = _garden_items()
     items[1]["media_ids"] = ["m10"]
     table, _ = env(items, _stake(10))
@@ -300,23 +348,23 @@ def test_goal_photo_without_a_plant_proposes_linking_when_confident(env):
     (action,) = _actions(table)
     assert action["type"] == "set_goal_plant"
     assert action["params"] == {"plant_id": "p10", "media_id": "m10"}
-    assert "plant_id" not in table.items[(f"GARDEN#{G}", "GOAL#goal-1")]  # not auto-linked
-    stored = table.items[(f"GARDEN#{G}", "MEDIA#m10")]["stake_read"]
-    assert stored["stake_no"] == 10 and stored["confidence"] == "high"
+    assert "plant_id" not in table.items[(f"GARDEN#{G}", "GOAL#goal-1")]
+    assert table.of_prefix("PLANTLOG#") == []
+    assert _assistant(table)[0]["action_id"] == action["action_id"]
 
 
 def test_auto_link_only_when_enabled(env, monkeypatch):
     monkeypatch.setattr(handler, "AUTO_LINK_ENABLED", True)
+    _with_plan(monkeypatch)
     items = _garden_items()
     items[1]["media_ids"] = ["m10"]
     table, _ = env(items, _stake(10))
     handler.handle_goal_submitted({"gardenId": G, "goalId": "goal-1"})
-    assert _actions(table) == []
+    assert _actions(table) == []  # with auto-link on, even a plan doesn't ask
     assert table.items[(f"GARDEN#{G}", "GOAL#goal-1")]["plant_id"] == "p10"
     assert table.items[(f"GARDEN#{G}", "MEDIA#m10")]["plant_link_source"] == "auto"
-    # ...and joins #10's history, becoming its current photo (ADR-0035).
     (entry,) = table.of_prefix("PLANTLOG#p10#")
-    assert entry["entry_id"] == "m10" and entry["source"] == "auto" and entry["goal_id"] == "goal-1"
+    assert entry["kind"] == "photo" and entry["source"] == "user"
     plant = table.items[(f"GARDEN#{G}", "PLANT#p10")]
     assert plant["media_id"] == "m10" and plant["history_count"] == 1
 
@@ -411,22 +459,62 @@ def test_an_identical_open_proposal_is_kept_not_raised_again(env):
     assert sorted(a["status"] for a in _actions(table)) == ["proposed", "superseded"]
 
 
-def test_a_chat_photo_of_the_goals_plant_joins_its_history_once(env):
-    """The goal is #10's; a chat photo reads #10 → filed and added to #10's history, dated by the
-    photo's capture time. Filing it again (e.g. createGoal already did) adds nothing."""
+def test_a_saved_chat_photo_of_the_goals_plant_is_one_note_with_the_photo(env):
+    """The goal is #10's; a chat photo reads #10 and the turn saves information → one entry:
+    Tendril's note with the photo, dated by the photo. Filing the photo again adds nothing."""
     items = _garden_items(goal_plant="p10") + [_user_message("new frond", ["m10"])]
     table, _ = env(items, _stake(10))
     table.items[(f"GARDEN#{G}", "MEDIA#m10")]["taken_at"] = "2026-11-20T08:00:00"
     handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
 
     (entry,) = table.of_prefix("PLANTLOG#p10#")
-    assert entry["sk"] == "PLANTLOG#p10#2026-11-20#m10"
-    assert entry["observed_on"] == "2026-11-20" and entry["source"] == "user"
+    assert entry["sk"].startswith("PLANTLOG#p10#2026-11-20#")
+    assert entry["source"] == "tendril" and entry["media_ids"] == ["m10"]
     assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["latest_photo_on"] == "2026-11-20"
 
     handler._link_media_to_plant(G, "m10", "p10", "user", goal_id="goal-1")
     assert len(table.of_prefix("PLANTLOG#p10#")) == 1
     assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["history_count"] == 1
+
+
+def test_a_photo_already_in_the_history_gets_the_note_without_repeating_it(env):
+    existing = {
+        "pk": f"GARDEN#{G}",
+        "sk": "PLANTLOG#p10#2026-11-20#m10",
+        "entry_id": "m10",
+        "plant_id": "p10",
+        "observed_on": "2026-11-20",
+        "kind": "photo",
+        "media_ids": ["m10"],
+    }
+    items = _garden_items(goal_plant="p10") + [existing, _user_message("", ["m10"])]
+    table, _ = env(items, _stake(10))
+    handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    note = next(e for e in table.of_prefix("PLANTLOG#p10#") if e.get("source") == "tendril")
+    assert "media_ids" not in note
+
+
+def test_a_text_only_question_writes_no_note(env):
+    items = _garden_items(goal_plant="p10") + [_user_message("how often should I water?")]
+    table, _ = env(items)
+    FakeAgent.outcome = "question"
+    try:
+        handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    finally:
+        FakeAgent.outcome = None
+    assert table.of_prefix("PLANTLOG#") == []
+
+
+def test_a_text_only_noted_turn_writes_a_note(env):
+    items = _garden_items(goal_plant="p10") + [_user_message("mulched the base today")]
+    table, _ = env(items)
+    FakeAgent.outcome = "noted"
+    try:
+        handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    finally:
+        FakeAgent.outcome = None
+    (note,) = table.of_prefix("PLANTLOG#p10#")
+    assert note["source"] == "tendril" and "media_ids" not in note
 
 
 # --- ADR-0036: a turn without a plan on a goal without one -> InformationSaved ----------------
@@ -444,7 +532,8 @@ def test_a_check_in_goal_without_a_plan_ends_as_information_saved(env):
     handler.handle_goal_submitted({"gardenId": G, "goalId": "goal-1"})
     assert _goal_status(table) == "InformationSaved"
     assert table.of_prefix("PLAN#") == []
-    assert len(table.of_prefix("PLANTLOG#p10#")) == 1  # the photo is saved to #10's history
+    (entry,) = table.of_prefix("PLANTLOG#p10#")  # the photo is saved to #10's history,
+    assert entry["source"] == "tendril" and entry["media_ids"] == ["m10"]  # with Tendril's note
 
 
 def test_a_stuck_decomposing_goal_resolves_on_its_next_chat_turn(env):

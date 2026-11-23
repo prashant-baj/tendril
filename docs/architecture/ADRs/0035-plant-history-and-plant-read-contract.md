@@ -188,6 +188,10 @@ full audit trail, which the owner's experience with OCR misreads asks for.
 
 ## Action Items
 
+**Amended by ADR-0037 (2026-11-23):** §2's "no model writes history directly" gains one
+exception: Tendril's reply for a saved goal turn is written by code as a `log` entry with
+`source: tendril`. It is clearly labelled and never sets a `status`.
+
 **Build notes (2026-11-23), where the code refines the text above:**
 
 - **§4, latest state:** the entry and `history_count` are written in the transaction; the

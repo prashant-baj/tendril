@@ -37,6 +37,18 @@
     </div>
   </section>
 
+  <!-- ADR-0036: check-ins and notes Tendril saved (no plan to approve) — so they don't vanish -->
+  @if (savedGoals().length > 0) {
+    <section>
+      <h2 class="section-title">Saved</h2>
+      <div class="goal-grid">
+        @for (goal of savedGoals(); track goal.goalId) {
+          <td-goal-card [goal]="goal" />
+        }
+      </div>
+    </section>
+  }
+
   <!-- plants strip -->
   <section>
     <div class="section-head">

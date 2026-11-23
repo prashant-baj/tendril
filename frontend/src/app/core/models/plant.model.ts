@@ -76,7 +76,8 @@ export interface PlantLogEntry {
   observedOn: string;
   observedAt?: string;
   kind: 'photo' | 'checkin' | 'log' | 'retraction';
-  source: 'user' | 'confirmed' | 'auto' | 'migration';
+  /** `tendril`: Tendril's own note for a saved goal (ADR-0037) — never sets a status. */
+  source: 'user' | 'confirmed' | 'auto' | 'migration' | 'tendril';
   status?: PlantStatus;
   note?: string;
   photos: PlantPhoto[];

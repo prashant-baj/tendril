@@ -3395,3 +3395,35 @@ def test_goal_filed_under_a_plant_adds_its_photos_to_the_history(monkeypatch):
     put = next(i["Put"] for i in history_tx if "Put" in i)
     assert put["Item"]["sk"]["S"].startswith("PLANTLOG#p13#")
     assert put["Item"]["entry_id"] == {"S": "m1"}  # same id an identity "match" would use
+
+
+def test_confirming_the_plant_of_a_saved_goal_files_tendrils_note_with_the_photo(monkeypatch):
+    """ADR-0037 (dev, #8): a goal saved before its plant was confirmed — confirming files the photo
+    as Tendril's note (source tendril, no status), not a bare photo entry."""
+    goal = {"goal_id": "goal-1", "status": "InformationSaved"}
+    reply = {
+        "pk": "GARDEN#g1",
+        "sk": "GOALMSG#goal-1#2026-11-23T17:00#r1",
+        "message_id": "r1",
+        "role": "assistant",
+        "content": "Plant #8 is underwatered; mulch and check the drip line.",
+    }
+    table, _ = _api_tables(
+        monkeypatch,
+        {
+            "ACTION#goal-1#a1": _action("set_goal_plant", {"plant_id": "p8", "media_id": "m10"}),
+            "GOAL#goal-1": {"Item": goal},
+            "MEDIA#m10": MEDIA_TAKEN,
+        },
+    )
+    table._query_response = {"Items": [reply]}
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.confirm_action(_event("POST", ACTION_CONFIRM, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
+    ops = _ops_by_sk(client.calls[0])
+    note = ops[("Put", "PLANTLOG#p8#2026-11-20#r1")]["Item"]
+    assert note["kind"] == {"S": "log"} and note["source"] == {"S": "tendril"}
+    assert note["note"]["S"].startswith("Plant #8 is underwatered")
+    assert note["media_ids"] == {"L": [{"S": "m10"}]} and "status" not in note
+    assert not any(k[1].startswith("PLANTLOG#p8#") and k[1].endswith("#a1") for k in ops)

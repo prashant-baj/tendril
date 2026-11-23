@@ -439,8 +439,8 @@ These are the **only** five `Goal`/`Plan` status values any real code ever write
 (**ADR-0036**, 2026-11-23) is set when a turn ends without a plan on a goal that has none, for
 example a check-in or a clarifying question. What was shared is recorded (reply, photo link,
 plant history) and there is nothing to approve. A goal that already has a plan keeps its status on
-a turn that doesn't revise it. The UI shows `InformationSaved` as "Saved", and Home counts it neither
-as needing attention nor as in progress
+a turn that doesn't revise it. The UI shows `InformationSaved` as "Saved", and Home lists it in its own
+"Saved" section, neither as needing attention nor as in progress
 (`app/orchestrator/orchestrator.py`, `app/api/garden_handler.py`) — a task's own lifecycle is
 just `pending`/`done` (no due-date once `done`). A richer lifecycle
 (`InProgress`/`AwaitingUser`/`Adapting`/`Completed`/`Abandoned`) was sketched early on and never

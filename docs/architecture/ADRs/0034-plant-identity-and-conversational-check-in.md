@@ -162,6 +162,10 @@ call, roughly 5–10 s), acceptable because check-ins are asynchronous chat turn
 
 ## Action Items
 
+**Amended by ADR-0037 (2026-11-23):** for goals that end as `InformationSaved`
+(information only, no plan), a confident read of an existing stake number files the goal and
+photo directly, even while `AUTO_LINK_ENABLED` is off. Goals with a plan still ask (§5).
+
 Built 2026-11-23. Notes from the build: identity rules live in `app/orchestrator/plant_identity.py`
 (pure, unit-tested); confident reads still become a `set_goal_plant` proposal until the CDK
 context flag `auto_link_enabled=true` sets `AUTO_LINK_ENABLED` on the orchestrator (only after the

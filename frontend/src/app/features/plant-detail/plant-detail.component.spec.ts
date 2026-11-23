@@ -102,6 +102,14 @@ describe('PlantDetailComponent', () => {
     expect(el.querySelectorAll('.day').length).toBe(2);
   });
 
+  it("labels Tendril's saved notes", () => {
+    const { fixture } = setup();
+    const c = fixture.componentInstance;
+    const note: PlantLogEntry = { entryId: 'n1', observedOn: '2026-11-23', kind: 'log', source: 'tendril', note: 'Looks dry', photos: [] };
+    expect(c.entryLabel(note)).toBe('Note from Tendril');
+    expect(c.entryLabel(NEWEST[1])).toBe('Note');
+  });
+
   it('compares the first photo with the latest one', () => {
     const { fixture } = setup();
     const c = fixture.componentInstance;

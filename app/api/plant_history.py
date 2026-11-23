@@ -24,7 +24,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 KINDS = ("photo", "checkin", "log", "retraction")
-SOURCES = ("user", "confirmed", "auto", "migration")
+# `tendril`: a note in Tendril's own words for a saved goal (ADR-0037) — never sets a status.
+SOURCES = ("user", "confirmed", "auto", "migration", "tendril")
 STATUSES = ("healthy", "ok", "watch")
 NOTE_MAX_CHARS = 1000
 MAX_MEDIA_PER_ENTRY = 4

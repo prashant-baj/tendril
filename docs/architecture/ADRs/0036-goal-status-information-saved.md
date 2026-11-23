@@ -119,6 +119,16 @@ model's raw reasoning into a one-task plan, which is option D in practice. Now:
   `global.amazon.nova-2-lite-v1:0`; overridable with `ORCHESTRATOR_MAX_TOKENS`);
 - the prompt tells the model never to narrate its own reasoning in the reply.
 
+**Second follow-up (2026-11-23, plant #8 in dev):**
+
+- **The goal became `InformationSaved` although the reply listed steps.** Nova 2 Lite wrote "updated_plan with tasks: …"
+  in its own notes, yet returned no plan, because the plan was an optional nested field. The
+  structured-output schema is now `TurnOutput`, with a **required** `outcome` (`plan` | `question` |
+  `noted`) and **required** `success_criteria` and `tasks`. Only `outcome: plan` with tasks becomes a
+  plan. Two live runs of the #8 scenario both returned a 3-task plan.
+- **Saved goals disappeared from Home.** They now have their own short "Saved" section (§3
+  amended); they still don't count as needing attention or as in progress.
+
 1. [x] Human review: approved 2026-11-23.
 2. [x] Orchestrator: set `InformationSaved` in `_apply_turn_result` when a turn has no plan and the
    goal has none; tests for intake, chat and the existing-plan case.

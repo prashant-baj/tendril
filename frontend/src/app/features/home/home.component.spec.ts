@@ -90,6 +90,8 @@ describe('HomeComponent goals split', () => {
   it('splits goals into "Goals in progress" and "Needs your attention"', () => {
     expect(fixture.componentInstance.goalsInProgress()).toEqual([goals[0]]);
     expect(fixture.componentInstance.goalsNeedingAttention()).toEqual([goals[1]]);
+    // A saved check-in has its own section rather than disappearing (ADR-0036).
+    expect(fixture.componentInstance.savedGoals()).toEqual([goals[2]]);
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
     expect(text).toContain('Needs your attention');
     expect(text).toContain('Approved goal');

@@ -1513,3 +1513,36 @@ def test_steps_in_the_reply_must_be_a_structured_plan():
     assert "those steps ARE the plan" in handler.ORCHESTRATOR_SYSTEM_PROMPT
     field = handler.ChatTurnResult.model_fields["updated_plan"]
     assert "never appear only in the reply text" in field.description
+
+
+def test_the_plan_decision_is_a_required_field_the_model_cannot_skip():
+    """Dev, 2026-11-23 (#8): with an optional nested plan, Nova 2 Lite planned tasks in its notes
+    and returned none. The schema now requires `outcome` and `tasks`."""
+    schema = handler.TurnOutput.model_json_schema()
+    assert {"reply", "outcome", "success_criteria", "tasks"} <= set(schema["required"])
+
+
+def test_turn_output_plan_becomes_a_plan_and_other_outcomes_do_not():
+    task = handler.TaskProposal(title="Mulch", detail="4-6 inch layer around the base")
+    planned = handler.TurnOutput(
+        reply="Water more.", outcome="plan", success_criteria="", tasks=[task]
+    ).to_result()
+    assert planned.updated_plan.tasks == [task]
+    assert planned.updated_plan.success_criteria  # never empty
+    for outcome in ("question", "noted"):
+        result = handler.TurnOutput(
+            reply="ok", outcome=outcome, success_criteria="", tasks=[task]
+        ).to_result()
+        assert result.updated_plan is None
+    empty_plan = handler.TurnOutput(reply="x", outcome="plan", success_criteria="", tasks=[])
+    assert empty_plan.to_result().updated_plan is None
+
+
+def test_run_turn_asks_for_turn_output_and_converts_it(monkeypatch):
+    task = handler.TaskProposal(title="Check drip line", detail="Look for clogs")
+    FakeAgent.structured_output = handler.TurnOutput(
+        reply="Underwatered.", outcome="plan", success_criteria="Moist soil", tasks=[task]
+    )
+    result = handler._run_turn(FakeAgent(), "help")
+    assert isinstance(result, handler.ChatTurnResult)
+    assert result.updated_plan.tasks[0].title == "Check drip line"
