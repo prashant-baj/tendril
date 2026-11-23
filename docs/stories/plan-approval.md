@@ -87,7 +87,11 @@ mock was blanked out (rather than deleted) when fictitious data was removed from
   exactly as scoped: a structuring *failure* (not a legitimate "no plan yet") wraps the raw reply
   text into one fallback `Task`, but only when no `Plan` exists yet for this goal — see PA-02's
   `_run_turn` for why a transient failure must never clobber an *existing* approved-or-proposed
-  plan.
+  plan. **Superseded 2026-11-23 (ADR-0036):** a structuring failure no longer synthesizes a
+  fallback `Task`. In dev it turned the model's raw reasoning into a one-task "plan" after a
+  `MaxTokensReachedException`. The reply is relayed without a plan and the goal ends as
+  `InformationSaved`. The orchestrator model also has an explicit `max_tokens` (8192,
+  `ORCHESTRATOR_MAX_TOKENS`).
 - [x] On a successful proposal: writes one `Plan` (`status=PlanProposed`) + its `Task`s, updates
   `Goal.status=PlanProposed`. **Deviation:** the model's rationale/reply isn't a separate
   `Plan.rationale` field (renamed from `orchestrator_result`) as originally scoped — it's written

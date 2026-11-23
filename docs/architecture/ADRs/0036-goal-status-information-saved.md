@@ -110,6 +110,15 @@ for an existing `PLAN#` item). Separately, the orchestrator's prompt and its `up
 require that steps the reply recommends are returned as plan tasks, which fixes the numbered-steps-in-text
 case. Frontend presentation lives in `shared/components/goal-status.util.ts`.
 
+**Follow-up fix (2026-11-23, plant #50 in dev):** the structured plan call hit
+`MaxTokensReachedException` (no output budget was set). The old PA-01 fallback then wrapped the
+model's raw reasoning into a one-task plan, which is option D in practice. Now:
+
+- a structuring failure relays the reply without a plan, so the goal becomes `InformationSaved`;
+- the orchestrator model has an explicit `max_tokens` of 8192 (accepted by
+  `global.amazon.nova-2-lite-v1:0`; overridable with `ORCHESTRATOR_MAX_TOKENS`);
+- the prompt tells the model never to narrate its own reasoning in the reply.
+
 1. [x] Human review: approved 2026-11-23.
 2. [x] Orchestrator: set `InformationSaved` in `_apply_turn_result` when a turn has no plan and the
    goal has none; tests for intake, chat and the existing-plan case.

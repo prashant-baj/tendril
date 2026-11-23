@@ -364,49 +364,53 @@ def test_run_turn_returns_structured_output_when_model_provides_it(monkeypatch):
     FakeAgent.free_text = "here's what I think"
     FakeAgent.structured_output = handler.ChatTurnResult(reply="Water more.", updated_plan=plan)
 
-    result = handler._run_turn(FakeAgent(), "help my plant", synthesize_fallback_plan=True)
+    result = handler._run_turn(FakeAgent(), "help my plant")
 
     assert result.reply == "Water more."
     assert result.updated_plan is plan
 
 
 def test_run_turn_returns_no_plan_when_model_asks_a_question(monkeypatch):
-    # A legitimate structured response with updated_plan=None (the model asked a clarifying
-    # question instead of proposing yet) must NOT trigger the fallback-plan synthesis path.
+    # A legitimate structured response with updated_plan=None: the model asked a clarifying
+    # question instead of proposing yet.
     FakeAgent.structured_output = handler.ChatTurnResult(
         reply="How many hours of direct sun does it get?", updated_plan=None
     )
 
-    result = handler._run_turn(FakeAgent(), "my plant looks sad", synthesize_fallback_plan=True)
+    result = handler._run_turn(FakeAgent(), "my plant looks sad")
 
     assert result.updated_plan is None
     assert "sun" in result.reply
 
 
-def test_run_turn_falls_back_to_one_task_when_structuring_fails_and_no_plan_exists():
+def test_run_turn_never_invents_a_plan_when_structuring_fails():
+    """Dev, 2026-11-23 (#50): the structured call hit MaxTokensReachedException and the old fallback
+    turned the model's raw reasoning into a one-task plan. Now the turn is relayed without a plan
+    (the goal then ends as InformationSaved, ADR-0036)."""
     FakeAgent.free_text = "Water it more and check the soil."
     FakeAgent.raise_on_structured = True
 
-    result = handler._run_turn(FakeAgent(), "help", synthesize_fallback_plan=True)
+    result = handler._run_turn(FakeAgent(), "help")
 
     assert result.reply == "Water it more and check the soil."
-    assert result.updated_plan is not None
-    assert len(result.updated_plan.tasks) == 1
-    assert result.updated_plan.tasks[0].detail == "Water it more and check the soil."
-
-
-def test_run_turn_does_not_clobber_existing_plan_when_structuring_fails():
-    # synthesize_fallback_plan=False: a Plan already exists for this goal — a transient
-    # structuring failure must relay the reply without touching it, never overwrite it.
-    FakeAgent.free_text = "Sure, that sounds reasonable."
-    FakeAgent.raise_on_structured = True
-
-    result = handler._run_turn(
-        FakeAgent(), "does that sound right?", synthesize_fallback_plan=False
-    )
-
-    assert result.reply == "Sure, that sounds reasonable."
     assert result.updated_plan is None
+
+
+def test_run_turn_with_no_text_at_all_still_replies():
+    FakeAgent.free_text = ""
+    FakeAgent.raise_on_structured = True
+    result = handler._run_turn(FakeAgent(), "help")
+    assert result.reply == handler.STRUCTURING_FAILED_REPLY and result.updated_plan is None
+
+
+def test_orchestrator_model_has_an_explicit_output_budget(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: seen.update(kw) or object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    handler._build_orchestrator_agent("g1", "goal-1", None, None)
+    assert seen["max_tokens"] == handler.MAX_TOKENS == 8192
+    assert "never narrate your own reasoning" in handler.ORCHESTRATOR_SYSTEM_PROMPT
 
 
 # --- _load_plan / _load_tasks / _load_latest_message / _write_plan_and_tasks (PA-01/PA-02) -

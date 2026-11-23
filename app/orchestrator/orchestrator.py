@@ -81,6 +81,10 @@ APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by AgentCoreStack; neve
 MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")  # injected by AgentCoreStack; never hardcoded
 AGENT_STATE_BUCKET_NAME = os.getenv("AGENT_STATE_BUCKET_NAME")  # injected by AgentCoreStack
 MODEL_ID = os.getenv("MODEL_ID") or None
+# Explicit output budget per model call. Without one Bedrock applies the model's default, which
+# a long turn plus the structured plan call exceeded in dev (MaxTokensReachedException,
+# 2026-11-23). 8192 verified as accepted by global.amazon.nova-2-lite-v1:0.
+MAX_TOKENS = int(os.getenv("ORCHESTRATOR_MAX_TOKENS") or 8192)
 AGENT_MANIFEST: dict[str, dict[str, str]] = json.loads(os.getenv("AGENT_MANIFEST", "{}"))
 
 # Media.content_type (data-architecture.md §2) -> strands.types.media.ImageContent format.
@@ -181,6 +185,8 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
     "first and pass along what it identifies to any other specialist you consult, so "
     "they reason from the same starting point instead of re-diagnosing from scratch. "
     "Then reply to the gardener like a text message, not a report: 2-4 short sentences, "
+    "written to the gardener — never narrate your own reasoning or describe what the gardener "
+    "or the instructions want; "
     "plain conversational prose — no markdown headings, no bold-labeled sections, no "
     "restating every specialist's answer. If you have enough information, propose a "
     "short, concrete plan (a handful of specific tasks); the plan itself carries the "
@@ -196,7 +202,9 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
     "repeat it as done — just explain briefly."
 )
 
-FALLBACK_TASK_TITLE_MAX_CHARS = 60
+STRUCTURING_FAILED_REPLY = (
+    "I've saved this. I couldn't put together a plan just now — ask me for one and I'll try again."
+)
 # ADR-0036: a turn ended without a plan on a goal that has none (a check-in, a question).
 GOAL_INFORMATION_SAVED = "InformationSaved"
 # Phase 7.5+: how far forward a followup.due nudge pushes a task's due-date, so the tracker
@@ -1213,18 +1221,16 @@ def _update_task_feedback(garden_id: str, goal_id: str, task_id: str, feedback: 
     )
 
 
-def _run_turn(agent: Agent, prompt: str, *, synthesize_fallback_plan: bool) -> ChatTurnResult:
+def _run_turn(agent: Agent, prompt: str) -> ChatTurnResult:
     """Runs one turn: a normal call (tool-calling happens as usual), then a second, prompt-less
     call on the *same* agent instance with structured_output_model — Strands reuses the just-built
     conversation history for this (no new prompt, confirmed in strands' own agent.py docstrings),
     so it never re-runs the tool calls, just extracts structure from what already happened.
 
-    Fails open: if the structured call itself errors, the turn isn't lost — the free-text reply
-    from the first call is still relayed. When `synthesize_fallback_plan` is set (there's no
-    existing Plan yet for this goal), the raw text is also wrapped into a single fallback Task
-    rather than leaving the gardener with nothing structured at all (PA-01's stated AC); when a
-    Plan already exists, a transient structuring failure must never silently clobber it, so no
-    plan mutation happens on that path."""
+    Fails open: if the structured call errors (e.g. MaxTokensReachedException), the free-text reply
+    from the first call is still relayed, **without** a plan. No plan is ever synthesized from raw
+    text: in dev that turned the model's own reasoning into a one-task "plan" (2026-11-23). A goal
+    with no plan then ends as `InformationSaved` (ADR-0036), and the gardener can ask for a plan."""
     first = agent(prompt)
     free_text = str(first).strip()
     try:
@@ -1234,21 +1240,7 @@ def _run_turn(agent: Agent, prompt: str, *, synthesize_fallback_plan: bool) -> C
         logger.warning("structured_output_empty; falling back to raw text")
     except Exception:
         logger.exception("structured_output_failed; falling back to raw text")
-
-    reply = free_text or "(no response)"
-    if not synthesize_fallback_plan:
-        return ChatTurnResult(reply=reply, updated_plan=None)
-
-    fallback_title = free_text[:FALLBACK_TASK_TITLE_MAX_CHARS] or "Review Tendril's notes"
-    return ChatTurnResult(
-        reply=reply,
-        updated_plan=PlanProposal(
-            success_criteria="Confirm with the gardener whether this addressed the issue.",
-            tasks=[
-                TaskProposal(title=fallback_title, detail=free_text or "No details.", scope="plant")
-            ],
-        ),
-    )
+    return ChatTurnResult(reply=free_text or STRUCTURING_FAILED_REPLY, updated_plan=None)
 
 
 def _build_checkin_prompt(checkin_task: dict[str, Any]) -> str:
@@ -1315,7 +1307,7 @@ def _build_orchestrator_agent(
         else ORCHESTRATOR_SYSTEM_PROMPT
     )
     agent = Agent(
-        model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
+        model=BedrockModel(max_tokens=MAX_TOKENS, **({"model_id": MODEL_ID} if MODEL_ID else {})),
         system_prompt=system_prompt,
         tools=_build_tools(
             garden_id, image_url, image_format, trace, garden_context=garden_context
@@ -1382,7 +1374,7 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, message, synthesize_fallback_plan=True)
+        turn = _run_turn(agent, message)
         # Explicit, not just Strands' streaming callback print: that relies on stdout being
         # flushed before Lambda freezes the execution environment, which isn't guaranteed and
         # has been observed to drop the final response from CloudWatch even on a successful run.
@@ -1477,7 +1469,7 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, transcript, synthesize_fallback_plan=plan is None)
+        turn = _run_turn(agent, transcript)
         logger.info(
             "chat_turn_result garden_id=%s goal_id=%s has_plan=%s reply=%r",
             garden_id,
@@ -1550,7 +1542,7 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
 
     try:
         turn_started = time.monotonic()
-        turn = _run_turn(agent, transcript, synthesize_fallback_plan=False)
+        turn = _run_turn(agent, transcript)
         logger.info(
             "checkin_feedback_result garden_id=%s goal_id=%s task_id=%s has_plan=%s reply=%r",
             garden_id,
