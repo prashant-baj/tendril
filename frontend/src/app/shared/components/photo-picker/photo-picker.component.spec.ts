@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { PhotoPickerComponent } from './photo-picker.component';
+import { MAX_PHOTO_BYTES, PhotoPickerComponent } from './photo-picker.component';
 
 describe('PhotoPickerComponent', () => {
   let fixture: ComponentFixture<PhotoPickerComponent>;
@@ -48,5 +48,33 @@ describe('PhotoPickerComponent', () => {
 
     expect(emitted).toEqual([null]);
     expect(component.previewUrl()).toBeNull();
+  });
+
+  it('refuses a photo over 10 MB with a clear message and emits null (ADR-0033)', () => {
+    const big = new File(['x'], 'huge.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(big, 'size', { value: 11 * 1024 * 1024 });
+    const emitted: (File | null)[] = [];
+    component.fileSelected.subscribe((f) => emitted.push(f));
+
+    component.onFileChange(fileInputEvent(big));
+    fixture.detectChanges();
+
+    expect(emitted).toEqual([null]);
+    expect(component.previewUrl()).toBeNull();
+    expect(component.error()).toContain('up to 10 MB');
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('11.0 MB');
+  });
+
+  it('accepts a photo of exactly 10 MB and clears a previous error', () => {
+    const big = new File(['x'], 'huge.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(big, 'size', { value: 11 * 1024 * 1024 });
+    component.onFileChange(fileInputEvent(big));
+    const ok = new File(['x'], 'ok.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(ok, 'size', { value: MAX_PHOTO_BYTES });
+
+    component.onFileChange(fileInputEvent(ok));
+
+    expect(component.error()).toBeNull();
+    expect(component.selectedFileName()).toBe('ok.jpg');
   });
 });

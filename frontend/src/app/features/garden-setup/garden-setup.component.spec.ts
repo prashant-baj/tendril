@@ -78,7 +78,7 @@ describe('GardenSetupComponent', () => {
 
     expect(gardenApi.requestMediaUpload).toHaveBeenCalledTimes(1);
     const [gardenIdArg, mediaRequestArg] = gardenApi.requestMediaUpload.calls.mostRecent().args;
-    expect(mediaRequestArg).toEqual({ contentType: 'image/jpeg', fileName: 'garden.jpg' });
+    expect(mediaRequestArg).toEqual({ contentType: 'image/jpeg', fileName: 'garden.jpg', sizeBytes: 1 });
     expect(gardenApi.uploadMedia).toHaveBeenCalledWith('https://s3.example/upload', file);
     expect(gardenApi.createGarden).toHaveBeenCalledWith({
       name: 'Balcony Garden',

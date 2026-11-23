@@ -182,12 +182,12 @@ describe('HttpGardenApi', () => {
   it('requestMediaUpload() POSTs to /gardens/{id}/media', () => {
     let result: unknown;
     api
-      .requestMediaUpload('g-1', { contentType: 'image/jpeg', fileName: 'tomato.jpg' })
+      .requestMediaUpload('g-1', { contentType: 'image/jpeg', fileName: 'tomato.jpg', sizeBytes: 2048 })
       .subscribe((r) => (result = r));
 
     const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/media`);
     expect(req.request.method).toBe('POST');
-    expect(req.request.body).toEqual({ contentType: 'image/jpeg', fileName: 'tomato.jpg' });
+    expect(req.request.body).toEqual({ contentType: 'image/jpeg', fileName: 'tomato.jpg', sizeBytes: 2048 });
     req.flush({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });
 
     expect(result).toEqual({ uploadUrl: 'https://s3.example/upload', mediaId: 'media-1' });

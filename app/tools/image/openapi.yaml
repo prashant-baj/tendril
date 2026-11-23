@@ -1,0 +1,136 @@
+openapi: 3.0.1
+info:
+  title: Tendril Image Tool
+  version: "1.0.0"
+  description: >
+    ADR-0033's reusable image-processing Tool API. Documents the contract image_tool.py
+    implements; like the Weather Tool it is deployed as a Lambda Function URL with IAM auth, not
+    API Gateway, so this file is the contract rather than a CDK deploy artifact. Stateless: the
+    caller supplies the source by presigned GET URL (or inline base64) and, optionally, a presigned
+    PUT URL per output. The tool holds no S3/DynamoDB permission (ADR-0013). Never log or echo the
+    URLs: presigned URLs are credentials-equivalent.
+paths:
+  /inspect:
+    post:
+      operationId: inspectImage
+      summary: Real format (from magic bytes), dimensions and size of an image
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source:
+                  $ref: "#/components/schemas/Source"
+      responses:
+        "200":
+          description: Image facts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InspectResult"
+        "400": {$ref: "#/components/responses/Error"}
+        "413": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+        "502": {$ref: "#/components/responses/Error"}
+  /resize:
+    post:
+      operationId: resizeImage
+      summary: Produce one or more JPEG outputs bounded by long edge and bytes
+      description: >
+        Decodes once, applies EXIF orientation, converts to RGB (transparency becomes white), then
+        for each output scales so the long edge is at most maxLongEdge (never upscales) and encodes
+        JPEG, stepping quality 85 -> 70 and shrinking further if needed, until at most maxBytes.
+        Metadata (EXIF including GPS) is stripped unless keepMetadata is true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, outputs]
+              properties:
+                source:
+                  $ref: "#/components/schemas/Source"
+                outputs:
+                  type: array
+                  minItems: 1
+                  maxItems: 4
+                  items:
+                    $ref: "#/components/schemas/OutputSpec"
+      responses:
+        "200":
+          description: Outputs produced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResizeResult"
+        "400": {$ref: "#/components/responses/Error"}
+        "413": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+        "502": {$ref: "#/components/responses/Error"}
+components:
+  responses:
+    Error:
+      description: >
+        400 invalid request; 413 source larger than 10 MB; 422 not an image, unsupported format,
+        corrupt, more than 60 MP, or cannot fit maxBytes; 502 fetching the source or storing an
+        output failed.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [message]
+            properties:
+              message: {type: string}
+  schemas:
+    Source:
+      type: object
+      description: Exactly one of url (presigned GET, at most 10 MB) or base64.
+      properties:
+        url: {type: string, format: uri}
+        base64: {type: string}
+    OutputSpec:
+      type: object
+      required: [maxLongEdge, maxBytes]
+      properties:
+        name: {type: string, description: "Caller's label, echoed back (e.g. analysis, thumb)."}
+        maxLongEdge: {type: integer, minimum: 64, maximum: 8000}
+        maxBytes: {type: integer, minimum: 50000, maximum: 10485760}
+        destinationUrl:
+          type: string
+          format: uri
+          description: Presigned S3 PUT signed with ContentType image/jpeg. Omit to get base64 back.
+        keepMetadata: {type: boolean, default: false}
+    InspectResult:
+      type: object
+      required: [detectedFormat, width, height, bytes]
+      properties:
+        detectedFormat:
+          type: string
+          enum: [jpeg, png, gif, webp, tiff, bmp, heic, avif]
+        width: {type: integer}
+        height: {type: integer}
+        bytes: {type: integer}
+    ResizeResult:
+      allOf:
+        - $ref: "#/components/schemas/InspectResult"
+        - type: object
+          required: [outputs]
+          properties:
+            outputs:
+              type: array
+              items:
+                type: object
+                required: [name, format, width, height, bytes, quality]
+                properties:
+                  name: {type: string}
+                  format: {type: string, enum: [jpeg]}
+                  width: {type: integer}
+                  height: {type: integer}
+                  bytes: {type: integer}
+                  quality: {type: integer}
+                  stored: {type: boolean}
+                  base64: {type: string}

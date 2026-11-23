@@ -31,6 +31,8 @@ jobs:
           -r app/api/requirements.txt
           -r app/orchestrator/requirements.txt
           -r app/tools/weather/requirements.txt
+          -r app/tools/image/requirements.txt
+          -r app/ingestion/requirements.txt
       - name: Lint
         run: ruff check .
       - name: Format check

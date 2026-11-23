@@ -81,7 +81,7 @@ export class GardenSetupComponent {
       ? (() => {
           const gardenId = generateId();
           return this.gardenApi
-            .requestMediaUpload(gardenId, { contentType: file.type, fileName: file.name })
+            .requestMediaUpload(gardenId, { contentType: file.type, fileName: file.name, sizeBytes: file.size })
             .pipe(
               switchMap(({ uploadUrl, mediaId }) =>
                 this.gardenApi

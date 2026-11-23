@@ -73,6 +73,7 @@ describe('CaptureComponent', () => {
     expect(gardenApi.requestMediaUpload).toHaveBeenCalledWith('g-1', {
       contentType: 'image/jpeg',
       fileName: 'tomato.jpg',
+      sizeBytes: 1, // File(['x']) — the real size is sent (ADR-0033)
     });
     expect(gardenApi.uploadMedia).toHaveBeenCalledWith('https://s3.example/upload', file);
     expect(gardenApi.createGoal).toHaveBeenCalledWith('g-1', {

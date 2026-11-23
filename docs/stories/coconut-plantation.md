@@ -96,11 +96,12 @@ migration time — the archive folder names are the human-verified mapping.
 | 1 | **CP-01** Onboard Garden + context (+ notification recipients) | P0 | Tendril P1-2 (done) | Garden `context` block |
 | 2 | **CP-02** Bulk-add Plants (optional stake numbers) | P0 | CP-01 | — (reuses Plant; optional `stake_no` noted in CP-03 ADR) |
 | 3 | **CP-03** Plant history: date-wise photos + logs (model + write) | P0 | CP-02 | Plant history entity + access pattern |
-| 4 | **CP-04** Migration script (DynamoDB + S3 + KB seed) | P0 | CP-01, CP-02, CP-03 | (uses CP-01/03 ADRs) |
+| 3a | **CP-12** Photo ingestion + reusable Image Tool (analysis copies, thumbnails, 10 MB limit) | P0 | — | **ADR-0033 (Accepted)** — built 2026-11-23 |
+| 4 | **CP-04** Migration script (DynamoDB + S3 + KB seed) | P0 | CP-01, CP-02, CP-03, **CP-12** | (uses CP-01/03 ADRs) |
 | 5 | **CP-05** Plant endpoint (`GET /plants/{plantId}`) + plant-detail UI | P0 | CP-03 (data via CP-04) | Plant history read contract (same ADR as CP-03) |
 | 6 | **CP-06** Garden activity log (garden-scoped tasks/events + recurring-due) | P0 | CP-01 | Garden activity log |
 | 7 | **CP-07** Garden-state assessment + **Supervisor agent** (new) | P1 | CP-05, CP-06 | Supervisor agent + assessment |
-| 8 | **CP-08** Upload → auto-map to a plant | P1 | CP-03 | Auto-map / plant-identity policy |
+| 8 | **CP-08** Plant identity from photos + conversational check-in | P1 | **CP-12**, CP-03 | **ADR-0034 (Accepted)** |
 | 9 | **CP-11** Mobile-number auth + garden access + recipient mapping | P1 | CP-01 | Auth / tenancy |
 | 10 | **CP-10** Marathi everywhere + coconut agronomy reframe | P1 | CP-07 | Commercial-scope + localization (§11) |
 | 11 | **CP-09** WhatsApp intake + reminders | P1 | CP-06, CP-07, CP-08, **CP-11** | Notification/reply channel (extends ADR-0004) |
@@ -308,7 +309,17 @@ Supervisor agent + garden-state assessment. **Status:** ☐ to do.
 
 ---
 
-## CP-08 — Upload → auto-map to a plant
+## CP-08 — Plant identity from photos + conversational check-in
+
+> **Scope extended by [ADR-0034](../architecture/ADRs/0034-plant-identity-and-conversational-check-in.md)
+> (Accepted 2026-11-23):** an internal `plant_identifier` specialist reads the stake number, run by
+> orchestrator code (not at the model's discretion) on goal photos, chat photos and check-ins; an
+> identity policy decides auto-link vs. ask; **check-ins become a chat turn** (photo and/or text,
+> optional task) where the model *proposes* an action and only a **Confirm** tap (deterministic
+> endpoint) changes data; a typed "yes" is not consent. Auto-link ships only when wrong
+> high-confidence reads are **< 1%** on archive evals. The per-task check-in returns `202` with a
+> proposal. Depends on CP-12 (analysis copies). Origin: on 2026-11-23 a #10 photo was checked in
+> on palm #1's task unnoticed, and a goal photo without a selected plant couldn't be linked.
 
 **As a** worker, **I want** a photo I upload to file itself to the right palm, **so that** I never
 pick a plant by hand.
@@ -326,7 +337,32 @@ pick a plant by hand.
 
 **Tasks** — ADR (plant-identity / auto-map policy + confidence threshold); map-on-upload flow;
 confirm + correction UI; eval scenarios for the vision read; dev smoke test.
-**Dependencies:** CP-03. **Blocking ADR:** Auto-map / plant-identity policy. **Status:** ☐ to do.
+**Dependencies:** CP-12, CP-03. **Blocking ADR:** ADR-0034 (Accepted). **Status:** ☐ to do.
+
+---
+
+## CP-12 — Photo ingestion + reusable Image Tool
+
+**As an** owner, **I want** every photo (any format, any size up to 10 MB) to be analyzable,
+**so that** a mislabelled or large photo never breaks a diagnosis. *(Found 2026-11-23: a 4.6 MB PNG
+named `.jpg` failed 11 of 15 specialist calls; 86 of 137 archive `.jpg` files are PNG, median 4 MB.)*
+
+**Acceptance criteria**
+- A stateless **Image Tool** (`app/tools/image/`): `inspect` (real format from magic bytes) and
+  `resize` (EXIF-orient, JPEG bounded by long edge and bytes, metadata stripped, several outputs per
+  call), presigned URLs in and out, no data permissions; reusable by any component or agent.
+- An **Ingestion Lambda** on S3 `uploads/` makes an analysis copy (≤ 2048 px, ≤ 1.5 MB) and a 512 px
+  thumbnail under `derived/`, and records `processing_status` + real format on the Media item.
+- Uploads are limited to **10 MB** (`sizeBytes` required; frontend refuses larger with a clear message).
+- Models only ever receive the analysis copy; a photo still processing is awaited up to 20 s; an
+  unreadable photo is never sent to a specialist and the reply asks to resend.
+- Display URLs use thumbnails / analysis copies once ready.
+- Older photos are backfilled (`scripts/backfill_media.py`, dry run by default).
+
+**Dependencies:** none. **Blocking ADR:** [ADR-0033](../architecture/ADRs/0033-photo-ingestion-and-analysis-copies.md)
+(Accepted). **Status:** ◐ built + tested 2026-11-23 (image tool 33 tests, ingestion 16, API/orchestrator/
+CDK/frontend tests updated). **Open:** deploy; run the backfill in dev; re-test the 4.6 MB PNG-as-.jpg
+photo (vision + agronomy succeed); confirm an 11 MB photo is refused.
 
 ---
 
@@ -395,7 +431,9 @@ garden mapping; link recipients to users; tests; dev smoke test.
 
 ## 3. ADRs to raise (in rough order)
 
-Next free ADR number is **0016**.
+ADR numbers 0016–0031 are reserved for the imported showcase ADRs. This epic's ADRs so far:
+**0032** (garden context + stake numbers, CP-01/02), **0033** (photo ingestion + Image Tool, CP-12),
+**0034** (plant identity + conversational check-in, CP-08). Next free number: **0035**.
 
 1. Garden `context` block (CP-01)
 2. Plant history: date-wise photos + logs, optional `stake_no`, access pattern, `GET
@@ -403,7 +441,8 @@ Next free ADR number is **0016**.
 3. Garden activity log + recurring-due rules (CP-06)
 4. Supervisor agent (new architecture candidate) + garden-state assessment (scheduled,
    goal-owning, delegates to the orchestrator; names the model choice) (CP-07)
-5. Upload auto-map / plant-identity policy (CP-08)
+5. ~~Upload auto-map / plant-identity policy (CP-08)~~ → **ADR-0034, Accepted**; photo processing
+   prerequisite → **ADR-0033, Accepted** (CP-12)
 6. Auth / tenancy: Cognito mobile-number + mobile ↔ user ↔ garden mapping (CP-11)
 7. Commercial-scope + localization: revisits project-context §11 (CP-10)
 8. Notification + reply channel: WhatsApp, extends ADR-0004, supersedes the backlog's

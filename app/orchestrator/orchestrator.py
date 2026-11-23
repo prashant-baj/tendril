@@ -416,25 +416,85 @@ def _format_transcript(
     return "\n".join(lines)
 
 
-def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
-    """First attached photo -> (presigned GET URL, image format), or None if there isn't one
-    or its Media record/content-type is missing/unrecognized. Only the first is used — a goal
-    with several photos is future work, not needed to prove this pipe."""
-    if not media_ids:
-        return None
-    resp = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_ids[0]}"})
-    item = resp.get("Item")
-    if not item:
-        return None
-    image_format = CONTENT_TYPE_TO_IMAGE_FORMAT.get(item.get("content_type", ""))
-    if not image_format:
-        return None
-    url = _get_s3().generate_presigned_url(
-        "get_object",
-        Params={"Bucket": MEDIA_BUCKET_NAME, "Key": item["s3_key"]},
-        ExpiresIn=900,
+PHOTO_WAIT_SECONDS = 20  # ADR-0033: bounded wait for a just-uploaded photo still processing
+PHOTO_POLL_SECONDS = 2
+_sleep = time.sleep  # module-level so tests can skip real waiting
+UNREADABLE_PHOTO_NOTE = (
+    "(The gardener attached a photo, but it could not be read — it may be corrupt, an "
+    "unsupported format, larger than 10 MB, or still processing. Do not guess what it shows and "
+    "do not call a vision specialist for it; say you couldn't read the photo and ask them to "
+    "resend it.)"
+)
+
+
+class PhotoResolution(BaseModel):
+    url: str | None = None
+    image_format: str | None = None
+    unreadable: bool = False  # a photo was attached but must not be sent to any model
+
+
+def _load_media(garden_id: str, media_id: str) -> dict[str, Any] | None:
+    return (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"})
+        .get("Item")
     )
-    return url, image_format
+
+
+def _resolve_photo(garden_id: str, media_ids: list[str]) -> PhotoResolution:
+    """First attached photo -> what to send to specialists (ADR-0033).
+
+    - Processed (`processing_status: ready`): the **analysis copy**, always JPEG — a right-sized,
+      correctly typed image, whatever the original was.
+    - Still `pending`: poll up to PHOTO_WAIT_SECONDS (a goal is often submitted seconds after its
+      upload); still not ready, or `failed`: `unreadable` — the turn proceeds without the photo
+      instead of sending specialists something they will reject.
+    - No `processing_status` at all (uploaded before ingestion existed): the original with its
+      declared type, as before.
+    Only the first photo is used — several photos per goal is future work.
+    """
+    if not media_ids:
+        return PhotoResolution()
+    item = _load_media(garden_id, media_ids[0])
+    if not item:
+        return PhotoResolution()
+
+    waited = 0.0
+    while item.get("processing_status") == "pending" and waited < PHOTO_WAIT_SECONDS:
+        _sleep(PHOTO_POLL_SECONDS)
+        waited += PHOTO_POLL_SECONDS
+        item = _load_media(garden_id, media_ids[0]) or item
+
+    status = item.get("processing_status")
+    if status is None:  # legacy media: original + declared type
+        key = item["s3_key"]
+        image_format = CONTENT_TYPE_TO_IMAGE_FORMAT.get(item.get("content_type", ""))
+        if not image_format:
+            return PhotoResolution(unreadable=True)
+    elif status == "ready" and item.get("analysis_s3_key"):
+        key, image_format = item["analysis_s3_key"], "jpeg"
+    else:
+        logger.warning(
+            "photo_unreadable garden_id=%s media_id=%s status=%s error=%s waited_s=%s",
+            garden_id,
+            media_ids[0],
+            status,
+            item.get("processing_error"),
+            waited,
+        )
+        return PhotoResolution(unreadable=True)
+
+    url = _get_s3().generate_presigned_url(
+        "get_object", Params={"Bucket": MEDIA_BUCKET_NAME, "Key": key}, ExpiresIn=900
+    )
+    return PhotoResolution(url=url, image_format=image_format)
+
+
+def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | None:
+    """(presigned GET URL, image format) of the first attached photo, or None — see
+    `_resolve_photo`, which also tells callers when an attached photo was unreadable."""
+    photo = _resolve_photo(garden_id, media_ids)
+    return (photo.url, photo.image_format) if photo.url and photo.image_format else None
 
 
 def _update_goal(garden_id: str, goal_id: str, **fields: Any) -> None:
@@ -725,8 +785,8 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
     _update_goal(garden_id, goal_id, status="Decomposing")
     _write_message(garden_id, goal_id, role="user", content=goal["description"])
 
-    image = _resolve_image(garden_id, goal.get("media_ids") or [])
-    image_url, image_format = image if image else (None, None)
+    photo = _resolve_photo(garden_id, goal.get("media_ids") or [])
+    image_url, image_format = photo.url, photo.image_format
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
@@ -736,6 +796,8 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         # The model only sees this text — it has no other way of knowing a photo is actually
         # attached, and won't reliably call a vision-capable specialist without being told.
         message += "\n\n(A photo of the affected plant is attached to this goal.)"
+    elif photo.unreadable:
+        message += f"\n\n{UNREADABLE_PHOTO_NOTE}"
 
     try:
         turn_started = time.monotonic()
@@ -779,12 +841,14 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
     # event, the same ordering create_goal already relies on for goal.submitted.
     messages = _load_messages(garden_id, goal_id)
 
-    image = _resolve_image(garden_id, goal.get("media_ids") or [])
-    image_url, image_format = image if image else (None, None)
+    photo = _resolve_photo(garden_id, goal.get("media_ids") or [])
+    image_url, image_format = photo.url, photo.image_format
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
     transcript = _format_transcript(goal, plan, tasks, messages)
+    if photo.unreadable:
+        transcript += f"\n\n{UNREADABLE_PHOTO_NOTE}"
 
     try:
         turn_started = time.monotonic()
@@ -835,14 +899,16 @@ def handle_task_checkin_received(detail: dict[str, Any]) -> None:
         return
     messages = _load_messages(garden_id, goal_id)
 
-    image = _resolve_image(
+    photo = _resolve_photo(
         garden_id, [checkin_task["media_id"]] if checkin_task.get("media_id") else []
     )
-    image_url, image_format = image if image else (None, None)
+    image_url, image_format = photo.url, photo.image_format
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
     transcript = _format_transcript(goal, plan, tasks, messages, checkin_task=checkin_task)
+    if photo.unreadable:
+        transcript += f"\n\n{UNREADABLE_PHOTO_NOTE}"
 
     try:
         turn_started = time.monotonic()

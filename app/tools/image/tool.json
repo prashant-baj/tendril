@@ -1,0 +1,5 @@
+{
+  "description": "ADR-0033: per-tool Lambda sizing read by AgentCoreStack's tool loop. Image decode/resize of up to 10 MB / 60 MP photos needs more memory and time than the 128 MB / 10 s defaults.",
+  "memory_mb": 1024,
+  "timeout_seconds": 30
+}

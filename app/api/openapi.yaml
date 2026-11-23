@@ -832,14 +832,23 @@ components:
 
     MediaUploadRequest:
       type: object
-      required: [contentType, fileName]
+      required: [contentType, fileName, sizeBytes]
       properties:
         contentType:
           type: string
-          description: MIME type of the file being uploaded (e.g. "image/jpeg").
+          description: >
+            MIME type of the file being uploaded (e.g. "image/jpeg"). The presigned PUT is signed
+            with it, but it is never trusted for analysis: the Ingestion Lambda records the real
+            format from the file's bytes (ADR-0033).
         fileName:
           type: string
           minLength: 1
+          description: Only the base name is used in the storage key.
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+          description: File size in bytes. Photos are limited to 10 MB (ADR-0033); larger is a 400.
 
     MediaUploadResponse:
       type: object

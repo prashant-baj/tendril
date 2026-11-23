@@ -1,0 +1,4 @@
+# Image Tool (ADR-0033). Pinned: Pillow for decode/resize/JPEG encode, pillow-heif for iPhone
+# HEIC/HEIF photos. Both publish manylinux aarch64 wheels for the ARM64 Lambda image.
+Pillow==11.3.0
+pillow-heif==1.1.0

@@ -148,6 +148,9 @@ CLIMATE_ZONE_MAX_CHARS = 100
 # past API Gateway's 29s integration timeout).
 BULK_PLANTS_MAX = 200
 STAKE_NO_MAX = 99999  # matches the zero-padded 5-digit STAKE# sort key
+# ADR-0033: originals go under `uploads/` (the Ingestion Lambda's trigger prefix), limited to 10 MB.
+MEDIA_UPLOADS_PREFIX = "uploads/"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
@@ -482,13 +485,23 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
 
     content_type = payload.get("contentType")
     file_name = payload.get("fileName")
+    size_bytes = payload.get("sizeBytes")
     if not isinstance(content_type, str) or not content_type.strip():
         return _error(400, "contentType is required")
     if not isinstance(file_name, str) or not file_name.strip():
         return _error(400, "fileName is required")
+    # ADR-0033: uploads are limited to 10 MB. A presigned PUT can't enforce size, so the
+    # declared size is checked here and the Ingestion Lambda / Image Tool are the backstop.
+    if not _is_positive_int(size_bytes):
+        return _error(400, "sizeBytes is required (the file size in bytes)")
+    if size_bytes > MAX_UPLOAD_BYTES:
+        return _error(400, "photo is larger than 10 MB")
 
     media_id = str(uuid.uuid4())
-    s3_key = f"{garden_id}/{media_id}/{file_name}"
+    # Only the base name: a '/' in the client's file name must not change the key layout that the
+    # Ingestion Lambda parses (`uploads/{garden_id}/{media_id}/{file}`).
+    safe_name = file_name.replace("\\", "/").rsplit("/", 1)[-1].strip() or "photo"
+    s3_key = f"{MEDIA_UPLOADS_PREFIX}{garden_id}/{media_id}/{safe_name}"
 
     try:
         upload_url = _get_s3().generate_presigned_url(
@@ -506,7 +519,11 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
                 "media_id": media_id,
                 "garden_id": garden_id,
                 "s3_key": s3_key,
+                # As declared by the client — never trusted for analysis; the Ingestion Lambda
+                # records the real `detected_format` (ADR-0033).
                 "content_type": content_type,
+                "size_bytes": size_bytes,
+                "processing_status": "pending",
                 "uploaded_at": datetime.now(UTC).isoformat(),
             }
         )
@@ -681,7 +698,7 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
             .get("Item")
         )
         if media_item:
-            result["photoUrl"] = _generate_download_url(media_item["s3_key"])
+            result["photoUrl"] = _generate_download_url(_display_key(media_item, "thumb"))
     return _response(201, result)
 
 
@@ -741,7 +758,8 @@ BATCH_GET_MAX_ATTEMPTS = 5
 
 
 def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str]:
-    """media_id -> s3_key for the given Media records, via `BatchGetItem` in chunks of 100
+    """media_id -> display key (thumbnail when processed, else the original) for the given Media
+    records, via `BatchGetItem` in chunks of 100
     instead of one `GetItem` per plant (ADR-0032). Retries `UnprocessedKeys` a bounded number of
     times; a Media record that's genuinely missing is simply absent from the result."""
     from boto3.dynamodb.types import TypeDeserializer
@@ -756,7 +774,9 @@ def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str
                 "Keys": [
                     _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{mid}"}) for mid in chunk
                 ],
-                "ProjectionExpression": "media_id, s3_key",
+                "ProjectionExpression": (
+                    "media_id, s3_key, processing_status, thumb_s3_key, analysis_s3_key"
+                ),
             }
         }
         for _ in range(BATCH_GET_MAX_ATTEMPTS):
@@ -764,7 +784,8 @@ def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str
             for raw in resp.get("Responses", {}).get(APP_TABLE_NAME, []):
                 item = {k: deserializer.deserialize(v) for k, v in raw.items()}
                 if item.get("media_id") and item.get("s3_key"):
-                    result[item["media_id"]] = item["s3_key"]
+                    # Plant cards show the thumbnail once ingestion made one (ADR-0033).
+                    result[item["media_id"]] = _display_key(item, "thumb")
             request = resp.get("UnprocessedKeys") or {}
             if not request:
                 break
@@ -1009,6 +1030,17 @@ def create_goal(event: dict[str, Any]) -> dict[str, Any]:
     return _response(202, {"goalId": goal_id, "status": "Intake"})
 
 
+def _display_key(media_item: dict[str, Any], variant: str = "analysis") -> str:
+    """The S3 key to show for a Media record (ADR-0033): its processed `thumb` or `analysis` copy
+    once ingestion has made it — smaller, correctly oriented, without GPS metadata — else the
+    original (photos uploaded before ingestion existed, or still processing)."""
+    if media_item.get("processing_status") == "ready":
+        derived = media_item.get(f"{variant}_s3_key") or media_item.get("analysis_s3_key")
+        if derived:
+            return derived
+    return media_item["s3_key"]
+
+
 def _generate_download_url(s3_key: str) -> str:
     """Short-lived presigned GET url for a Media record's s3_key — never stored/reused, same
     posture as the upload URL. Shared by getGoalDetail (PA-03) and OB-03's plant-photo AC rather
@@ -1071,7 +1103,7 @@ def _task_from_item(table, garden_id: str, item: dict[str, Any]) -> dict[str, An
         if task_media_item:
             task["media"] = {
                 "mediaId": item["media_id"],
-                "downloadUrl": _generate_download_url(task_media_item["s3_key"]),
+                "downloadUrl": _generate_download_url(_display_key(task_media_item)),
             }
     if item.get("feedback"):
         task["feedback"] = item["feedback"]
@@ -1200,7 +1232,10 @@ def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
         ).get("Item")
         if media_item:
             media.append(
-                {"mediaId": media_id, "downloadUrl": _generate_download_url(media_item["s3_key"])}
+                {
+                    "mediaId": media_id,
+                    "downloadUrl": _generate_download_url(_display_key(media_item)),
+                }
             )
 
     detail: dict[str, Any] = {
@@ -1507,7 +1542,7 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
             Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{item['media_id']}"}
         ).get("Item")
         if media_item:
-            result["photoUrl"] = _generate_download_url(media_item["s3_key"])
+            result["photoUrl"] = _generate_download_url(_display_key(media_item))
     return _response(200, result)
 
 

@@ -58,9 +58,12 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_lambda_destinations as lambda_destinations,
     aws_s3 as s3,
+    aws_s3_notifications as s3n,
     aws_scheduler as scheduler,
     aws_scheduler_targets as scheduler_targets,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
@@ -69,6 +72,26 @@ REGISTRY_DIR = AGENTS_DIR / "registry"
 ORCHESTRATOR_DIR = Path(__file__).resolve().parents[2] / "app" / "orchestrator"
 TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
 TRACKER_DIR = Path(__file__).resolve().parents[2] / "app" / "tracker"
+INGESTION_DIR = Path(__file__).resolve().parents[2] / "app" / "ingestion"
+
+# ADR-0033: only originals under this prefix trigger ingestion; processed files go under
+# `derived/`, which never matches, so the function cannot trigger itself.
+MEDIA_UPLOADS_PREFIX = "uploads/"
+MEDIA_DERIVED_PREFIX = "derived/"
+DEFAULT_TOOL_TIMEOUT_SECONDS = 10
+DEFAULT_TOOL_MEMORY_MB = 128
+
+
+def _tool_config(tool_dir: Path) -> dict:
+    """Optional `app/tools/<name>/tool.json` sizing (ADR-0033: the image tool needs more memory
+    and time than the defaults). Absent file -> the defaults every tool had before."""
+    path = tool_dir / "tool.json"
+    config = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return {
+        "timeout_seconds": int(config.get("timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS)),
+        "memory_mb": int(config.get("memory_mb", DEFAULT_TOOL_MEMORY_MB)),
+    }
+
 
 # The Client API's goal-intake handler (WS-03) publishes goal.submitted events under this
 # source; the orchestrator is the only subscriber for now (ADR-0012's async trigger flow).
@@ -111,13 +134,15 @@ class AgentCoreStack(Stack):
                     code = lambda_.DockerImageCode.from_image_asset(
                         str(tool_dir), platform=ecr_assets.Platform.LINUX_ARM64
                     )
+                sizing = _tool_config(tool_dir)
                 fn = lambda_.DockerImageFunction(
                     self,
                     f"{tool_cid}Tool",
                     function_name=f"{prefix}-tool-{name}",
                     code=code,
                     architecture=lambda_.Architecture.ARM_64,
-                    timeout=Duration.seconds(10),
+                    timeout=Duration.seconds(sizing["timeout_seconds"]),
+                    memory_size=sizing["memory_mb"],
                 )
                 # AWS_IAM (not NONE): a tool is invoked only by specialists whose registry entry
                 # declares it — enforced below via a per-specialist grant, not left open to
@@ -282,6 +307,10 @@ class AgentCoreStack(Stack):
 
         CfnOutput(self, "OrchestratorArn", value=self.orchestrator.function_arn)
 
+        # --- Ingestion Lambda (ADR-0033): process every uploaded photo once ---
+        if "image" in self.tools:
+            self._add_ingestion(prefix, app_table, media_bucket, self.tools["image"]["function"])
+
         # --- Tracker/Scheduler Lambda (Phase 7.5+: due-date follow-ups) ---
         tracker_image_repo = self.node.try_get_context("tracker_image_repo")
         if tracker_image_repo:
@@ -341,6 +370,80 @@ class AgentCoreStack(Stack):
         followup_due_rule.add_target(targets.LambdaFunction(self.orchestrator))
 
         CfnOutput(self, "TrackerArn", value=self.tracker.function_arn)
+
+    def _add_ingestion(
+        self,
+        prefix: str,
+        app_table: ddb.ITable,
+        media_bucket: s3.IBucket,
+        image_tool: lambda_.IFunction,
+    ) -> None:
+        """S3 `uploads/` -> Ingestion Lambda -> Image Tool -> `derived/` + Media record (ADR-0033).
+
+        Least privilege: GetObject only on `uploads/*` and PutObject only on `derived/*` (both used
+        solely to sign the URLs handed to the stateless tool), UpdateItem on the app table, and
+        invoke on the image tool only. No model access. Failures after S3's two async retries land
+        in an SQS queue for inspection.
+        """
+        image_repo = self.node.try_get_context("ingestion_image_repo")
+        if image_repo:
+            repo = ecr.Repository.from_repository_name(self, "IngestionRepo", image_repo)
+            image_tag = self.node.try_get_context("ingestion_image_tag") or "latest"
+            code = lambda_.DockerImageCode.from_ecr(repo, tag=image_tag)
+        else:
+            code = lambda_.DockerImageCode.from_image_asset(
+                str(INGESTION_DIR), platform=ecr_assets.Platform.LINUX_ARM64
+            )
+
+        failures = sqs.Queue(
+            self,
+            "IngestionFailures",
+            queue_name=f"{prefix}-ingestion-failures",
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+        )
+        self.ingestion = lambda_.DockerImageFunction(
+            self,
+            "Ingestion",
+            function_name=f"{prefix}-ingestion",
+            code=code,
+            architecture=lambda_.Architecture.ARM_64,
+            # The tool call dominates: up to 30s (image tool timeout) plus signing/DynamoDB.
+            timeout=Duration.seconds(60),
+            memory_size=256,
+            retry_attempts=2,
+            on_failure=lambda_destinations.SqsDestination(failures),
+            environment={
+                "APP_TABLE_NAME": app_table.table_name,
+                "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
+                "IMAGE_TOOL_FUNCTION_NAME": image_tool.function_name,
+                "LOG_LEVEL": "INFO",
+            },
+        )
+        self.ingestion.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[media_bucket.arn_for_objects(f"{MEDIA_UPLOADS_PREFIX}*")],
+            )
+        )
+        self.ingestion.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[media_bucket.arn_for_objects(f"{MEDIA_DERIVED_PREFIX}*")],
+            )
+        )
+        self.ingestion.add_to_role_policy(
+            iam.PolicyStatement(actions=["dynamodb:UpdateItem"], resources=[app_table.table_arn])
+        )
+        image_tool.grant_invoke(self.ingestion)
+
+        media_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.LambdaDestination(self.ingestion),
+            s3.NotificationKeyFilter(prefix=MEDIA_UPLOADS_PREFIX),
+        )
+        CfnOutput(self, "IngestionArn", value=self.ingestion.function_arn)
+        CfnOutput(self, "IngestionFailuresQueueUrl", value=failures.queue_url)
 
     def _make_agent_role(
         self, name: str, tool_names: list[str], memory_config: dict | None = None

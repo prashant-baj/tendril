@@ -73,7 +73,7 @@ export class CaptureComponent implements OnInit {
     const file = this.selectedFile();
     const mediaIds$: Observable<string[] | undefined> = file
       ? this.gardenApi
-          .requestMediaUpload(gardenId, { contentType: file.type, fileName: file.name })
+          .requestMediaUpload(gardenId, { contentType: file.type, fileName: file.name, sizeBytes: file.size })
           .pipe(
             switchMap(({ uploadUrl, mediaId }) =>
               this.gardenApi.uploadMedia(uploadUrl, file).pipe(map(() => [mediaId])),

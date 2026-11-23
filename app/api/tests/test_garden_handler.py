@@ -580,7 +580,7 @@ def test_create_media_upload_happy_path(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg", "fileName": "tomato.jpg"},
+        body={"contentType": "image/jpeg", "fileName": "tomato.jpg", "sizeBytes": 2_000_000},
         headers={"X-User-Id": "user-1"},
         path_params={"gardenId": "g1"},
     )
@@ -597,14 +597,16 @@ def test_create_media_upload_happy_path(monkeypatch):
     assert presign["operation"] == "put_object"
     assert presign["Params"]["Bucket"] == "tendril-dev-media"
     assert presign["Params"]["ContentType"] == "image/jpeg"
-    assert presign["Params"]["Key"] == f"g1/{body['mediaId']}/tomato.jpg"
+    assert presign["Params"]["Key"] == f"uploads/g1/{body['mediaId']}/tomato.jpg"
 
     # the Media record was written immediately (data-architecture.md §4)
     assert len(fake_table.put_calls) == 1
     media_item = fake_table.put_calls[0]
     assert media_item["pk"] == "GARDEN#g1"
     assert media_item["sk"] == f"MEDIA#{body['mediaId']}"
-    assert media_item["s3_key"] == f"g1/{body['mediaId']}/tomato.jpg"
+    assert media_item["s3_key"] == f"uploads/g1/{body['mediaId']}/tomato.jpg"
+    assert media_item["processing_status"] == "pending"
+    assert media_item["size_bytes"] == 2_000_000
     assert media_item["content_type"] == "image/jpeg"
 
 
@@ -612,7 +614,7 @@ def test_create_media_upload_missing_user_id_header(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg", "fileName": "tomato.jpg"},
+        body={"contentType": "image/jpeg", "fileName": "tomato.jpg", "sizeBytes": 2_000_000},
         headers={},
         path_params={"gardenId": "g1"},
     )
@@ -624,7 +626,7 @@ def test_create_media_upload_missing_garden_id(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg", "fileName": "tomato.jpg"},
+        body={"contentType": "image/jpeg", "fileName": "tomato.jpg", "sizeBytes": 2_000_000},
         headers={"X-User-Id": "u"},
         path_params=None,
     )
@@ -648,7 +650,7 @@ def test_create_media_upload_missing_file_name(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg"},
+        body={"contentType": "image/jpeg", "sizeBytes": 2_000_000},
         headers={"X-User-Id": "u"},
         path_params={"gardenId": "g1"},
     )
@@ -662,7 +664,7 @@ def test_create_media_upload_failure_returns_500(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg", "fileName": "tomato.jpg"},
+        body={"contentType": "image/jpeg", "fileName": "tomato.jpg", "sizeBytes": 2_000_000},
         headers={"X-User-Id": "u"},
         path_params={"gardenId": "g1"},
     )
@@ -2317,7 +2319,7 @@ def test_handler_routes_post_media(monkeypatch):
     event = _event(
         "POST",
         "/gardens/{gardenId}/media",
-        body={"contentType": "image/jpeg", "fileName": "tomato.jpg"},
+        body={"contentType": "image/jpeg", "fileName": "tomato.jpg", "sizeBytes": 2_000_000},
         headers={"X-User-Id": "u"},
         path_params={"gardenId": "g1"},
     )
@@ -2813,3 +2815,84 @@ def test_delete_numbered_plant_also_deletes_stake_lookup(monkeypatch):
     assert plant_del["Key"]["sk"]["S"] == "PLANT#p1"
     assert stake_del["Key"]["sk"]["S"] == "STAKE#00074"
     assert stake_del["ExpressionAttributeValues"][":pid"]["S"] == "p1"
+
+
+# --- ADR-0033: upload limit, key layout, processed copies for display -----------------------
+
+MEDIA = "/gardens/{gardenId}/media"
+
+
+@pytest.mark.parametrize(
+    ("size", "fragment"),
+    [
+        (None, "sizeBytes is required"),
+        (0, "sizeBytes is required"),
+        ("2000000", "sizeBytes is required"),
+        (10 * 1024 * 1024 + 1, "larger than 10 MB"),
+    ],
+)
+def test_create_media_upload_enforces_the_10mb_limit(monkeypatch, size, fragment):
+    fake_s3 = FakeS3()
+    monkeypatch.setattr(handler, "_s3", fake_s3)
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    body = {"contentType": "image/jpeg", "fileName": "big.jpg"}
+    if size is not None:
+        body["sizeBytes"] = size
+    resp = handler.create_media_upload(_post(MEDIA, body, G1))
+    assert resp["statusCode"] == 400
+    assert fragment in json.loads(resp["body"])["message"]
+    assert fake_s3.presign_calls == []  # never signed
+
+
+def test_create_media_upload_accepts_exactly_10mb(monkeypatch):
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    body = {"contentType": "image/jpeg", "fileName": "ok.jpg", "sizeBytes": 10 * 1024 * 1024}
+    assert handler.create_media_upload(_post(MEDIA, body, G1))["statusCode"] == 201
+
+
+@pytest.mark.parametrize("name", ["../../evil.jpg", "a/b/c.jpg", "dir\\win.jpg"])
+def test_create_media_upload_keeps_only_the_base_name(monkeypatch, name):
+    fake_s3, fake_table = FakeS3(), FakeTable()
+    monkeypatch.setattr(handler, "_s3", fake_s3)
+    monkeypatch.setattr(handler, "_table", fake_table)
+    body = {"contentType": "image/jpeg", "fileName": name, "sizeBytes": 1000}
+    resp = handler.create_media_upload(_post(MEDIA, body, G1))
+    media_id = json.loads(resp["body"])["mediaId"]
+    key = fake_s3.presign_calls[0]["Params"]["Key"]
+    assert key.startswith(f"uploads/g1/{media_id}/")
+    assert key.count("/") == 3  # uploads / garden / media / file — the layout ingestion parses
+    assert ".." not in key
+
+
+def test_display_key_prefers_processed_copies_once_ready():
+    base = {"s3_key": "uploads/g/m/p.jpg"}
+    ready = dict(
+        base,
+        processing_status="ready",
+        analysis_s3_key="derived/g/m/analysis.jpg",
+        thumb_s3_key="derived/g/m/thumb.jpg",
+    )
+    assert handler._display_key(ready) == "derived/g/m/analysis.jpg"
+    assert handler._display_key(ready, "thumb") == "derived/g/m/thumb.jpg"
+    # Still processing, failed, or uploaded before ingestion existed: the original.
+    assert handler._display_key(dict(base, processing_status="pending"), "thumb") == base["s3_key"]
+    assert handler._display_key(dict(base, processing_status="failed")) == base["s3_key"]
+    assert handler._display_key({"s3_key": "g/m/legacy.jpg"}) == "g/m/legacy.jpg"
+
+
+def test_list_plants_uses_the_thumbnail_when_processed(monkeypatch):
+    items = [{"plant_id": "p1", "species": "Coconut", "stage": "new", "media_id": "m1"}]
+    raw = {
+        "media_id": {"S": "m1"},
+        "s3_key": {"S": "uploads/g1/m1/p.jpg"},
+        "processing_status": {"S": "ready"},
+        "thumb_s3_key": {"S": "derived/g1/m1/thumb.jpg"},
+        "analysis_s3_key": {"S": "derived/g1/m1/analysis.jpg"},
+    }
+    fake_client = FakeClient(batch_get_responses=[{"Responses": {handler.APP_TABLE_NAME: [raw]}}])
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": items}))
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    body = json.loads(handler.list_plants(_event("GET", PLANTS, path_params=G1))["body"])
+    assert "derived/g1/m1/thumb.jpg" in body[0]["photoUrl"]

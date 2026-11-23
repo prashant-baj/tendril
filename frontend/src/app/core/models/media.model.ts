@@ -2,6 +2,8 @@
 export interface MediaUploadRequest {
   contentType: string;
   fileName: string;
+  /** File size in bytes; photos are limited to 10 MB (ADR-0033). */
+  sizeBytes: number;
 }
 
 export interface MediaUploadResponse {

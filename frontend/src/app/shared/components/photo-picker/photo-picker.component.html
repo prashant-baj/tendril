@@ -16,5 +16,9 @@
     />
     <td-icon name="photo_camera" size="28px" />
     <span>Take or choose a photo</span>
+    <small class="limit">Up to 10 MB</small>
   </label>
+  @if (error()) {
+    <p class="error" role="alert">{{ error() }}</p>
+  }
 }

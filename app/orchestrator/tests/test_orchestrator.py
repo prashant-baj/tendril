@@ -1398,3 +1398,106 @@ def test_build_tools_passes_garden_context_to_every_tool(monkeypatch):
 
     prompts = [json.loads(c["payload"])["prompt"] for c in fake_client.calls]
     assert prompts == ["<garden_context>X</garden_context>\n\nq"] * 2
+
+
+# --- ADR-0033: analysis copies, bounded wait, unreadable photos --------------------------------
+
+
+class _SequencedMediaTable(FakeTable):
+    """Returns successive Media states on each get_item for MEDIA#… (simulates ingestion
+    finishing while the orchestrator polls)."""
+
+    def __init__(self, media_states, others=None):
+        super().__init__(responses_by_sk=others or {})
+        self._media_states = list(media_states)
+        self.media_reads = 0
+
+    def get_item(self, Key):
+        if Key["sk"].startswith("MEDIA#"):
+            self.media_reads += 1
+            state = self._media_states[min(self.media_reads, len(self._media_states)) - 1]
+            return {"Item": state}
+        return super().get_item(Key)
+
+
+PENDING = {
+    "s3_key": "uploads/g1/m1/plant10.jpg",
+    "content_type": "image/jpeg",
+    "processing_status": "pending",
+}
+READY = dict(
+    PENDING,
+    processing_status="ready",
+    detected_format="png",
+    analysis_s3_key="derived/g1/m1/analysis.jpg",
+    thumb_s3_key="derived/g1/m1/thumb.jpg",
+)
+FAILED = dict(PENDING, processing_status="failed", processing_error="not an image")
+
+
+@pytest.fixture
+def no_wait(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(handler, "_sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    monkeypatch.setattr(handler, "MEDIA_BUCKET_NAME", "tendril-dev-media")
+    return sleeps
+
+
+def test_ready_photo_sends_the_analysis_copy_as_jpeg_even_if_the_original_was_png(
+    monkeypatch, no_wait
+):
+    monkeypatch.setattr(handler, "_table", _SequencedMediaTable([READY]))
+    photo = handler._resolve_photo("g1", ["m1"])
+    assert photo.image_format == "jpeg"
+    assert "derived/g1/m1/analysis.jpg" in photo.url
+    assert "plant10.jpg" not in photo.url  # never the original
+    assert not photo.unreadable and no_wait == []
+
+
+def test_pending_photo_is_awaited_until_ingestion_finishes(monkeypatch, no_wait):
+    table = _SequencedMediaTable([PENDING, PENDING, READY])
+    monkeypatch.setattr(handler, "_table", table)
+    photo = handler._resolve_photo("g1", ["m1"])
+    assert "derived/g1/m1/analysis.jpg" in photo.url
+    assert no_wait == [handler.PHOTO_POLL_SECONDS] * 2
+
+
+def test_pending_photo_times_out_as_unreadable(monkeypatch, no_wait):
+    monkeypatch.setattr(handler, "_table", _SequencedMediaTable([PENDING]))
+    photo = handler._resolve_photo("g1", ["m1"])
+    assert photo.unreadable and photo.url is None
+    assert sum(no_wait) == handler.PHOTO_WAIT_SECONDS
+
+
+def test_failed_photo_is_unreadable_and_never_sent(monkeypatch, no_wait):
+    monkeypatch.setattr(handler, "_table", _SequencedMediaTable([FAILED]))
+    photo = handler._resolve_photo("g1", ["m1"])
+    assert photo.unreadable and photo.url is None
+    assert handler._resolve_image("g1", ["m1"]) is None
+
+
+def test_goal_with_unreadable_photo_tells_the_agent_and_sends_no_image(monkeypatch, no_wait):
+    goal = {
+        "garden_id": "g1",
+        "goal_id": "goal-1",
+        "description": "track growth",
+        "media_ids": ["m1"],
+    }
+    table = _SequencedMediaTable([FAILED], others={"GOAL#goal-1": {"Item": goal}})
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(
+        handler, "AGENT_MANIFEST", {"vision": {"arn": "arn:vision", "description": "d"}}
+    )
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+
+    handler.handle_goal_submitted({"gardenId": "g1", "goalId": "goal-1"})
+
+    assert "could not be read" in FakeAgent.last_prompt
+    assert "is attached to this goal" not in FakeAgent.last_prompt
+    (vision_tool,) = FakeAgent.last_kwargs["tools"]
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    vision_tool("what is this?")
+    assert "imageUrl" not in json.loads(fake_client.calls[0]["payload"])

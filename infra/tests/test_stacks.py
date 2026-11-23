@@ -34,6 +34,8 @@ def _app(**extra_context) -> App:
             "orchestrator_image_repo": "tendril-dev-orchestrator",
             "tracker_image_repo": "tendril-dev-tracker",
             "weather_tool_image_repo": "tendril-dev-tool-weather",
+            "image_tool_image_repo": "tendril-dev-tool-image",
+            "ingestion_image_repo": "tendril-dev-ingestion",
             **extra_context,
         }
     )
@@ -1074,3 +1076,129 @@ def test_ci_never_deploys_the_eval_control_placeholder():
         assert "--all" not in cmd, (
             "an --all deploy would deploy the placeholder over the live stack"
         )
+
+
+# --- ADR-0033: image tool + ingestion -----------------------------------------------------------
+
+
+def _agentcore_json():
+    tpl = Template.from_stack(AgentCoreStack(_app(), "ac-img", env_name="dev", env=ENV))
+    return tpl, tpl.to_json()
+
+
+def _role_actions(tpl_json, role_logical_id_fragment):
+    """Every IAM action granted by policies attached to roles whose logical id contains the
+    fragment, as (action, resource) pairs (resources stringified)."""
+    import json
+
+    pairs = []
+    for res in tpl_json["Resources"].values():
+        if res["Type"] != "AWS::IAM::Policy":
+            continue
+        roles = json.dumps(res["Properties"].get("Roles", []))
+        if role_logical_id_fragment not in roles:
+            continue
+        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+            actions = stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]]
+            for a in actions:
+                pairs.append((a, json.dumps(stmt.get("Resource"))))
+    return pairs
+
+
+def test_image_tool_is_sized_from_its_tool_json():
+    tpl, _ = _agentcore_json()
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {"FunctionName": "tendril-dev-tool-image", "MemorySize": 1024, "Timeout": 30}
+        ),
+    )
+    # Tools without a tool.json keep the previous defaults.
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like({"FunctionName": "tendril-dev-tool-weather", "Timeout": 10}),
+    )
+
+
+def test_image_tool_owns_no_data_permissions():
+    _, tpl_json = _agentcore_json()
+    actions = [a for a, _ in _role_actions(tpl_json, "ImageTool")]
+    assert not [a for a in actions if a.startswith(("s3:", "dynamodb:"))], actions
+
+
+def test_ingestion_lambda_is_least_privilege():
+    _, tpl_json = _agentcore_json()
+    pairs = _role_actions(tpl_json, "IngestionServiceRole")
+    by_action = {}
+    for a, r in pairs:
+        by_action.setdefault(a, []).append(r)
+    # Reads only originals, writes only derived files.
+    assert all("uploads/*" in r for r in by_action["s3:GetObject"])
+    assert all("derived/*" in r for r in by_action["s3:PutObject"])
+    assert "s3:DeleteObject" not in by_action
+    assert (
+        set(by_action)
+        - {
+            "s3:GetObject",
+            "s3:PutObject",
+            "dynamodb:UpdateItem",
+            "lambda:InvokeFunction",
+            "sqs:SendMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+        }
+        == set()
+    ), sorted(by_action)
+    # No model access at all.
+    assert not [a for a in by_action if a.startswith("bedrock")]
+
+
+def test_ingestion_is_triggered_only_by_the_uploads_prefix():
+    import json
+
+    _, tpl_json = _agentcore_json()
+    notifications = [
+        r for r in tpl_json["Resources"].values() if r["Type"] == "Custom::S3BucketNotifications"
+    ]
+    assert len(notifications) == 1
+    configs = notifications[0]["Properties"]["NotificationConfiguration"][
+        "LambdaFunctionConfigurations"
+    ]
+    assert len(configs) == 1
+    rules = configs[0]["Filter"]["Key"]["FilterRules"]
+    assert rules == [{"Name": "prefix", "Value": "uploads/"}]
+    assert configs[0]["Events"] == ["s3:ObjectCreated:*"]
+    # The derived prefix must never match the trigger (no self-recursion).
+    assert "derived/" not in json.dumps(configs)
+
+
+def test_ingestion_failures_go_to_a_queue_after_two_retries():
+    tpl, _ = _agentcore_json()
+    tpl.has_resource_properties(
+        "AWS::Lambda::EventInvokeConfig",
+        Match.object_like(
+            {
+                "MaximumRetryAttempts": 2,
+                "DestinationConfig": Match.object_like({"OnFailure": Match.any_value()}),
+            }
+        ),
+    )
+    tpl.has_resource_properties(
+        "AWS::SQS::Queue", Match.object_like({"QueueName": "tendril-dev-ingestion-failures"})
+    )
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        Match.object_like(
+            {
+                "FunctionName": "tendril-dev-ingestion",
+                "Environment": {
+                    "Variables": Match.object_like(
+                        {
+                            "IMAGE_TOOL_FUNCTION_NAME": Match.any_value(),
+                            "APP_TABLE_NAME": Match.any_value(),
+                        }
+                    )
+                },
+            }
+        ),
+    )
