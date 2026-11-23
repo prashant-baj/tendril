@@ -191,7 +191,7 @@ GARDEN_CONTEXT_FIELDS = (
 
 
 def _render_garden_context(garden: dict[str, Any] | None) -> str:
-    """Renders a Garden item as a compact `<garden_context>` block (ADR-0016), or "" when there
+    """Renders a Garden item as a compact `<garden_context>` block (ADR-0032), or "" when there
     is nothing to say. `notification_recipients` are deliberately never rendered: phone numbers
     are personal data no model needs to reason with."""
     if not garden:
@@ -226,7 +226,7 @@ def _render_garden_context(garden: dict[str, Any] | None) -> str:
 
 def _load_garden_context(garden_id: str) -> str:
     """The rendered garden context for this turn. Best-effort: a missing or unreadable Garden
-    item just means no context block, never a failed turn (ADR-0016)."""
+    item just means no context block, never a failed turn (ADR-0032)."""
     try:
         garden = (
             _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"}).get("Item")
@@ -265,7 +265,7 @@ def _make_specialist_tool(
         # gardenId (AF-05): the specialist's own memory scope key — every specialist can receive
         # it uniformly; only ones with memory.enabled actually use it (config-driven, not
         # specialist-specific code, same posture as imageUrl/imageFormat above).
-        # ADR-0016: whole-garden facts ride along as part of the prompt itself, so specialists
+        # ADR-0032: whole-garden facts ride along as part of the prompt itself, so specialists
         # need no code/template change to receive them (ADR-0013: data arrives as input).
         full_prompt = f"{garden_context}\n\n{prompt}" if garden_context else prompt
         payload: dict[str, Any] = {"prompt": full_prompt, "gardenId": garden_id}
@@ -675,7 +675,7 @@ def _build_orchestrator_agent(
         session_id=goal_id,
         storage=S3Storage(bucket=AGENT_STATE_BUCKET_NAME, prefix="orchestrator-sessions/"),
     )
-    # ADR-0016: garden context goes in the system prompt, which is rebuilt every invocation and
+    # ADR-0032: garden context goes in the system prompt, which is rebuilt every invocation and
     # is never written into the session's message history, so it is always current and never
     # duplicated across resumed turns.
     garden_context = _load_garden_context(garden_id)

@@ -1,4 +1,4 @@
-# ADR-0016: Garden `context` block, its injection into agent turns, and optional per-garden stake numbers
+# ADR-0032: Garden `context` block, its injection into agent turns, and optional per-garden stake numbers
 
 **Status:** Accepted (2026-11-23, project owner; out-of-range stake numbers accepted but flagged)
 **Date:** 2026-11-23

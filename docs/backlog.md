@@ -205,20 +205,37 @@ specialists; confirmed `pest_disease` over-block still needs the eval-scenario r
 (pre-commit gitleaks missing) · PG-02 (prompt scope/refusal framing not yet added) · TF-07 (no
 prod deploy path yet) · TF-06 (frontend has no formal per-screen stories)
 
-**☐ Backlog (12, ranked)**
+**☐ Backlog (13, ranked)**
 1. **CP-01 → CP-08** (ranks 38-45): Coconut Plantation MVP: garden context, bulk plants
    (optional stake no.), plant photo/log history, migration, plant endpoint + UI, garden activity
    log, Supervisor + garden assessment, upload auto-map. **Current sprint.**
 2. **CP-11** (rank 46): mobile-number auth + mobile ↔ user ↔ garden mapping
 3. **CP-10** (rank 47): Marathi + coconut agronomy reframe
 4. **CP-09** (rank 48): WhatsApp intake + reminders (after CP-11)
-5. **AF-06**: external data-source tools for specialists, researched but deferred (rank 21)
+5. **TF-09** (rank 49): turn on Client API key enforcement: `FRONTEND_API_KEY` secret →
+   frontend sends `x-api-key` → `require_api_key=true`
+6. **AF-06**: external data-source tools for specialists, researched but deferred (rank 21)
 
 **Not on the board:** AF-02 (rank 9) — deliberately **skipped**, not backlog: a pure rename with
 no new capability, superseded by `vision.json` already proving the "one codebase, many
 specialists" pattern.
 
 ## Known drift / housekeeping (clear these first)
+
+- **Dev was ahead of this repo (found 2026-11-23).** The GitLab `showcase` /
+  `tendril-group/tendril` repo (same history up to `393151b`, then 395 more commits) deployed to
+  `dev`: API keys + usage plans on `tendril-dev-client-api` (ADR-0021) and a separate
+  `tendril-dev-eval-control` stack (ADR-0019/0020) that imports the CI/EVAL key. The first GitHub
+  deploy of Phase A failed on that import. **Fixed by porting ADR-0021** (keys, usage plans,
+  `x-api-key` contract + CORS, staged `require_api_key`, same construct IDs as deployed) and a
+  **non-deployable `tendril-dev-eval-control` placeholder** that keeps the export. Our
+  garden-context ADR moved 0016 → **0032**; 0016-0031 are reserved for the showcase ADRs.
+  **Open:** (a) the agentcore stack deployed from GitHub on 2026-11-23 replaced the showcase
+  orchestrator/tracker, which drops the eval clock seam (`EVAL_SEAM_ENABLED`), so the eval
+  harness in dev is degraded until ADR-0019 is ported or retired; (b) disable the GitLab deploy
+  pipeline (or its deploy-role trust) so it doesn't redeploy over GitHub; (c) port further
+  showcase CI/CD features to GitHub Actions one at a time; (d) turning on key enforcement is
+  storied as **TF-09** (rank 49).
 
 - **`guardrails/hello_guardrail.json` is deleted (2026-09-12)** — `hello` was decommissioned as a
   live registry entry; its over-block retune history no longer applies. `scripts/eval_guardrail.py`
@@ -272,8 +289,8 @@ specialists" pattern.
 | 35 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
 | 36 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
 | 37 | OB | OB-03 | Show the real plant photo (not a generic icon) | ✅ | OB-02 | `stories/garden-onboarding.md`. `createPlant`/`listPlants` now resolve a fresh presigned **GET** `photoUrl` per plant with a linked photo, reusing PA-03/PA-04's `_generate_download_url` helper rather than duplicating it. **Found + fixed a real gap along the way:** `create_plant` only ever set `Media.plant_id` (one-directional), never `Plant.media_id` — so there was no way to look a plant's photo back up at all; added `media_id` onto the `Plant` item itself (mirrors `Goal.media_ids`). Frontend: `PlantCardComponent`/`PlantRowComponent` render the real photo with an icon fallback on load error. Deployed + live-verified (2026-09-13): created a plant with a real photo, confirmed both `createPlant` and a subsequent `listPlants` resolved a working presigned url. |
-| 38 | CP | CP-01 | Onboard the Coconut Garden + `context` block (soil, irrigation, intercrop, layout, optional stake range, notification recipients) | ◐ | Tendril P1-2 | **ADR-0016 Accepted.** Built + tested 2026-11-23: `context`/`climateZone` on create/get, `PATCH /gardens/{id}`, context injected into orchestrator system prompt + every specialist prompt (phone numbers never sent to a model). **Open:** deploy `client-api` + `agentcore`, dev smoke test. |
-| 39 | CP | CP-02 | Bulk-add Plants, **optional** per-garden stake number | ◐ | CP-01 | **ADR-0016.** Built + tested 2026-11-23: optional `stakeNo` (per-garden `STAKE#` lookup, 409 on duplicate), optional `stage`, idempotent `POST /plants/bulk`, `listPlants` stake ordering + pagination + batched photo lookup, delete frees the number; Client API Lambda timeout 10s → 29s. **Open:** deploy + bulk-add #1–105 in dev. |
+| 38 | CP | CP-01 | Onboard the Coconut Garden + `context` block (soil, irrigation, intercrop, layout, optional stake range, notification recipients) | ◐ | Tendril P1-2 | **ADR-0032 Accepted.** Built + tested 2026-11-23: `context`/`climateZone` on create/get, `PATCH /gardens/{id}`, context injected into orchestrator system prompt + every specialist prompt (phone numbers never sent to a model). **Open:** deploy `client-api` + `agentcore`, dev smoke test. |
+| 39 | CP | CP-02 | Bulk-add Plants, **optional** per-garden stake number | ◐ | CP-01 | **ADR-0032.** Built + tested 2026-11-23: optional `stakeNo` (per-garden `STAKE#` lookup, 409 on duplicate), optional `stage`, idempotent `POST /plants/bulk`, `listPlants` stake ordering + pagination + batched photo lookup, delete frees the number; Client API Lambda timeout 10s → 29s. **Open:** deploy + bulk-add #1–105 in dev. |
 | 40 | CP | CP-03 | Plant history: **date-wise photos + logs** (model + write) | ☐ | CP-02 | ADR-gated (plant history entity). Append-only; dated by observation date; an entry is photo(s) and/or status and/or note. Closes the carried-forward "progress log" gap. |
 | 41 | CP | CP-04 | Migration script (DynamoDB + S3 + KB seed) from the Bramhangaon archive | ☐ | CP-01, CP-02, CP-03 | Source data lives on the owner's machine (OneDrive archive + `build_tracker.py`), not in the repo. Model-free; idempotent; dry-run + verify. |
 | 42 | CP | CP-05 | **`GET /gardens/{id}/plants/{plantId}`** + plant-detail UI | ☐ | CP-03, CP-04 | New endpoint (only `DELETE` exists on that path today): plant details + paginated date-wise history with presigned URLs; before→after compare. |
@@ -283,6 +300,7 @@ specialists" pattern.
 | 46 | CP | CP-11 | Mobile-number auth (Cognito OTP) + mobile ↔ user ↔ garden mapping | ☐ | CP-01 | ADR-gated (auth/tenancy). **Moved ahead of CP-09**: WhatsApp needs this mapping to resolve senders. Memory scope stays per garden. |
 | 47 | CP | CP-10 | Marathi everywhere + coconut agronomy reframe | ☐ | CP-07 | ADR-gated (commercial scope + localization; revisits project-context §11). |
 | 48 | CP | CP-09 | WhatsApp intake + reminders | ☐ | CP-06, CP-07, CP-08, CP-11 | ADR-gated (extends ADR-0004). **Built after CP-11.** Supersedes the earlier "WhatsApp deprioritized" note below. |
+| 49 | TF | TF-09 | Turn on Client API key enforcement (ADR-0021 staged rollout) | ☐ | ADR-0021 port, TF-07, TF-08 | `stories/technical-foundation.md`. Three steps, in order: (1) human copies the `tendril-dev-frontend` key value into the `FRONTEND_API_KEY` GitHub secret; (2) frontend sends `x-api-key` (port the showcase's `CLIENT_API_KEY` token + `api-key.interceptor`; CI substitutes `__CLIENT_API_KEY__`, failing on an empty value), deployed and verified first; (3) set `require_api_key=true` and redeploy client-api. Verify 403-with-CORS without a key, 429 on throttle, preflight open. No new ADR (ADR-0021 decides it). |
 
 ## Carried forward (future epics — not yet storied)
 

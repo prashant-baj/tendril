@@ -168,6 +168,60 @@ Enabler stories to stand up the workspace, tooling, and deployment baseline befo
 
 ---
 
+## TF-09 — Turn on Client API key enforcement (ADR-0021 staged rollout)
+
+**As a** project owner, **I want** the Client API to reject requests without the FRONTEND API key,
+**so that** every caller is identified and throttled by its usage plan instead of the API being
+open to anyone who finds the URL.
+
+**Context.** The keys and usage plans already exist in `dev` (ported from the showcase repo
+2026-11-23, [ADR-0021](../architecture/ADRs/0021-api-key-access-tiers.md)), and the contract
+declares `x-api-key` on every operation. But `ClientApiStack` strips the requirement while the
+CDK flag `require_api_key` is false, which is the dev default. The key value only exists after a
+deploy, so the rollout must happen in this order, or the dev front end breaks in between.
+The FRONTEND key is **public by nature** (it ships in the browser bundle). It is identification
+and throttling, **not** user authentication; that stays the Cognito path (ADR-0004, CP-11).
+
+**Acceptance Criteria**
+- [ ] **Step 1 — secret.** A human copies the `tendril-dev-frontend` key value (API Gateway
+  console, or `aws apigateway get-api-key --api-key <FrontendApiKeyId> --include-value`) into the
+  GitHub repository variable/secret `FRONTEND_API_KEY`. CI never reads key values from AWS
+  (ADR-0021 decision 5); the value is never committed or echoed in logs.
+- [ ] **Step 2 — frontend sends the key.** A `CLIENT_API_KEY` DI token defaults to the
+  placeholder `__CLIENT_API_KEY__`, and an HTTP interceptor adds `x-api-key` to every Client API
+  request (and only those). Port both from the showcase repo
+  (`frontend/src/app/core/config/client-api.config.ts`,
+  `frontend/src/app/core/interceptors/api-key.interceptor.ts` + spec). The deploy-frontend step in
+  `.github/workflows/ci.yml` substitutes `__CLIENT_API_KEY__` from `FRONTEND_API_KEY` exactly like
+  `__CLIENT_API_BASE_URL__`, and fails the job if the variable is empty (never ship the
+  placeholder).
+- [ ] Step 2 is deployed and verified **before** step 3: the live site sends the header while the
+  API still doesn't require it (no breakage window).
+- [ ] **Step 3 — enforce.** Set `require_api_key: true` for dev (CDK context in `infra/cdk.json`,
+  or `--context require_api_key=true` in the deploy step) and redeploy `tendril-dev-client-api`.
+  The existing CDK test (`test_every_non_options_operation_requires_a_key_when_enforced`) covers
+  the synthesized contract.
+- [ ] **Verified in dev:** a request without `x-api-key` gets **403** with CORS headers (readable
+  by the browser, via the Default4xx gateway response); the web app works end to end; the CORS
+  preflight still succeeds without a key; a burst beyond the plan's throttle gets **429**.
+- [ ] Rotation note recorded (ADR-0021 decision 5): create a second key → add it to the plan →
+  update `FRONTEND_API_KEY` + redeploy the frontend → remove the old key.
+
+**Tasks**
+- [ ] Port `CLIENT_API_KEY` + `api-key.interceptor` (+ spec) and register the interceptor in
+  `app.config.ts`.
+- [ ] CI: add the `__CLIENT_API_KEY__` substitution + empty-value guard to the frontend deploy.
+- [ ] Human: add the `FRONTEND_API_KEY` GitHub variable/secret.
+- [ ] Deploy steps 1–2, verify, then flip `require_api_key` and deploy step 3; smoke test.
+- [ ] Docs: `architecture.md` §4.1 (enforcement on), backlog, `developer-setup.md` (local dev
+  needs the key in the dev build or a local override).
+
+**Dependencies:** ADR-0021 port (done 2026-11-23), TF-07 (CI/CD), TF-08 (secrets baseline).
+**Blocking ADR:** none — ADR-0021 (Approved) already decides this; this story only executes its
+staged rollout. **Status:** ☐ to do.
+
+---
+
 ### Definition of Done (applies to every story)
 
 Per [`../engineering-best-practices.md`](../engineering-best-practices.md): CI green (lint + tests + secret scan), **no hardcoded secrets/account identifiers**, deploys cleanly to **dev** via the pipeline, touches **only the folders it needs**, updates relevant **docs/ADRs**, and is **human-reviewed**.

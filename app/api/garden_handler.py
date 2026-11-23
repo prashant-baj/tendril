@@ -75,7 +75,7 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
   (no cross-package Python imports in this monorepo). `Event` is intentionally UI-agnostic (no
   icon/tone/title baked in server-side) — the frontend maps `type` to presentation.
 
-- **Phase A of the coconut-plantation epic (CP-01/CP-02, ADR-0016):** a Garden carries an optional
+- **Phase A of the coconut-plantation epic (CP-01/CP-02, ADR-0032):** a Garden carries an optional
   structured `context` map (soil, irrigation, intercrop, layout, notes, `stakeRange`,
   `notificationRecipients`) plus `climateZone`, settable on `createGarden` and replaceable via the
   new `updateGarden` (`PATCH /gardens/{id}`). A Plant carries an optional `stakeNo` — the farm's
@@ -137,14 +137,14 @@ GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 WEATHER_REQUEST_TIMEOUT_SECONDS = 8
 
-# ADR-0016: Garden `context` block limits — keep the item small and the injected prompt short.
+# ADR-0032: Garden `context` block limits — keep the item small and the injected prompt short.
 CONTEXT_TEXT_FIELDS = ("soil", "irrigation", "intercrop", "layout", "notes")
 CONTEXT_TEXT_MAX_CHARS = 1000
 CONTEXT_MAX_RECIPIENTS = 10
 RECIPIENT_NAME_MAX_CHARS = 100
 E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
 CLIMATE_ZONE_MAX_CHARS = 100
-# ADR-0016: bulk-add cap per call (105 palms comfortably fits; bounded so one request can't run
+# ADR-0032: bulk-add cap per call (105 palms comfortably fits; bounded so one request can't run
 # past API Gateway's 29s integration timeout).
 BULK_PLANTS_MAX = 200
 STAKE_NO_MAX = 99999  # matches the zero-padded 5-digit STAKE# sort key
@@ -218,7 +218,7 @@ def _get_header(headers: dict[str, str] | None, name: str) -> str | None:
 
 def _parse_context(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     """Validates an API-shaped (camelCase) Garden `context` block and returns its storage
-    (snake_case) form, or an error message (ADR-0016). Every field is optional; an empty object
+    (snake_case) form, or an error message (ADR-0032). Every field is optional; an empty object
     is valid and stored as an empty map."""
     if not isinstance(raw, dict):
         return None, "context must be a JSON object"
@@ -308,13 +308,13 @@ def _is_positive_int(value: Any) -> bool:
 
 
 def _stake_sk(stake_no: int) -> str:
-    """Zero-padded so STAKE# items sort numerically under the garden partition (ADR-0016)."""
+    """Zero-padded so STAKE# items sort numerically under the garden partition (ADR-0032)."""
     return f"STAKE#{stake_no:05d}"
 
 
 def _is_transaction_condition_failure(error: Exception, index: int) -> bool:
     """True when a TransactWriteItems call was cancelled because the item at `index` failed its
-    ConditionExpression — the lookup-item uniqueness check (ADR-0016)."""
+    ConditionExpression — the lookup-item uniqueness check (ADR-0032)."""
     response = getattr(error, "response", None) or {}
     if response.get("Error", {}).get("Code") != "TransactionCanceledException":
         return False
@@ -518,7 +518,7 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 class DuplicateStakeError(Exception):
-    """The garden already has a plant with this stake number (ADR-0016)."""
+    """The garden already has a plant with this stake number (ADR-0032)."""
 
 
 STAGE_MAX_CHARS = 50
@@ -548,7 +548,7 @@ def _write_plant(
 
     - No stake number, no photo: a single `put_item` (unchanged from OB-02).
     - Otherwise one transaction: the Plant, plus a `STAKE#` lookup item guarded by
-      `attribute_not_exists(pk)` (per-garden uniqueness, ADR-0016) and/or the Media link guarded
+      `attribute_not_exists(pk)` (per-garden uniqueness, ADR-0032) and/or the Media link guarded
       by `attribute_exists(pk)` (OB-02). Raises `DuplicateStakeError` when the stake lookup's
       condition is what cancelled the transaction; any other failure propagates.
     """
@@ -702,7 +702,7 @@ def list_plants(event: dict[str, Any]) -> dict[str, Any]:
         logger.exception("Failed to list plants for garden %s", garden_id)
         return _error(500, "could not list plants")
 
-    # ADR-0016: block/grid order — stake number ascending, unnumbered plants last (stable, so
+    # ADR-0032: block/grid order — stake number ascending, unnumbered plants last (stable, so
     # unnumbered plants keep the query's own order among themselves).
     items.sort(key=lambda i: (i.get("stake_no") is None, int(i.get("stake_no") or 0)))
 
@@ -725,7 +725,7 @@ def list_plants(event: dict[str, Any]) -> dict[str, Any]:
 
 def _query_all(**kwargs: Any) -> list[dict[str, Any]]:
     """`Table.query` following `LastEvaluatedKey` to the end, so a 1 MB page boundary never
-    silently truncates the result (ADR-0016, plantation scale)."""
+    silently truncates the result (ADR-0032, plantation scale)."""
     items: list[dict[str, Any]] = []
     while True:
         resp = _get_table().query(**kwargs)
@@ -742,7 +742,7 @@ BATCH_GET_MAX_ATTEMPTS = 5
 
 def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str]:
     """media_id -> s3_key for the given Media records, via `BatchGetItem` in chunks of 100
-    instead of one `GetItem` per plant (ADR-0016). Retries `UnprocessedKeys` a bounded number of
+    instead of one `GetItem` per plant (ADR-0032). Retries `UnprocessedKeys` a bounded number of
     times; a Media record that's genuinely missing is simply absent from the result."""
     from boto3.dynamodb.types import TypeDeserializer
 
@@ -778,7 +778,7 @@ def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str
 
 
 def bulk_create_plants(event: dict[str, Any]) -> dict[str, Any]:
-    """`POST /gardens/{gardenId}/plants/bulk` (CP-02, ADR-0016): creates one Plant per stake
+    """`POST /gardens/{gardenId}/plants/bulk` (CP-02, ADR-0032): creates one Plant per stake
     number in `[stakeFrom, stakeTo]`, each through the same transactional write as `createPlant`.
     Idempotent — a stake number already used in this garden lands in `skipped`, never duplicated
     or overwritten — so a partial run can simply be retried."""
@@ -876,7 +876,7 @@ def delete_plant(event: dict[str, Any]) -> dict[str, Any]:
     plant_key = {"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"}
     try:
         # Deliberately does not cascade-delete the Plant's linked Media/S3 object — see the
-        # module docstring's note on why. A numbered plant's STAKE# lookup item (ADR-0016) IS
+        # module docstring's note on why. A numbered plant's STAKE# lookup item (ADR-0032) IS
         # removed, in the same transaction, so its stake number becomes reusable.
         plant = _get_table().get_item(Key=plant_key).get("Item")
         stake_no = (plant or {}).get("stake_no")
@@ -1512,7 +1512,7 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_garden(event: dict[str, Any]) -> dict[str, Any]:
-    """`PATCH /gardens/{gardenId}` (CP-01, ADR-0016): sets any of `context` (replaced as a whole
+    """`PATCH /gardens/{gardenId}` (CP-01, ADR-0032): sets any of `context` (replaced as a whole
     block — no field-level merge), `climateZone`, `vision`. 404 if the garden doesn't exist; the
     condition makes the update never create a half-formed Garden without its ownership index."""
     user_id = _get_header(event.get("headers"), "X-User-Id")

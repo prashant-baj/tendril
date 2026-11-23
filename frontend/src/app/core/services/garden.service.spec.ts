@@ -269,7 +269,7 @@ describe('HttpGardenApi', () => {
     expect((result as { photoUrl?: string }[])[0].photoUrl).toBe('https://example.test/p-1.jpg');
   });
 
-  it('getPlants(gardenId) shows a stake number in the name (ADR-0016)', () => {
+  it('getPlants(gardenId) shows a stake number in the name (ADR-0032)', () => {
     let result: unknown;
     api.getPlants('g-1').subscribe((plants) => (result = plants));
 
@@ -286,7 +286,7 @@ describe('HttpGardenApi', () => {
     expect('stakeNo' in plants[1]).toBeFalse();
   });
 
-  it('getGardenById() maps climateZone and the context block (ADR-0016)', () => {
+  it('getGardenById() maps climateZone and the context block (ADR-0032)', () => {
     let result: unknown;
     api.getGardenById('g-1').subscribe((g) => (result = g));
 

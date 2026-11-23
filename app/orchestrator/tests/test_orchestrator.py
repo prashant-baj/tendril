@@ -573,7 +573,7 @@ def test_build_orchestrator_agent_wires_session_manager_with_goal_id_as_session_
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
     monkeypatch.setattr(handler, "Agent", FakeAgent)
     monkeypatch.setattr(handler, "AGENT_STATE_BUCKET_NAME", "tendril-dev-agent-state")
-    monkeypatch.setattr(handler, "_table", FakeTable())  # ADR-0016 garden-context read
+    monkeypatch.setattr(handler, "_table", FakeTable())  # ADR-0032 garden-context read
 
     handler._build_orchestrator_agent("g1", "goal-1", None, None)
 
@@ -1286,7 +1286,7 @@ def test_handler_ignores_unknown_detail_type(monkeypatch):
     assert fake_table.update_calls == []
 
 
-# --- ADR-0016 (CP-01): garden context injected into every turn ----------------------------
+# --- ADR-0032 (CP-01): garden context injected into every turn ----------------------------
 
 GARDEN_METADATA = {
     "pk": "GARDEN#g1",

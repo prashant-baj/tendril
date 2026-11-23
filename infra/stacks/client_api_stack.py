@@ -16,6 +16,27 @@ via `DockerImageCode.from_image_asset`. Pass context `garden_handler_image_repo`
 `garden_handler_image_tag`) to build from a pre-existing ECR repository instead — used by unit
 tests (and CI, if it ever pre-builds images) to synth without a local Docker build, mirroring
 `AgentCoreStack`'s `agent_image_uri` escape hatch.
+
+API key access (ADR-0021, ported 2026-11-23 from the showcase repo with identical construct IDs so
+the keys it already deployed to dev are kept, not replaced): the contract declares an `api_key`
+security scheme and a `security` requirement on every operation except the CORS `OPTIONS`
+preflight. This stack creates the API keys and usage plans **without any key value** (API Gateway
+generates it; a human copies it into a GitHub secret by hand). A FRONTEND key sits in its own
+usage plan in every environment; a CI/EVAL key with its own Client API usage plan exists in `dev`
+only, never in `prod`.
+
+Rollout (chicken and egg: the key value only exists after the first deploy): enforcement is
+controlled by the CDK context flag `require_api_key`. While it is false the stack still creates
+the keys and usage plans but removes the `security` requirements from the deployed contract, so
+the API stays open and the dev front end keeps working. After the FRONTEND value is in the
+`FRONTEND_API_KEY` secret and the front end sends it, set the flag to true.
+Default: not enforcing in `dev` (staged rollout). Every other environment always enforces
+(fail closed): the flag cannot relax enforcement outside `dev`.
+
+The CI/EVAL key is consumed cross-stack by `tendril-dev-eval-control` (the showcase's Evaluation
+Control API, ADR-0019). This repo keeps that link through `EvalControlPlaceholderStack`, which
+references `eval_api_key` so CDK keeps generating the export CloudFormation refuses to drop while
+it is imported (`infra/stacks/eval_control_stack.py`).
 """
 
 from pathlib import Path
@@ -38,6 +59,26 @@ from constructs import Construct
 APP_API_DIR = Path(__file__).resolve().parents[2] / "app" / "api"
 OPENAPI_PATH = APP_API_DIR / "openapi.yaml"
 LAMBDA_URI_PLACEHOLDER = "__LAMBDA_INTEGRATION_URI__"
+
+# CORS header values (API Gateway wants literal values wrapped in single quotes). Keep the
+# header list in sync with the OPTIONS integration in app/api/openapi.yaml.
+CORS_ALLOW_ORIGIN = "'*'"
+CORS_ALLOW_HEADERS = "'Content-Type,X-User-Id,x-api-key'"
+
+# Usage-plan defaults (same numbers as the showcase deployment, so nothing changes on deploy).
+# The FRONTEND plan is throttling plus a generous daily quota (ADR-0021 decision 1). The owner can
+# override every number through the CDK context keys used in `_add_api_keys_and_usage_plans`.
+DEFAULT_FRONTEND_RATE = 25
+DEFAULT_FRONTEND_BURST = 50
+DEFAULT_FRONTEND_DAILY_QUOTA = 50_000
+DEFAULT_EVAL_RATE = 5
+DEFAULT_EVAL_BURST = 10
+DEFAULT_EVAL_DAILY_QUOTA = 2_000
+
+
+def _truthy(value) -> bool:
+    """CDK context values arrive as bool (cdk.json) or str (`--context k=true`); None is false."""
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class ClientApiStack(Stack):
@@ -67,7 +108,7 @@ class ClientApiStack(Stack):
             code=code,
             architecture=lambda_.Architecture.ARM_64,
             # 29s = API Gateway's own integration ceiling. Raised from 10s for bulkCreatePlants
-            # (ADR-0016): one transaction per stake number, up to 200 per call.
+            # (ADR-0032): one transaction per stake number, up to 200 per call.
             timeout=Duration.seconds(29),
             environment={
                 "APP_TABLE_NAME": app_table.table_name,
@@ -103,6 +144,14 @@ class ClientApiStack(Stack):
             )
         )
 
+        # --- API key enforcement flag (staged rollout, see module docstring) ---
+        # `dev` enforces only when the flag is explicitly true (default: not enforcing, so the
+        # first deploy does not break the front end). Any other environment always enforces:
+        # the flag can only relax enforcement in dev, never in prod.
+        self.require_api_key = env_name != "dev" or _truthy(
+            self.node.try_get_context("require_api_key")
+        )
+
         # --- Load + patch the OpenAPI spec, one Lambda for both operations for now ---
         with open(OPENAPI_PATH, encoding="utf-8") as f:
             spec = yaml.safe_load(f)
@@ -121,6 +170,10 @@ class ClientApiStack(Stack):
                 integration = operation.get("x-amazon-apigateway-integration")
                 if integration and integration.get("uri") == LAMBDA_URI_PLACEHOLDER:
                     integration["uri"] = integration_uri
+                # Not enforcing yet: drop the `security` requirement so API Gateway does not
+                # mark the method apiKeyRequired. The contract file keeps the requirement.
+                if not self.require_api_key:
+                    operation.pop("security", None)
 
         self.api = apigateway.SpecRestApi(
             self,
@@ -135,5 +188,91 @@ class ClientApiStack(Stack):
             source_arn=self.api.arn_for_execute_api(),
         )
 
+        self._add_cors_gateway_responses()
+        self._add_api_keys_and_usage_plans(env_name, prefix)
+
         CfnOutput(self, "ClientApiUrl", value=self.api.url)
         CfnOutput(self, "GardenHandlerArn", value=garden_handler.function_arn)
+
+    def _add_cors_gateway_responses(self) -> None:
+        """Default 4XX/5XX gateway responses carry the CORS headers (ADR-0021 decision 7).
+
+        API Gateway answers a missing key (403) or a throttled call (429) itself, before the
+        Lambda runs, so without these headers the browser reports an opaque CORS error instead
+        of letting the front end read the status.
+        """
+        headers = {
+            "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
+            "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
+        }
+        self.api.add_gateway_response(
+            "Default4xx", type=apigateway.ResponseType.DEFAULT_4_XX, response_headers=headers
+        )
+        self.api.add_gateway_response(
+            "Default5xx", type=apigateway.ResponseType.DEFAULT_5_XX, response_headers=headers
+        )
+
+    def _ctx_int(self, name: str, default: int) -> int:
+        value = self.node.try_get_context(name)
+        return default if value is None else int(value)
+
+    def _add_api_keys_and_usage_plans(self, env_name: str, prefix: str) -> None:
+        """Keys and usage plans (ADR-0021 decisions 1, 3, 5, 8).
+
+        No `value` is ever passed to `ApiKey`: API Gateway generates it and a human copies it
+        into a GitHub secret. Only key IDs appear in outputs. Construct IDs must stay exactly as
+        they are: they match the keys already deployed to dev, and renaming one would replace
+        the key (a new value) and break the eval-control import.
+        """
+        stage = self.api.deployment_stage
+
+        self.frontend_api_key = apigateway.ApiKey(
+            self,
+            "FrontendApiKey",
+            api_key_name=f"{prefix}-frontend",
+            description="FRONTEND key (public by nature: identification and throttling only)",
+        )
+        frontend_plan = apigateway.UsagePlan(
+            self,
+            "FrontendUsagePlan",
+            name=f"{prefix}-frontend",
+            description="Client API usage plan for the FRONTEND key",
+            throttle=apigateway.ThrottleSettings(
+                rate_limit=self._ctx_int("frontend_throttle_rate", DEFAULT_FRONTEND_RATE),
+                burst_limit=self._ctx_int("frontend_throttle_burst", DEFAULT_FRONTEND_BURST),
+            ),
+            quota=apigateway.QuotaSettings(
+                limit=self._ctx_int("frontend_daily_quota", DEFAULT_FRONTEND_DAILY_QUOTA),
+                period=apigateway.Period.DAY,
+            ),
+            api_stages=[apigateway.UsagePlanPerApiStage(api=self.api, stage=stage)],
+        )
+        frontend_plan.add_api_key(self.frontend_api_key)
+        CfnOutput(self, "FrontendApiKeyId", value=self.frontend_api_key.key_id)
+
+        # CI/EVAL key: dev only. prod never gets an eval key or an eval usage plan.
+        self.eval_api_key = None
+        if env_name == "dev":
+            self.eval_api_key = apigateway.ApiKey(
+                self,
+                "EvalApiKey",
+                api_key_name=f"{prefix}-ci-eval",
+                description="CI/EVAL key (secret): evaluation and acceptance callers",
+            )
+            eval_plan = apigateway.UsagePlan(
+                self,
+                "EvalClientApiUsagePlan",
+                name=f"{prefix}-ci-eval-client-api",
+                description="Client API usage plan for the CI/EVAL key",
+                throttle=apigateway.ThrottleSettings(
+                    rate_limit=self._ctx_int("eval_throttle_rate", DEFAULT_EVAL_RATE),
+                    burst_limit=self._ctx_int("eval_throttle_burst", DEFAULT_EVAL_BURST),
+                ),
+                quota=apigateway.QuotaSettings(
+                    limit=self._ctx_int("eval_daily_quota", DEFAULT_EVAL_DAILY_QUOTA),
+                    period=apigateway.Period.DAY,
+                ),
+                api_stages=[apigateway.UsagePlanPerApiStage(api=self.api, stage=stage)],
+            )
+            eval_plan.add_api_key(self.eval_api_key)
+            CfnOutput(self, "EvalApiKeyId", value=self.eval_api_key.key_id)

@@ -899,7 +899,7 @@ def test_list_plants_resolves_photo_url_for_plants_with_media(monkeypatch):
         == "https://example-bucket.s3.amazonaws.com/g1/media-1/leaf.jpg?presigned=1"
     )
     assert "photoUrl" not in body[1]
-    # ADR-0016: one BatchGetItem for every plant's photo, not one GetItem per plant.
+    # ADR-0032: one BatchGetItem for every plant's photo, not one GetItem per plant.
     assert len(fake_client.batch_get_calls) == 1
     keys = fake_client.batch_get_calls[0][handler.APP_TABLE_NAME]["Keys"]
     assert keys == [{"pk": {"S": "GARDEN#g1"}, "sk": {"S": "MEDIA#media-1"}}]
@@ -2430,7 +2430,7 @@ def test_handler_unknown_route_returns_404():
     assert resp["statusCode"] == 404
 
 
-# --- Phase A (CP-01/CP-02, ADR-0016): garden context, stake numbers, bulk create ------------
+# --- Phase A (CP-01/CP-02, ADR-0032): garden context, stake numbers, bulk create ------------
 
 BRAMHANGAON_CONTEXT = {
     "soil": "Heavy black calcareous/saline clay; lime-locked Fe/Mg/N chlorosis",

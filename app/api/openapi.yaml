@@ -10,11 +10,17 @@ info:
     with a photo), and WS-01's goal-intake operation (the media op WS-01 originally scoped is
     already covered by OB-02, per docs/roadmap.md's resequencing note); the rest of ADR-0004's
     endpoint table is added incrementally as later stories land.
+    API keys (ADR-0021): every operation except the CORS OPTIONS preflight declares the
+    `api_key` security scheme (an `x-api-key` header). ClientApiStack strips these requirements
+    from the deployed copy while `require_api_key` is false in dev (staged rollout); prod always
+    enforces.
 
 paths:
   /gardens:
     post:
       operationId: createGarden
+      security:
+        - api_key: []
       summary: Create a named garden
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -44,6 +50,8 @@ paths:
         passthroughBehavior: when_no_match
     get:
       operationId: listGardens
+      security:
+        - api_key: []
       summary: List every garden the caller owns (multi-garden switcher)
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -69,6 +77,8 @@ paths:
         passthroughBehavior: when_no_match
     options: &cors-preflight
       summary: CORS preflight
+      # The browser preflight never carries the key, so OPTIONS stays open (ADR-0021 decision 7).
+      security: []
       responses:
         "200":
           description: CORS preflight response
@@ -90,13 +100,15 @@ paths:
             responseParameters:
               method.response.header.Access-Control-Allow-Origin: "'*'"
               method.response.header.Access-Control-Allow-Methods: "'GET,POST,PATCH,DELETE,OPTIONS'"
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id,x-api-key'"
 
   /gardens/{gardenId}:
     parameters:
       - $ref: "#/components/parameters/GardenId"
     get:
       operationId: getGarden
+      security:
+        - api_key: []
       summary: Read a garden by id
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -120,7 +132,9 @@ paths:
         passthroughBehavior: when_no_match
     patch:
       operationId: updateGarden
-      summary: Update a garden's context block, climate zone, and/or vision (ADR-0016)
+      security:
+        - api_key: []
+      summary: Update a garden's context block, climate zone, and/or vision (ADR-0032)
       description: >
         `context` is replaced as a whole block (no field-level merge). Returns the updated garden.
       parameters:
@@ -162,6 +176,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     get:
       operationId: getGardenWeather
+      security:
+        - api_key: []
       summary: Real current weather for this garden's own location
       responses:
         "200":
@@ -194,6 +210,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     post:
       operationId: createMediaUpload
+      security:
+        - api_key: []
       summary: Get a presigned URL to upload a photo directly to S3
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -228,6 +246,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     post:
       operationId: createPlant
+      security:
+        - api_key: []
       summary: Add a plant to a garden
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -263,6 +283,8 @@ paths:
         passthroughBehavior: when_no_match
     get:
       operationId: listPlants
+      security:
+        - api_key: []
       summary: List every plant in a garden
       responses:
         "200":
@@ -285,7 +307,9 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     post:
       operationId: bulkCreatePlants
-      summary: Create one plant per stake number in a range (CP-02, ADR-0016)
+      security:
+        - api_key: []
+      summary: Create one plant per stake number in a range (CP-02, ADR-0032)
       description: >
         Idempotent. A stake number already used in this garden is reported under `skipped` and
         never duplicated or overwritten, so a partial run can be retried.
@@ -329,6 +353,8 @@ paths:
       - $ref: "#/components/parameters/PlantId"
     delete:
       operationId: deletePlant
+      security:
+        - api_key: []
       summary: Remove a plant from a garden
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -353,6 +379,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     post:
       operationId: createGoal
+      security:
+        - api_key: []
       summary: Submit an issue/goal for a garden — triggers the orchestrator asynchronously
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -385,6 +413,8 @@ paths:
         passthroughBehavior: when_no_match
     get:
       operationId: listGoals
+      security:
+        - api_key: []
       summary: List every goal submitted for a garden
       responses:
         "200":
@@ -408,6 +438,8 @@ paths:
       - $ref: "#/components/parameters/GoalId"
     get:
       operationId: getGoalDetail
+      security:
+        - api_key: []
       summary: >
         Read a goal's full detail — its proposed/approved Plan and Tasks (if any), its attached
         media (with freshly-generated presigned download URLs), and its chat message thread
@@ -438,6 +470,8 @@ paths:
       - $ref: "#/components/parameters/GoalId"
     post:
       operationId: postGoalMessage
+      security:
+        - api_key: []
       summary: >
         Send a chat message about a goal — asks/adjusts the proposed plan; triggers the
         orchestrator asynchronously (PA-02)
@@ -472,6 +506,8 @@ paths:
       - $ref: "#/components/parameters/TaskId"
     post:
       operationId: postTaskCheckin
+      security:
+        - api_key: []
       summary: >
         Attach a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
         chain and marks the task done (one check-in per task; not a repeatable progress log)
@@ -509,6 +545,8 @@ paths:
       - $ref: "#/components/parameters/PlanId"
     post:
       operationId: approvePlan
+      security:
+        - api_key: []
       summary: >
         Approve a proposed plan (PA-02). A pure, deterministic status flip — never depends on
         model behavior, so this is handled synchronously, not routed through the orchestrator.
@@ -533,6 +571,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     get:
       operationId: listTasks
+      security:
+        - api_key: []
       summary: List every task across every goal in a garden (Phase 6)
       responses:
         "200":
@@ -555,6 +595,8 @@ paths:
       - $ref: "#/components/parameters/GardenId"
     get:
       operationId: listActivity
+      security:
+        - api_key: []
       summary: The garden's event timeline, newest first (Phase 6)
       responses:
         "200":
@@ -573,6 +615,12 @@ paths:
     options: *cors-preflight
 
 components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      in: header
+      name: x-api-key
+
   parameters:
     GardenId:
       name: gardenId
@@ -667,7 +715,7 @@ components:
       type: object
       additionalProperties: false
       description: >
-        Whole-farm facts every agent reasons with (ADR-0016). All fields optional. Injected into
+        Whole-farm facts every agent reasons with (ADR-0032). All fields optional. Injected into
         the orchestrator and specialist prompts on every turn, except notificationRecipients,
         which are personal data and never sent to a model.
       properties:
@@ -826,7 +874,7 @@ components:
           type: integer
           minimum: 1
           maximum: 99999
-          description: Optional number on the plant's physical stake (ADR-0016). Unique within
+          description: Optional number on the plant's physical stake (ADR-0032). Unique within
             the garden; never generated by Tendril.
 
     PlantCreateResponse:
@@ -904,7 +952,7 @@ components:
           type: string
         stakeNo:
           type: integer
-          description: Number on the plant's physical stake, when it has one (ADR-0016).
+          description: Number on the plant's physical stake, when it has one (ADR-0032).
             listPlants orders by it, unnumbered plants last.
         photoUrl:
           type: string

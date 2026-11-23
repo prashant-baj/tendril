@@ -23,7 +23,7 @@ ENV = Environment(account="123456789012", region="ap-south-1")
 IMAGE = "123456789012.dkr.ecr.ap-south-1.amazonaws.com/tendril:latest"
 
 
-def _app() -> App:
+def _app(**extra_context) -> App:
     # agent_image_uri / garden_handler_image_repo / orchestrator_image_repo / *_tool_image_repo
     # avoid a Docker build during synth (ADR-0005, ADR-0014).
     return App(
@@ -34,6 +34,7 @@ def _app() -> App:
             "orchestrator_image_repo": "tendril-dev-orchestrator",
             "tracker_image_repo": "tendril-dev-tracker",
             "weather_tool_image_repo": "tendril-dev-tool-weather",
+            **extra_context,
         }
     )
 
@@ -794,3 +795,282 @@ def test_frontend_bucket_is_a_public_static_website():
             }
         ),
     )
+
+
+# --- client API keys (ADR-0021, change add-api-key-auth) ----------------------
+
+HTTP_METHODS = {"get", "put", "post", "delete", "options", "head", "patch"}
+
+
+def _client_api_template(env_name: str, **context) -> Template:
+    app = _app(**context)
+    return Template.from_stack(ClientApiStack(app, "capi-keys", env_name=env_name, env=ENV))
+
+
+def _client_api_body(tpl: Template) -> dict:
+    (rest_api,) = tpl.find_resources("AWS::ApiGateway::RestApi").values()
+    return rest_api["Properties"]["Body"]
+
+
+def _operations(body: dict):
+    for path, item in body["paths"].items():
+        for method, operation in item.items():
+            if method in HTTP_METHODS and isinstance(operation, dict):
+                yield path, method, operation
+
+
+def _keys(tpl: Template) -> dict:
+    """Logical id -> API key name."""
+    return {
+        lid: res["Properties"]["Name"]
+        for lid, res in tpl.find_resources("AWS::ApiGateway::ApiKey").items()
+    }
+
+
+def _plans(tpl: Template) -> dict:
+    """Logical id -> usage plan name."""
+    return {
+        lid: res["Properties"]["UsagePlanName"]
+        for lid, res in tpl.find_resources("AWS::ApiGateway::UsagePlan").items()
+    }
+
+
+def _plan_of_key(tpl: Template, key_name: str) -> dict:
+    """The usage plan properties of the one plan that contains the named key."""
+    (key_lid,) = [lid for lid, name in _keys(tpl).items() if name == key_name]
+    plan_lids = [
+        res["Properties"]["UsagePlanId"]["Ref"]
+        for res in tpl.find_resources("AWS::ApiGateway::UsagePlanKey").values()
+        if res["Properties"]["KeyId"] == {"Ref": key_lid}
+    ]
+    assert len(plan_lids) == 1, f"{key_name} must be in exactly one usage plan"
+    return tpl.find_resources("AWS::ApiGateway::UsagePlan")[plan_lids[0]]["Properties"]
+
+
+def test_dev_has_exactly_one_frontend_key_and_one_eval_key():
+    tpl = _client_api_template("dev")
+    tpl.resource_count_is("AWS::ApiGateway::ApiKey", 2)
+    assert sorted(_keys(tpl).values()) == ["tendril-dev-ci-eval", "tendril-dev-frontend"]
+    tpl.resource_count_is("AWS::ApiGateway::UsagePlan", 2)
+
+
+def test_prod_has_the_frontend_key_only_and_no_eval_key_or_plan():
+    tpl = _client_api_template("prod")
+    tpl.resource_count_is("AWS::ApiGateway::ApiKey", 1)
+    tpl.resource_count_is("AWS::ApiGateway::UsagePlan", 1)
+    assert list(_keys(tpl).values()) == ["tendril-prod-frontend"]
+    assert list(_plans(tpl).values()) == ["tendril-prod-frontend"]
+
+
+def test_prod_cannot_get_an_eval_key_through_context():
+    tpl = _client_api_template("prod", eval_daily_quota="10", require_api_key="false")
+    assert list(_keys(tpl).values()) == ["tendril-prod-frontend"]
+    assert list(_plans(tpl).values()) == ["tendril-prod-frontend"]
+
+
+def test_frontend_key_is_not_in_the_eval_keys_usage_plan():
+    tpl = _client_api_template("dev")
+    frontend_plan = _plan_of_key(tpl, "tendril-dev-frontend")
+    eval_plan = _plan_of_key(tpl, "tendril-dev-ci-eval")
+    assert frontend_plan["UsagePlanName"] == "tendril-dev-frontend"
+    assert eval_plan["UsagePlanName"] == "tendril-dev-ci-eval-client-api"
+    # Exactly one plan-key association per key: no plan holds both keys.
+    plan_keys = tpl.find_resources("AWS::ApiGateway::UsagePlanKey").values()
+    pairs = {
+        (r["Properties"]["UsagePlanId"]["Ref"], r["Properties"]["KeyId"]["Ref"]) for r in plan_keys
+    }
+    assert len(pairs) == 2
+    assert len({plan for plan, _ in pairs}) == 2
+
+
+def test_usage_plans_have_throttle_and_daily_quota_with_context_overrides():
+    tpl = _client_api_template("dev")
+    for name in ("tendril-dev-frontend", "tendril-dev-ci-eval"):
+        plan = _plan_of_key(tpl, name)
+        assert plan["Throttle"]["RateLimit"] > 0
+        assert plan["Throttle"]["BurstLimit"] > 0
+        assert plan["Quota"]["Period"] == "DAY"
+        assert plan["Quota"]["Limit"] > 0
+
+    tpl2 = _client_api_template("dev", eval_daily_quota="123", eval_throttle_rate="7")
+    plan = _plan_of_key(tpl2, "tendril-dev-ci-eval")
+    assert plan["Quota"]["Limit"] == 123
+    assert plan["Throttle"]["RateLimit"] == 7
+    # The frontend plan is independent of the eval numbers.
+    assert _plan_of_key(tpl2, "tendril-dev-frontend")["Quota"]["Limit"] != 123
+
+
+def test_every_non_options_operation_requires_a_key_when_enforced():
+    for env_name, context in (("dev", {"require_api_key": "true"}), ("prod", {})):
+        body = _client_api_body(_client_api_template(env_name, **context))
+        assert body["components"]["securitySchemes"]["api_key"] == {
+            "type": "apiKey",
+            "in": "header",
+            "name": "x-api-key",
+        }
+        ops = list(_operations(body))
+        assert any(m == "options" for _, m, _ in ops)
+        assert any(m != "options" for _, m, _ in ops)
+        for path, method, operation in ops:
+            if method == "options":
+                assert operation.get("security") == [], f"OPTIONS {path} must stay open"
+            else:
+                assert operation.get("security") == [{"api_key": []}], (
+                    f"{env_name}: {method.upper()} {path} must require the key"
+                )
+
+
+def test_dev_does_not_enforce_the_key_by_default_so_the_first_deploy_is_safe():
+    # Staged rollout: keys and plans exist, but no operation requires a key until
+    # `require_api_key` is set to true after the front end carries the key.
+    tpl = _client_api_template("dev")
+    tpl.resource_count_is("AWS::ApiGateway::ApiKey", 2)
+    for path, method, operation in _operations(_client_api_body(tpl)):
+        if method != "options":
+            assert not operation.get("security"), f"{method.upper()} {path} enforced too early"
+
+
+def test_prod_enforces_even_if_the_flag_says_false():
+    body = _client_api_body(_client_api_template("prod", require_api_key="false"))
+    for path, method, operation in _operations(body):
+        if method != "options":
+            assert operation.get("security") == [{"api_key": []}], f"{method.upper()} {path}"
+
+
+def test_no_key_value_appears_in_the_synthesized_template():
+    import json
+    import re
+
+    for env_name in ("dev", "prod"):
+        tpl = _client_api_template(env_name, require_api_key="true")
+        for res in tpl.find_resources("AWS::ApiGateway::ApiKey").values():
+            assert "Value" not in res["Properties"], "API Gateway must generate the key value"
+        # Outputs expose the key ID (a Ref to the ApiKey resource) and nothing else.
+        key_lids = set(_keys(tpl))
+        outputs = tpl.to_json().get("Outputs", {})
+        key_outputs = [o for name, o in outputs.items() if name.endswith("ApiKeyId")]
+        assert key_outputs, "expected key id outputs"
+        for out in key_outputs:
+            assert out["Value"]["Ref"] in key_lids
+        # Access logs may carry the key ID only: never the key value (`$context.identity.apiKey`
+        # without the `Id` suffix) and never the x-api-key header.
+        for stage in tpl.find_resources("AWS::ApiGateway::Stage").values():
+            log_format = json.dumps(stage["Properties"].get("AccessLogSetting", {}))
+            assert not re.search(r"\$context\.identity\.apiKey(?!Id)", log_format)
+            assert "x-api-key" not in log_format.lower()
+
+
+def test_cors_allows_x_api_key_on_preflight_and_gateway_responses():
+    tpl = _client_api_template("dev")
+    for path, method, operation in _operations(_client_api_body(tpl)):
+        if method == "options":
+            params = operation["x-amazon-apigateway-integration"]["responses"]["default"][
+                "responseParameters"
+            ]
+            allowed = params["method.response.header.Access-Control-Allow-Headers"]
+            assert "x-api-key" in allowed.lower(), f"OPTIONS {path}"
+
+    origin_param = "gatewayresponse.header.Access-Control-Allow-Origin"
+    headers_param = "gatewayresponse.header.Access-Control-Allow-Headers"
+    for response_type in ("DEFAULT_4XX", "DEFAULT_5XX"):
+        tpl.has_resource_properties(
+            "AWS::ApiGateway::GatewayResponse",
+            Match.object_like(
+                {
+                    "ResponseType": response_type,
+                    "ResponseParameters": Match.object_like(
+                        {origin_param: "'*'", headers_param: Match.string_like_regexp("x-api-key")}
+                    ),
+                }
+            ),
+        )
+
+
+# --- eval-control placeholder (keeps the CI/EVAL key export, never deployed) -----------------
+
+# The export the showcase-deployed `tendril-dev-eval-control` imports. If this name changes,
+# CloudFormation blocks every client-api deploy (the 2026-11-23 failure).
+LIVE_EVAL_KEY_EXPORT = "tendril-dev-client-api:ExportsOutputRefEvalApiKey50C01DA0E8FFFC6E"
+
+
+def _dev_client_api_and_placeholder():
+    from stacks.eval_control_stack import EvalControlPlaceholderStack
+
+    app = _app()
+    capi = ClientApiStack(app, "tendril-dev-client-api", env_name="dev", env=ENV)
+    placeholder = EvalControlPlaceholderStack(
+        app,
+        "tendril-dev-eval-control",
+        env_name="dev",
+        eval_api_key=capi.eval_api_key,
+        env=ENV,
+    )
+    return Template.from_stack(capi).to_json(), Template.from_stack(placeholder).to_json()
+
+
+def test_client_api_keeps_the_exact_eval_key_export_the_live_eval_stack_imports():
+    capi, placeholder = _dev_client_api_and_placeholder()
+    exports = {o["Export"]["Name"]: o["Value"] for o in capi["Outputs"].values() if "Export" in o}
+    assert exports == {LIVE_EVAL_KEY_EXPORT: {"Ref": "EvalApiKey50C01DA0"}}
+    imports = [o["Value"] for o in placeholder["Outputs"].values()]
+    assert {"Fn::ImportValue": LIVE_EVAL_KEY_EXPORT} in imports
+
+
+def test_api_key_logical_ids_match_the_live_dev_stack():
+    # Renaming a construct would replace the deployed key (new value) and break the import.
+    capi, _ = _dev_client_api_and_placeholder()
+    resources = capi["Resources"]
+    for lid, rtype in {
+        "FrontendApiKeyEAB75524": "AWS::ApiGateway::ApiKey",
+        "EvalApiKey50C01DA0": "AWS::ApiGateway::ApiKey",
+        "FrontendUsagePlanA5A486AD": "AWS::ApiGateway::UsagePlan",
+        "EvalClientApiUsagePlanA8600D80": "AWS::ApiGateway::UsagePlan",
+    }.items():
+        assert resources[lid]["Type"] == rtype, lid
+
+
+def test_placeholder_cannot_be_deployed():
+    _, placeholder = _dev_client_api_and_placeholder()
+    param = placeholder["Parameters"]["DoNotDeployPlaceholder"]
+    # Required (no default) and unsatisfiable: CloudFormation rejects any deploy at validation.
+    assert "Default" not in param
+    assert param["MinLength"] == 1
+    assert param["AllowedPattern"] == "^(?!)$"
+    assert "DO NOT DEPLOY" in placeholder["Description"]
+    # Nothing real in it: one no-op marker, no Lambda, no API.
+    assert {r["Type"] for r in placeholder["Resources"].values()} == {
+        "AWS::CloudFormation::WaitConditionHandle"
+    }
+
+
+def test_placeholder_is_dev_only():
+    from stacks.eval_control_stack import EvalControlPlaceholderStack
+
+    app = _app()
+    capi = ClientApiStack(app, "tendril-prod-client-api", env_name="prod", env=ENV)
+    with pytest.raises(ValueError):
+        EvalControlPlaceholderStack(
+            app, "tendril-prod-eval-control", env_name="prod", eval_api_key=None, env=ENV
+        )
+    assert capi.eval_api_key is None
+
+
+def test_ci_never_deploys_the_eval_control_placeholder():
+    from pathlib import Path
+
+    import yaml
+
+    ci_path = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    ci = yaml.safe_load(ci_path.read_text(encoding="utf-8"))
+    deploy_cmds = [
+        step.get("run", "")
+        for job in ci["jobs"].values()
+        for step in job.get("steps", [])
+        if "cdk deploy" in step.get("run", "")
+    ]
+    assert deploy_cmds, "expected at least one cdk deploy step"
+    for cmd in deploy_cmds:
+        assert "eval-control" not in cmd
+        assert "--all" not in cmd, (
+            "an --all deploy would deploy the placeholder over the live stack"
+        )

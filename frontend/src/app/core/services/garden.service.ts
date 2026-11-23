@@ -211,7 +211,7 @@ interface PlantDto {
   stage: string;
   /** Freshly-generated presigned GET url (OB-03), present only if the plant has a linked photo. */
   photoUrl?: string;
-  /** Stake number (ADR-0016), when the plant has one. */
+  /** Stake number (ADR-0032), when the plant has one. */
   stakeNo?: number;
 }
 

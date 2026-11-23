@@ -207,11 +207,11 @@ pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/gardens` | POST, GET | Create a garden (name, geolocation); list the caller's gardens |
-| `/gardens/{gardenId}` | GET, PATCH | Read the garden (incl. its `context` block + `climateZone`); replace `context` / set `climateZone` / `vision` ([ADR-0016](./ADRs/0016-garden-context-block-and-optional-stake-number.md)) |
+| `/gardens/{gardenId}` | GET, PATCH | Read the garden (incl. its `context` block + `climateZone`); replace `context` / set `climateZone` / `vision` ([ADR-0032](./ADRs/0032-garden-context-block-and-optional-stake-number.md)) |
 | `/gardens/{gardenId}/weather` | GET | Real current weather for the garden's geolocation |
 | `/gardens/{gardenId}/media` | POST | Get a presigned upload URL + create the Media record |
 | `/gardens/{gardenId}/plants` | POST, GET | Add (optional `stakeNo`, unique per garden — 409 on a duplicate) / list plants (with photos, ordered by stake number) |
-| `/gardens/{gardenId}/plants/bulk` | POST | Create one plant per stake number in a range; idempotent, skips existing numbers (ADR-0016) |
+| `/gardens/{gardenId}/plants/bulk` | POST | Create one plant per stake number in a range; idempotent, skips existing numbers (ADR-0032) |
 | `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant (and free its stake number) |
 | `/gardens/{gardenId}/goals` | POST, GET | Submit an issue (async — 202, orchestrator decomposes it); list goals |
 | `/gardens/{gardenId}/goals/{goalId}` | GET | Goal + plan + tasks + media + full message thread |
@@ -221,10 +221,22 @@ pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`
 | `/gardens/{gardenId}/tasks` | GET | All tasks across every goal in the garden |
 | `/gardens/{gardenId}/activity` | GET | The garden's event timeline, newest first |
 
-The only update endpoint is `PATCH /gardens/{gardenId}` (garden facts, ADR-0016), and no
+The only update endpoint is `PATCH /gardens/{gardenId}` (garden facts, ADR-0032), and no
 `/status` endpoint exists — plan/task status is read back through the endpoints above, never
 written directly by the client. Full request/response
 shapes are the source-of-truth `app/api/openapi.yaml`, not this table.
+
+**API keys ([ADR-0021](./ADRs/0021-api-key-access-tiers.md), imported from the showcase repo).**
+Every operation except the CORS preflight declares an `x-api-key` requirement. A FRONTEND key
+(every env) and a CI/EVAL key (dev only) each sit in their own usage plan (throttle + daily
+quota). Enforcement is staged: in `dev` the deployed API ignores the requirement until the CDK
+flag `require_api_key=true`; `prod` always enforces. Keys identify and throttle callers. They
+are **not** user authentication (that stays the Cognito path of ADR-0004).
+
+**Evaluation Control API (dev only, not in this repo yet).** `tendril-dev-eval-control` was
+deployed from the GitLab showcase repo (ADR-0019/0020 there) and imports the CI/EVAL key. Here
+it is a non-deployable placeholder (`infra/stacks/eval_control_stack.py`) that keeps the key's
+cross-stack export alive; CI never deploys it.
 
 ### 4.2 Tool APIs (agent-facing, "tools are APIs")
 
@@ -485,6 +497,6 @@ CloudFront is the documented upgrade path).
 
 - Concept & vision: [`../project-context.md`](../project-context.md)
 - Engineering standards: [`../engineering-best-practices.md`](../engineering-best-practices.md)
-- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0006 (prompt externalization)](./ADRs/0006-prompt-externalization-bedrock-prompt-management.md), [ADR-0007 (prompt/skill versioning)](./ADRs/0007-prompt-skill-versioning-long-running-tasks.md), [ADR-0008 (guardrails)](./ADRs/0008-guardrails-layered-defense-in-depth.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md), [ADR-0014 (Lambda container images)](./ADRs/0014-lambda-container-image-packaging.md), [ADR-0015 (IoT actuation + HITL, future/proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md), [ADR-0016 (garden context block + optional stake numbers)](./ADRs/0016-garden-context-block-and-optional-stake-number.md)
+- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0006 (prompt externalization)](./ADRs/0006-prompt-externalization-bedrock-prompt-management.md), [ADR-0007 (prompt/skill versioning)](./ADRs/0007-prompt-skill-versioning-long-running-tasks.md), [ADR-0008 (guardrails)](./ADRs/0008-guardrails-layered-defense-in-depth.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md), [ADR-0014 (Lambda container images)](./ADRs/0014-lambda-container-image-packaging.md), [ADR-0015 (IoT actuation + HITL, future/proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md), [ADR-0021 (API key access tiers, imported)](./ADRs/0021-api-key-access-tiers.md), [ADR-0032 (garden context block + optional stake numbers)](./ADRs/0032-garden-context-block-and-optional-stake-number.md)
 - [Strands capability mapping](./strands-capability-mapping.md): Strands SDK capabilities mapped to Tendril's functional/non-functional requirements, docs-verified (supersedes ADR-0001 Appendix A)
 - [Data architecture](./data-architecture.md): entity/key design, session/context/memory management, the agent data-access boundary, and the full Lambda/API/Agent/Event/Data component inventory

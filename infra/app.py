@@ -10,6 +10,7 @@ import os
 import aws_cdk as cdk
 from stacks.agentcore_stack import AgentCoreStack
 from stacks.client_api_stack import ClientApiStack
+from stacks.eval_control_stack import EvalControlPlaceholderStack
 from stacks.foundation_stack import FoundationStack
 from stacks.frontend_stack import FrontendStack
 from stacks.guardrails_stack import GuardrailsStack
@@ -30,7 +31,17 @@ PromptsStack(app, f"tendril-{env_name}-prompts", env_name=env_name, env=env)
 GuardrailsStack(app, f"tendril-{env_name}-guardrails", env_name=env_name, env=env)
 MemoryStack(app, f"tendril-{env_name}-memory", env_name=env_name, env=env)
 AgentCoreStack(app, f"tendril-{env_name}-agentcore", env_name=env_name, env=env)
-ClientApiStack(app, f"tendril-{env_name}-client-api", env_name=env_name, env=env)
+client_api = ClientApiStack(app, f"tendril-{env_name}-client-api", env_name=env_name, env=env)
+# ADR-0021: synthesized (never deployed) so the CI/EVAL key export the live showcase-deployed
+# eval-control stack imports keeps existing. See infra/stacks/eval_control_stack.py.
+if env_name == "dev":
+    EvalControlPlaceholderStack(
+        app,
+        f"tendril-{env_name}-eval-control",
+        env_name=env_name,
+        eval_api_key=client_api.eval_api_key,
+        env=env,
+    )
 FrontendStack(app, f"tendril-{env_name}-frontend", env_name=env_name, env=env)
 PipelineStack(app, f"tendril-{env_name}-pipeline", env_name=env_name, env=env)
 

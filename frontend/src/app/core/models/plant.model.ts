@@ -13,7 +13,7 @@ export interface Plant {
   meta: string;
   /** Freshly-generated presigned GET url (OB-03), present only if the plant has a linked photo. */
   photoUrl?: string;
-  /** Number on the plant's physical stake, when it has one (ADR-0016). Unique within a garden. */
+  /** Number on the plant's physical stake, when it has one (ADR-0032). Unique within a garden. */
   stakeNo?: number;
 }
 
@@ -25,6 +25,6 @@ export interface CreatePlantRequest {
   mediaId?: string;
   /** Growth stage; the server defaults it to "new". */
   stage?: string;
-  /** Optional stake number (ADR-0016) — a 409 means it's already used in this garden. */
+  /** Optional stake number (ADR-0032) — a 409 means it's already used in this garden. */
   stakeNo?: number;
 }

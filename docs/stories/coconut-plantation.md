@@ -136,7 +136,7 @@ and intercrop context and reminders reach my team.
 path for `context`); inject garden context into the orchestrator turn + specialist payload;
 OpenAPI contract update; unit + CDK assertion tests; dev smoke test recorded.
 **Dependencies:** Tendril Phases 1–2 (done). **Blocking ADR:** Garden `context` block —
-**[ADR-0016](../architecture/ADRs/0016-garden-context-block-and-optional-stake-number.md),
+**[ADR-0032](../architecture/ADRs/0032-garden-context-block-and-optional-stake-number.md),
 Accepted 2026-11-23.**
 **Status:** ◐ built + unit/contract-tested (2026-11-23): `context`/`climateZone` on
 `createGarden`/`getGarden`, new `PATCH /gardens/{id}`, garden context injected into the
@@ -169,7 +169,7 @@ plants by hand.
 **Tasks** — optional `stake_no` + per-garden uniqueness guard (e.g. a `GARDEN#{id}` /
 `STAKE#{no}` lookup item written transactionally with the Plant); bulk-create path (reuse
 `createPlant` write); OpenAPI update; tests; dev smoke test.
-**Dependencies:** CP-01. **Blocking ADR:** covered by ADR-0016 (Accepted). **Status:** ◐ built +
+**Dependencies:** CP-01. **Blocking ADR:** covered by ADR-0032 (Accepted). **Status:** ◐ built +
 unit/contract-tested (2026-11-23): optional `stakeNo` with a per-garden `STAKE#` lookup (409 on
 duplicate), optional `stage`, `POST /gardens/{id}/plants/bulk` (idempotent, ≤200/call,
 out-of-range numbers created but flagged), `listPlants` stake ordering + full pagination + one
