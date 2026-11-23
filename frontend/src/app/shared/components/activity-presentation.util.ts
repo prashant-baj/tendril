@@ -42,6 +42,14 @@ export function activityPresentation(event: ActivityEvent): ActivityPresentation
         icon: 'photo_camera',
         tone: 'neutral',
       };
+    case 'input.applied':
+      // A garden-wide input (fertilizer, drench, spray) — from the CP-04 migration's inputs log.
+      return {
+        title: 'Input applied',
+        detail: event.payload['input'] ?? '',
+        icon: 'water_drop',
+        tone: 'neutral',
+      };
     default:
       return { title: event.type, detail: '', icon: 'info', tone: 'neutral' };
   }

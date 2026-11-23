@@ -233,7 +233,17 @@ into it); tests.
 
 **Tasks** — script in a self-contained folder (own `requirements.txt`); filename-date parser (both
 shapes); S3 + DynamoDB batch writes; KB ingest; dry-run + verify mode; run against `dev`.
-**Dependencies:** CP-01, CP-02, CP-03. **Blocking ADR:** uses CP-01/CP-03 ADRs. **Status:** ☐ to do.
+**Dependencies:** CP-01, CP-02, CP-03. **Blocking ADR:** uses CP-01/CP-03 ADRs. **Status:** ◐ built and
+run in dev on 2026-11-23 (`scripts/migrate_coconut_archive.py`, tests in
+`tests/test_migrate_coconut_archive.py`). The test garden "Coconut Baug" was deleted
+(`scripts/delete_garden.py`). The new garden is **"Coconut Plot"**, with 105 palms and the farm details
+carried over from the test garden. It holds 142 photos (all ingested), 150 history entries (31 `log.md`
+notes, the rest photos, dated from the filenames) and 1 input event (humic 23 Oct). `--verify` reports
+0 mismatches over 102 palms; latest statuses are 18 healthy / 3 ok / 6 watch, matching `_SUMMARY.md`.
+Re-runs write nothing.
+**Deviations:** notes come from the archive's per-palm `log.md` files (to 25 Oct). `build_tracker.py`'s
+`P` dict, which has notes to 22 Nov, wasn't on this machine; re-running with it later adds the newer notes.
+**Open:** the KB seed (deferred as a separate step), and the `P`-dict notes.
 
 ---
 
