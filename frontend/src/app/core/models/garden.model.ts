@@ -7,6 +7,19 @@ export interface Garden {
   climateZone: string;
   /** Freshly-generated presigned GET url for this garden's banner photo, if one was set. */
   photoUrl?: string;
+  /** Whole-farm facts the agents reason with (ADR-0016), if set. */
+  context?: GardenContext;
+}
+
+/** Mirrors `GardenContext` in app/api/openapi.yaml (ADR-0016). Every field is optional. */
+export interface GardenContext {
+  soil?: string;
+  irrigation?: string;
+  intercrop?: string;
+  layout?: string;
+  notes?: string;
+  stakeRange?: { min: number; max: number };
+  notificationRecipients?: { name: string; e164: string }[];
 }
 
 /** A small labelled fact chip (sun hours, container type, etc.). */

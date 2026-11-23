@@ -181,6 +181,7 @@ erDiagram
 | **Tool APIs** | Weather (real, Lambda behind an IAM-authenticated Function URL) — the only tool deployed today; the pattern is designed to add more without touching agent code | Lambda | Lambda |
 | **Memory / Knowledge** | Real per-garden memory — a Bedrock Knowledge Base (S3 Vectors backend) each specialist retrieves/ingests against, wired into the shared agent template, not the orchestrator | Bedrock Knowledge Bases | Managed |
 | **Persistence** | Structured domain state + event/message log, single table | DynamoDB | Managed |
+| **Supervisor** *(candidate — CP-07, pending ADR; not built)* | New agent **above** the orchestrator: owns a garden's standing goals and its own agenda of scheduled checks, consumes a deterministic garden-state rollup (plant history + activity log + garden context), and when it decides to act **submits a garden-scoped goal into the existing orchestrator** — it does not replace it or call specialists directly. Model choice and whether assessment reasoning lives here or in a new garden-level specialist are decided in its ADR (`docs/stories/coconut-plantation.md` CP-07) | Strands | Lambda (EventBridge Scheduler-triggered), to be confirmed by ADR |
 | **Frontend** | Angular PWA — 8 routed screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
 
 **Not built yet** (documented gaps, not oversights): a Notification service and any push channel
@@ -196,16 +197,22 @@ channel exists in `foundation_stack.py` but nothing reads or writes it yet.
 
 Defined **contract-first** in OpenAPI 3.x ([ADR-0011](./ADRs/0011-openapi-contract-first-client-api.md)) —
 `app/api/openapi.yaml` is the source of truth; API Gateway (`SpecRestApi`) is provisioned by
-importing it directly, and the frontend's TypeScript types are generated from the same file.
+importing it directly (`infra/stacks/client_api_stack.py`), so the deployed API's actual routes
+cannot drift from the spec — there's no separately-wired route table to fall out of sync. The
+frontend's TypeScript request/response shapes (`frontend/src/app/core/models/*.ts`) are **not**
+auto-generated from this file today — they're hand-maintained interfaces, each carrying a comment
+pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`'s `POST
+/gardens` shape); codegen from the spec is a natural follow-up, not yet wired.
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/gardens` | POST, GET | Create a garden (name, geolocation); list the caller's gardens |
-| `/gardens/{gardenId}` | GET | Read garden context |
+| `/gardens/{gardenId}` | GET, PATCH | Read the garden (incl. its `context` block + `climateZone`); replace `context` / set `climateZone` / `vision` ([ADR-0016](./ADRs/0016-garden-context-block-and-optional-stake-number.md)) |
 | `/gardens/{gardenId}/weather` | GET | Real current weather for the garden's geolocation |
 | `/gardens/{gardenId}/media` | POST | Get a presigned upload URL + create the Media record |
-| `/gardens/{gardenId}/plants` | POST, GET | Add / list plants (with photos) |
-| `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant |
+| `/gardens/{gardenId}/plants` | POST, GET | Add (optional `stakeNo`, unique per garden — 409 on a duplicate) / list plants (with photos, ordered by stake number) |
+| `/gardens/{gardenId}/plants/bulk` | POST | Create one plant per stake number in a range; idempotent, skips existing numbers (ADR-0016) |
+| `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant (and free its stake number) |
 | `/gardens/{gardenId}/goals` | POST, GET | Submit an issue (async — 202, orchestrator decomposes it); list goals |
 | `/gardens/{gardenId}/goals/{goalId}` | GET | Goal + plan + tasks + media + full message thread |
 | `/gardens/{gardenId}/goals/{goalId}/messages` | POST | Send a chat message on an existing goal (async) |
@@ -214,8 +221,9 @@ importing it directly, and the frontend's TypeScript types are generated from th
 | `/gardens/{gardenId}/tasks` | GET | All tasks across every goal in the garden |
 | `/gardens/{gardenId}/activity` | GET | The garden's event timeline, newest first |
 
-No `PATCH`/update endpoints and no `/status` endpoint exist — garden/plan/task status is read
-back through the endpoints above, never written directly by the client. Full request/response
+The only update endpoint is `PATCH /gardens/{gardenId}` (garden facts, ADR-0016), and no
+`/status` endpoint exists — plan/task status is read back through the endpoints above, never
+written directly by the client. Full request/response
 shapes are the source-of-truth `app/api/openapi.yaml`, not this table.
 
 ### 4.2 Tool APIs (agent-facing, "tools are APIs")
@@ -477,6 +485,6 @@ CloudFront is the documented upgrade path).
 
 - Concept & vision: [`../project-context.md`](../project-context.md)
 - Engineering standards: [`../engineering-best-practices.md`](../engineering-best-practices.md)
-- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0006 (prompt externalization)](./ADRs/0006-prompt-externalization-bedrock-prompt-management.md), [ADR-0007 (prompt/skill versioning)](./ADRs/0007-prompt-skill-versioning-long-running-tasks.md), [ADR-0008 (guardrails)](./ADRs/0008-guardrails-layered-defense-in-depth.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md), [ADR-0014 (Lambda container images)](./ADRs/0014-lambda-container-image-packaging.md), [ADR-0015 (IoT actuation + HITL, future/proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md)
+- Decisions: [ADR-0001 (framework)](./ADRs/0001-use-strands-agents-framework.md), [ADR-0002 (context & state)](./ADRs/0002-context-management-and-durable-state.md), [ADR-0003 (frontend)](./ADRs/0003-frontend-angular-and-design-system.md), [ADR-0004 (backend API)](./ADRs/0004-backend-api-serverless-storage.md), [ADR-0005 (AgentCore deploy)](./ADRs/0005-agentcore-deployment-via-cdk.md), [ADR-0006 (prompt externalization)](./ADRs/0006-prompt-externalization-bedrock-prompt-management.md), [ADR-0007 (prompt/skill versioning)](./ADRs/0007-prompt-skill-versioning-long-running-tasks.md), [ADR-0008 (guardrails)](./ADRs/0008-guardrails-layered-defense-in-depth.md), [ADR-0009 (AWS Agent Toolkit dev tooling)](./ADRs/0009-aws-agent-toolkit-dev-tooling.md), [ADR-0010 (frontend hosting)](./ADRs/0010-frontend-hosting-s3-static-website.md), [ADR-0011 (OpenAPI contract-first)](./ADRs/0011-openapi-contract-first-client-api.md), [ADR-0012 (orchestrator + agent registry)](./ADRs/0012-orchestrator-lambda-declarative-agent-registry.md), [ADR-0013 (agent data-access boundary)](./ADRs/0013-agent-data-access-boundary.md), [ADR-0014 (Lambda container images)](./ADRs/0014-lambda-container-image-packaging.md), [ADR-0015 (IoT actuation + HITL, future/proposed)](./ADRs/0015-iot-actuation-and-human-in-the-loop.md), [ADR-0016 (garden context block + optional stake numbers)](./ADRs/0016-garden-context-block-and-optional-stake-number.md)
 - [Strands capability mapping](./strands-capability-mapping.md): Strands SDK capabilities mapped to Tendril's functional/non-functional requirements, docs-verified (supersedes ADR-0001 Appendix A)
 - [Data architecture](./data-architecture.md): entity/key design, session/context/memory management, the agent data-access boundary, and the full Lambda/API/Agent/Event/Data component inventory

@@ -573,6 +573,7 @@ def test_build_orchestrator_agent_wires_session_manager_with_goal_id_as_session_
     monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
     monkeypatch.setattr(handler, "Agent", FakeAgent)
     monkeypatch.setattr(handler, "AGENT_STATE_BUCKET_NAME", "tendril-dev-agent-state")
+    monkeypatch.setattr(handler, "_table", FakeTable())  # ADR-0016 garden-context read
 
     handler._build_orchestrator_agent("g1", "goal-1", None, None)
 
@@ -1283,3 +1284,117 @@ def test_handler_ignores_unknown_detail_type(monkeypatch):
     handler.handler({"detail-type": "something.else", "detail": {}}, None)
 
     assert fake_table.update_calls == []
+
+
+# --- ADR-0016 (CP-01): garden context injected into every turn ----------------------------
+
+GARDEN_METADATA = {
+    "pk": "GARDEN#g1",
+    "sk": "METADATA",
+    "name": "Bramhangaon Farm",
+    "geolocation": "Kopargaon, Maharashtra",
+    "climate_zone": "Semi-arid",
+    "vision": "A healthy 105-palm coconut block",
+    "context": {
+        "soil": "Heavy black calcareous/saline clay",
+        "irrigation": "16 mm drip off well water",
+        "stake_range": {"min": 1, "max": 105},
+        "notification_recipients": [{"name": "Recipient Zed", "e164": "+919800000001"}],
+    },
+}
+
+
+def test_render_garden_context_includes_facts_but_never_phone_numbers():
+    text = handler._render_garden_context(GARDEN_METADATA)
+    assert text.startswith("<garden_context>")
+    assert "Soil: Heavy black calcareous/saline clay" in text
+    assert "Irrigation: 16 mm drip off well water" in text
+    assert "Climate zone: Semi-arid" in text
+    assert "#1-#105" in text
+    assert "+919800000001" not in text
+    assert "Recipient Zed" not in text  # recipient names aren't rendered either
+
+
+def test_render_garden_context_empty_for_missing_garden():
+    assert handler._render_garden_context(None) == ""
+    assert handler._render_garden_context({}) == ""
+
+
+def test_load_garden_context_ignores_non_metadata_items(monkeypatch):
+    # Many existing fakes answer every get_item with a Goal item — never render that as a garden.
+    monkeypatch.setattr(
+        handler, "_table", FakeTable(get_item_response={"Item": {"description": "yellow leaves"}})
+    )
+    assert handler._load_garden_context("g1") == ""
+
+
+def test_load_garden_context_degrades_to_empty_on_read_failure(monkeypatch):
+    class _BrokenTable(FakeTable):
+        def get_item(self, Key):
+            raise RuntimeError("throttled")
+
+    monkeypatch.setattr(handler, "_table", _BrokenTable())
+    assert handler._load_garden_context("g1") == ""
+
+
+def test_build_orchestrator_agent_appends_garden_context_to_system_prompt(monkeypatch):
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    monkeypatch.setattr(handler, "AGENT_STATE_BUCKET_NAME", "tendril-dev-agent-state")
+    monkeypatch.setattr(
+        handler, "_table", FakeTable(responses_by_sk={"METADATA": {"Item": GARDEN_METADATA}})
+    )
+
+    handler._build_orchestrator_agent("g1", "goal-1", None, None)
+
+    system_prompt = FakeAgent.last_kwargs["system_prompt"]
+    assert system_prompt.startswith(handler.ORCHESTRATOR_SYSTEM_PROMPT)
+    assert "<garden_context>" in system_prompt
+    assert "calcareous" in system_prompt
+    assert "+919800000001" not in system_prompt
+
+
+def test_build_orchestrator_agent_without_garden_uses_plain_system_prompt(monkeypatch):
+    monkeypatch.setattr(handler, "BedrockModel", lambda **kw: object())
+    monkeypatch.setattr(handler, "Agent", FakeAgent)
+    monkeypatch.setattr(handler, "AGENT_STATE_BUCKET_NAME", "tendril-dev-agent-state")
+    monkeypatch.setattr(handler, "_table", FakeTable())
+
+    handler._build_orchestrator_agent("g1", "goal-1", None, None)
+
+    assert FakeAgent.last_kwargs["system_prompt"] == handler.ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_specialist_tool_prefixes_garden_context_onto_prompt(monkeypatch):
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+    context = handler._render_garden_context(GARDEN_METADATA)
+
+    tool_fn = handler._make_specialist_tool(
+        "agronomy", "arn:x", "desc", "g1", garden_context=context
+    )
+    tool_fn("Why are the lower leaves yellowing on #74?")
+
+    sent = json.loads(fake_client.calls[0]["payload"])["prompt"]
+    assert sent.startswith("<garden_context>")
+    assert sent.endswith("Why are the lower leaves yellowing on #74?")
+    assert "+919800000001" not in sent
+
+
+def test_build_tools_passes_garden_context_to_every_tool(monkeypatch):
+    monkeypatch.setattr(
+        handler,
+        "AGENT_MANIFEST",
+        {
+            "agronomy": {"arn": "arn:a", "description": "a"},
+            "pruning": {"arn": "arn:p", "description": "p"},
+        },
+    )
+    fake_client = FakeAgentCoreClient()
+    monkeypatch.setattr(handler, "_agentcore", fake_client)
+
+    for tool_fn in handler._build_tools("g1", garden_context="<garden_context>X</garden_context>"):
+        tool_fn("q")
+
+    prompts = [json.loads(c["payload"])["prompt"] for c in fake_client.calls]
+    assert prompts == ["<garden_context>X</garden_context>\n\nq"] * 2

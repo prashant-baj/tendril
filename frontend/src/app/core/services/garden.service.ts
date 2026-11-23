@@ -6,6 +6,7 @@ import { CLIENT_API_BASE_URL } from '../config/client-api.config';
 import {
   CreateGardenRequest,
   Garden,
+  GardenContext,
   GardenFact,
   GardenSummary,
   GardenWeather,
@@ -198,6 +199,8 @@ interface GardenDto {
   createdAt: string;
   /** Freshly-generated presigned GET url for this garden's banner photo, if one was set. */
   photoUrl?: string;
+  climateZone?: string;
+  context?: GardenContext;
 }
 
 /** Shape returned by `GET /gardens/{gardenId}/plants` (app/api/openapi.yaml's `Plant` schema). */
@@ -208,12 +211,16 @@ interface PlantDto {
   stage: string;
   /** Freshly-generated presigned GET url (OB-03), present only if the plant has a linked photo. */
   photoUrl?: string;
+  /** Stake number (ADR-0016), when the plant has one. */
+  stakeNo?: number;
 }
 
 function plantFromDto(dto: PlantDto): Plant {
   return {
     plantId: dto.plantId,
-    name: dto.species,
+    // A numbered plant reads as "#74 Coconut" so its stake number shows wherever the name does.
+    name: dto.stakeNo != null ? `#${dto.stakeNo} ${dto.species}` : dto.species,
+    ...(dto.stakeNo != null ? { stakeNo: dto.stakeNo } : {}),
     species: dto.species,
     variety: dto.variety ?? '',
     stage: dto.stage,
@@ -272,8 +279,9 @@ export class HttpGardenApi extends GardenApi {
           name: dto.name,
           geolocation: dto.geolocation,
           vision: dto.vision ?? '',
-          climateZone: '',
+          climateZone: dto.climateZone ?? '',
           photoUrl: dto.photoUrl,
+          ...(dto.context ? { context: dto.context } : {}),
         })),
       );
   }

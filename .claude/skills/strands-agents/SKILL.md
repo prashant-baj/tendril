@@ -172,7 +172,7 @@ from strands.vended_memory_stores import BedrockKnowledgeBaseStore
 store = BedrockKnowledgeBaseStore(
     name="garden_memory",
     writable=True,
-    scope=f"{user_id}:{garden_id}",       # THE multi-tenant isolation mechanism — use it directly
+    scope=f"{MEMORY_SCOPE}:{garden_id}",  # = "garden:{garden_id}" — per-garden (team-shared) isolation; THE tenancy mechanism, use it directly
     config={"knowledge_base_id": kb_id, "data_source_type": "CUSTOM", "data_source_id": ds_id},
 )
 agent = Agent(

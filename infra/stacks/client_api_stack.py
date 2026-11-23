@@ -66,7 +66,9 @@ class ClientApiStack(Stack):
             function_name=f"{prefix}-garden-handler",
             code=code,
             architecture=lambda_.Architecture.ARM_64,
-            timeout=Duration.seconds(10),
+            # 29s = API Gateway's own integration ceiling. Raised from 10s for bulkCreatePlants
+            # (ADR-0016): one transaction per stake number, up to 200 per call.
+            timeout=Duration.seconds(29),
             environment={
                 "APP_TABLE_NAME": app_table.table_name,
                 "MEDIA_BUCKET_NAME": media_bucket.bucket_name,

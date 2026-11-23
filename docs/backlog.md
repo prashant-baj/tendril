@@ -4,7 +4,16 @@ Single tracking sheet for every story across epics. Rows are ordered by **Rank**
 To reprioritize, move a row up/down and renumber the Rank column. Status reflects the repo audit
 on the date below — re-verify before starting a story.
 
-**Last updated:** 2026-09-13, latest (built, tested, and deployed **Phase 6 — Tasks & Activity on
+**Last updated:** 2026-11-23, latest: **new epic CP: Coconut Plantation (Bramhangaon)**
+(`stories/coconut-plantation.md`, design in `coconut-plantation-roadmap.md`) added as ranks
+38-48, this sprint's active work. Owner review decisions folded in: stake number is an
+**optional**, per-garden label; plants keep a **date-wise photo + log history**; a new **`GET
+/gardens/{id}/plants/{plantId}`** endpoint; memory-scope doc drift fixed (scope is per garden,
+`garden:{garden_id}`); **WhatsApp (CP-09) moves after auth + mobile-number mapping (CP-11)**;
+a new **Supervisor** agent is an architecture candidate (CP-07). Every CP story is ADR-gated (next
+ADR: 0016). Also cleared stale "Known drift" items (see below).
+
+**Earlier, 2026-09-13** (built, tested, and deployed **Phase 6 — Tasks & Activity on
 real data** (`stories/tasks-activity.md`, new epic: **TA-01**/**TA-02**). `GET
 /gardens/{id}/tasks` lists every task across every goal in one cheap `Query` (no GSI — real
 due-date scheduling stays Phase 7+ tracker work, so Tasks now groups by status, "To do"/"Done,"
@@ -165,7 +174,7 @@ not yet built. Also upgraded `strands-agents` from an unpinned, locally-stale 1.
 locally at all)
 
 **Status legend:** ✅ Done · ◐ Partial · ☐ To do
-**Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`) · **PA** = Plan Proposal, Conversational Approval & Photo Review (`stories/plan-approval.md`) · **TA** = Tasks & Activity on Real Data (`stories/tasks-activity.md`)
+**Epics:** **TF** = Technical Foundation (`stories/technical-foundation.md`) · **PG** = Prompt & Guardrail MVP (`stories/prompt-guardrail-mvp.md`) · **OB** = Garden Onboarding (`stories/garden-onboarding.md`) · **WS** = Walking Skeleton (`stories/walking-skeleton.md`) · **AF** = Agent Factory (`stories/agent-factory.md`) · **PA** = Plan Proposal, Conversational Approval & Photo Review (`stories/plan-approval.md`) · **TA** = Tasks & Activity on Real Data (`stories/tasks-activity.md`) · **TR/SR** = Tracker/Scheduler & Session Resume (`stories/tracker-scheduler.md`) · **CP** = Coconut Plantation (`stories/coconut-plantation.md`)
 
 **Active development plan:** [`docs/roadmap.md`](./roadmap.md) sequences OB → WS → AF → PA as a
 UI-first, incremental feature track (2026-09-12, extended 2026-09-13) — ranks 1-20 below reflect
@@ -173,15 +182,20 @@ that plan; rank 21 (AF-06) is a deliberately-deferred research note, not active 
 pre-existing `TF`/`PG` housekeeping (ranks 21+) is still real, open work; it's just no longer the
 immediate next thing.
 
+**Current sprint (from 2026-11-23):** the **CP** epic, ranks 38-48, sequenced by
+[`coconut-plantation-roadmap.md`](./coconut-plantation-roadmap.md). Work these in rank order;
+each needs its human-approved ADR before code (CLAUDE.md).
+
 ## Story board (at a glance)
 
 A quick-glance grouping of the same rows below by status — the ranked table remains the single
 source of truth (rank, dependencies, notes); this section is just a faster read. Regenerate it by
 eye whenever a Status cell changes below.
 
-**✅ Completed (24)**
+**✅ Completed (25)**
 OB-01 · OB-02 · OB-03 · WS-01 · WS-02 · WS-03 · WS-04 · WS-05 · AF-01 · PA-01 · PA-02 · PA-03 ·
-PA-04 · PA-05 · TA-01 · TA-02 · PG-06 · PG-05 · TF-02 · TF-03 · TF-04 · PG-01 · PG-03 · PG-04
+PA-04 · PA-05 · TA-01 · TA-02 · TR/SR (rank 20) · PG-06 · PG-05 · TF-02 · TF-03 · TF-04 · PG-01 ·
+PG-03 · PG-04
 
 **◐ In progress (10)**
 AF-03 (tools — manual dev smoke test pending) · AF-04 (real guardrail content now exists for 4
@@ -191,9 +205,14 @@ specialists; confirmed `pest_disease` over-block still needs the eval-scenario r
 (pre-commit gitleaks missing) · PG-02 (prompt scope/refusal framing not yet added) · TF-07 (no
 prod deploy path yet) · TF-06 (frontend has no formal per-screen stories)
 
-**☐ Backlog (2, ranked)**
-1. *(not yet storied)* Real session-resume + tracker/scheduler + `TasksDueIndex` (rank 20)
-2. **AF-06** — external data-source tools for specialists, researched but deferred (rank 21)
+**☐ Backlog (12, ranked)**
+1. **CP-01 → CP-08** (ranks 38-45): Coconut Plantation MVP: garden context, bulk plants
+   (optional stake no.), plant photo/log history, migration, plant endpoint + UI, garden activity
+   log, Supervisor + garden assessment, upload auto-map. **Current sprint.**
+2. **CP-11** (rank 46): mobile-number auth + mobile ↔ user ↔ garden mapping
+3. **CP-10** (rank 47): Marathi + coconut agronomy reframe
+4. **CP-09** (rank 48): WhatsApp intake + reminders (after CP-11)
+5. **AF-06**: external data-source tools for specialists, researched but deferred (rank 21)
 
 **Not on the board:** AF-02 (rank 9) — deliberately **skipped**, not backlog: a pure rename with
 no new capability, superseded by `vision.json` already proving the "one codebase, many
@@ -205,10 +224,14 @@ specialists" pattern.
   live registry entry; its over-block retune history no longer applies. `scripts/eval_guardrail.py`
   now defaults to `vision-guardrail`. Re-verify the deployed `hello-guardrail` Bedrock resource is
   actually torn down after the next `cdk deploy tendril-<env>-guardrails`.
-- **`.mcp.json` and `.pre-commit-config.yaml` are missing on disk** — they were never added (the
-  device bridge can't write those protected filenames). This regresses TF-05 / TF-01 / TF-08.
-- **Stale `.git/index.lock`** is present and blocks `git add`/`commit`. Remove it first
-  (`del ".git\index.lock"`); the bridge can't delete it.
+- ~~`.mcp.json` and `.pre-commit-config.yaml` are missing on disk~~: **both now present
+  (verified 2026-11-23).** Review their contents and close the matching TF-05 / TF-01 / TF-08 gaps.
+- ~~Stale `.git/index.lock`~~: **gone (verified 2026-11-23).**
+- **Memory-scope doc drift, fixed 2026-11-23:** `data-architecture.md` and
+  `strands-capability-mapping.md` said Garden Memory is scoped `{user_id}:{garden_id}`; the code
+  (`agents/hello_agent/agent.py`, `MEMORY_SCOPE` default `"garden"`) scopes it
+  `garden:{garden_id}`. Per-garden is the intended design (a team shares one garden's memory),
+  and the docs now match the code.
 
 | Rank | Epic | ID | Story | Status | Depends on | Notes / gaps |
 |-----:|------|----|-------|:------:|------------|--------------|
@@ -249,6 +272,17 @@ specialists" pattern.
 | 35 | PG | PG-03 | Provision the Bedrock Guardrail as IaC (policy-as-data) | ✅ | TF-03 | `guardrails/hello_guardrail.json` + `GuardrailsStack` → `CfnGuardrail`/version; deployed (retune pending, see PG-07). |
 | 36 | PG | PG-04 | Attach & resolve the guardrail at runtime | ✅ | PG-03 | Runtime resolves by `GUARDRAIL_NAME`, attaches to `BedrockModel`, fail-open MVP; scoped guardrail IAM. |
 | 37 | OB | OB-03 | Show the real plant photo (not a generic icon) | ✅ | OB-02 | `stories/garden-onboarding.md`. `createPlant`/`listPlants` now resolve a fresh presigned **GET** `photoUrl` per plant with a linked photo, reusing PA-03/PA-04's `_generate_download_url` helper rather than duplicating it. **Found + fixed a real gap along the way:** `create_plant` only ever set `Media.plant_id` (one-directional), never `Plant.media_id` — so there was no way to look a plant's photo back up at all; added `media_id` onto the `Plant` item itself (mirrors `Goal.media_ids`). Frontend: `PlantCardComponent`/`PlantRowComponent` render the real photo with an icon fallback on load error. Deployed + live-verified (2026-09-13): created a plant with a real photo, confirmed both `createPlant` and a subsequent `listPlants` resolved a working presigned url. |
+| 38 | CP | CP-01 | Onboard the Coconut Garden + `context` block (soil, irrigation, intercrop, layout, optional stake range, notification recipients) | ◐ | Tendril P1-2 | **ADR-0016 Accepted.** Built + tested 2026-11-23: `context`/`climateZone` on create/get, `PATCH /gardens/{id}`, context injected into orchestrator system prompt + every specialist prompt (phone numbers never sent to a model). **Open:** deploy `client-api` + `agentcore`, dev smoke test. |
+| 39 | CP | CP-02 | Bulk-add Plants, **optional** per-garden stake number | ◐ | CP-01 | **ADR-0016.** Built + tested 2026-11-23: optional `stakeNo` (per-garden `STAKE#` lookup, 409 on duplicate), optional `stage`, idempotent `POST /plants/bulk`, `listPlants` stake ordering + pagination + batched photo lookup, delete frees the number; Client API Lambda timeout 10s → 29s. **Open:** deploy + bulk-add #1–105 in dev. |
+| 40 | CP | CP-03 | Plant history: **date-wise photos + logs** (model + write) | ☐ | CP-02 | ADR-gated (plant history entity). Append-only; dated by observation date; an entry is photo(s) and/or status and/or note. Closes the carried-forward "progress log" gap. |
+| 41 | CP | CP-04 | Migration script (DynamoDB + S3 + KB seed) from the Bramhangaon archive | ☐ | CP-01, CP-02, CP-03 | Source data lives on the owner's machine (OneDrive archive + `build_tracker.py`), not in the repo. Model-free; idempotent; dry-run + verify. |
+| 42 | CP | CP-05 | **`GET /gardens/{id}/plants/{plantId}`** + plant-detail UI | ☐ | CP-03, CP-04 | New endpoint (only `DELETE` exists on that path today): plant details + paginated date-wise history with presigned URLs; before→after compare. |
+| 43 | CP | CP-06 | Garden activity log (garden-scoped tasks/events + recurring-due) | ☐ | CP-01 | ADR-gated. The tracker handles one-off due dates only; the recurring rule is new. |
+| 44 | CP | CP-07 | Garden-state assessment + **Supervisor agent** (new) | ☐ | CP-05, CP-06 | ADR-gated. Supervisor is a new **architecture candidate** (`architecture.md` §3) above the orchestrator; deterministic rollup + scheduled agenda; submits garden-scoped goals to the existing orchestrator. |
+| 45 | CP | CP-08 | Upload → auto-map to a plant (by stake number) | ☐ | CP-03 | ADR-gated. Auto-files only on a confident match to an existing `stake_no` in the garden; plants without a stake number are picked by hand; out-of-range reads use a guarded, flagged create. |
+| 46 | CP | CP-11 | Mobile-number auth (Cognito OTP) + mobile ↔ user ↔ garden mapping | ☐ | CP-01 | ADR-gated (auth/tenancy). **Moved ahead of CP-09**: WhatsApp needs this mapping to resolve senders. Memory scope stays per garden. |
+| 47 | CP | CP-10 | Marathi everywhere + coconut agronomy reframe | ☐ | CP-07 | ADR-gated (commercial scope + localization; revisits project-context §11). |
+| 48 | CP | CP-09 | WhatsApp intake + reminders | ☐ | CP-06, CP-07, CP-08, CP-11 | ADR-gated (extends ADR-0004). **Built after CP-11.** Supersedes the earlier "WhatsApp deprioritized" note below. |
 
 ## Carried forward (future epics — not yet storied)
 
@@ -266,9 +300,14 @@ over time (PA-05 already lets one check-in give feedback and optionally revise t
 log needs rank 20's tracker first — PA-03, rank 14, only builds the *display* mechanism).
 Add as feature stories when scoped, then insert into the table with a Rank.
 
-**Explicitly deprioritized:** the **WhatsApp (and email) notification/reply channel** — in scope
-per `project-context.md`'s vision, but pushed behind UI-based HITL and notifications (ADR-0001
-refinement, 2026-09-12). Don't pick this up before the UI channel is built and working.
+**Now storied in the CP epic (2026-11-23):** auth/Cognito (**CP-11**), the repeated progress log
+(**CP-03**, as date-wise photo + log history), due-date/recurring garden activities (**CP-06**),
+and the WhatsApp channel (**CP-09**).
+
+**WhatsApp re-prioritized (2026-11-23):** previously *explicitly deprioritized* behind UI-based
+HITL and notifications (ADR-0001 refinement, 2026-09-12). It is now scheduled as **CP-09**, to be
+completed **after CP-11** (authentication + mobile-number mapping). The CP-09 ADR formally
+supersedes the 2026-09-12 deprioritization. Email stays deprioritized.
 
 ## How to use this sheet
 

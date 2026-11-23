@@ -181,6 +181,65 @@ def _summarize(text: str, max_len: int = 4000) -> str:
     return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "…"
 
 
+GARDEN_CONTEXT_FIELDS = (
+    ("soil", "Soil"),
+    ("irrigation", "Irrigation"),
+    ("intercrop", "Intercrop / ground cover"),
+    ("layout", "Layout"),
+    ("notes", "Other notes"),
+)
+
+
+def _render_garden_context(garden: dict[str, Any] | None) -> str:
+    """Renders a Garden item as a compact `<garden_context>` block (ADR-0016), or "" when there
+    is nothing to say. `notification_recipients` are deliberately never rendered: phone numbers
+    are personal data no model needs to reason with."""
+    if not garden:
+        return ""
+    lines: list[str] = []
+    for key, label in (
+        ("name", "Garden"),
+        ("geolocation", "Location"),
+        ("climate_zone", "Climate zone"),
+        ("vision", "Owner's vision"),
+    ):
+        if garden.get(key):
+            lines.append(f"{label}: {garden[key]}")
+    context = garden.get("context") or {}
+    for key, label in GARDEN_CONTEXT_FIELDS:
+        if context.get(key):
+            lines.append(f"{label}: {context[key]}")
+    stake_range = context.get("stake_range")
+    if stake_range:
+        lines.append(
+            f"Plants are tagged with numbered stakes #{int(stake_range['min'])}"
+            f"-#{int(stake_range['max'])}"
+        )
+    if not lines:
+        return ""
+    return (
+        "<garden_context>\n"
+        + "\n".join(lines)
+        + "\n</garden_context>\nTake these whole-garden facts into account in your advice."
+    )
+
+
+def _load_garden_context(garden_id: str) -> str:
+    """The rendered garden context for this turn. Best-effort: a missing or unreadable Garden
+    item just means no context block, never a failed turn (ADR-0016)."""
+    try:
+        garden = (
+            _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"}).get("Item")
+        )
+    except Exception:
+        logger.exception("garden_context_load_failed garden_id=%s", garden_id)
+        return ""
+    # Guard on the item's own sk: only a real Garden METADATA item is rendered.
+    if not garden or garden.get("sk") != "METADATA":
+        return ""
+    return _render_garden_context(garden)
+
+
 def _make_specialist_tool(
     name: str,
     arn: str,
@@ -189,6 +248,7 @@ def _make_specialist_tool(
     image_url: str | None = None,
     image_format: str | None = None,
     trace: list[dict[str, Any]] | None = None,
+    garden_context: str = "",
 ):
     """Wraps one registered specialist as a Strands tool calling InvokeAgentRuntime (ADR-0012).
 
@@ -205,7 +265,10 @@ def _make_specialist_tool(
         # gardenId (AF-05): the specialist's own memory scope key — every specialist can receive
         # it uniformly; only ones with memory.enabled actually use it (config-driven, not
         # specialist-specific code, same posture as imageUrl/imageFormat above).
-        payload: dict[str, Any] = {"prompt": prompt, "gardenId": garden_id}
+        # ADR-0016: whole-garden facts ride along as part of the prompt itself, so specialists
+        # need no code/template change to receive them (ADR-0013: data arrives as input).
+        full_prompt = f"{garden_context}\n\n{prompt}" if garden_context else prompt
+        payload: dict[str, Any] = {"prompt": full_prompt, "gardenId": garden_id}
         if image_url and image_format:
             payload["imageUrl"] = image_url
             payload["imageFormat"] = image_format
@@ -254,10 +317,18 @@ def _build_tools(
     image_url: str | None = None,
     image_format: str | None = None,
     trace: list[dict[str, Any]] | None = None,
+    garden_context: str = "",
 ) -> list:
     return [
         _make_specialist_tool(
-            name, entry["arn"], entry["description"], garden_id, image_url, image_format, trace
+            name,
+            entry["arn"],
+            entry["description"],
+            garden_id,
+            image_url,
+            image_format,
+            trace,
+            garden_context=garden_context,
         )
         for name, entry in AGENT_MANIFEST.items()
     ]
@@ -604,10 +675,21 @@ def _build_orchestrator_agent(
         session_id=goal_id,
         storage=S3Storage(bucket=AGENT_STATE_BUCKET_NAME, prefix="orchestrator-sessions/"),
     )
+    # ADR-0016: garden context goes in the system prompt, which is rebuilt every invocation and
+    # is never written into the session's message history, so it is always current and never
+    # duplicated across resumed turns.
+    garden_context = _load_garden_context(garden_id)
+    system_prompt = (
+        f"{ORCHESTRATOR_SYSTEM_PROMPT}\n\n{garden_context}"
+        if garden_context
+        else ORCHESTRATOR_SYSTEM_PROMPT
+    )
     agent = Agent(
         model=BedrockModel(**({"model_id": MODEL_ID} if MODEL_ID else {})),
-        system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
-        tools=_build_tools(garden_id, image_url, image_format, trace),
+        system_prompt=system_prompt,
+        tools=_build_tools(
+            garden_id, image_url, image_format, trace, garden_context=garden_context
+        ),
         session_manager=session_manager,
         trace_attributes={"session.id": goal_id, "garden.id": garden_id},
     )

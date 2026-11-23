@@ -75,6 +75,16 @@ integration (ClientApiStack, ADR-0011) — one Lambda for the whole Client API f
   (no cross-package Python imports in this monorepo). `Event` is intentionally UI-agnostic (no
   icon/tone/title baked in server-side) — the frontend maps `type` to presentation.
 
+- **Phase A of the coconut-plantation epic (CP-01/CP-02, ADR-0016):** a Garden carries an optional
+  structured `context` map (soil, irrigation, intercrop, layout, notes, `stakeRange`,
+  `notificationRecipients`) plus `climateZone`, settable on `createGarden` and replaceable via the
+  new `updateGarden` (`PATCH /gardens/{id}`). A Plant carries an optional `stakeNo` — the farm's
+  own physical label, unique *within a garden* — enforced by a `GARDEN#{id}/STAKE#{no:05d}` lookup
+  item written in the same transaction as the Plant (a duplicate → 409). `bulkCreatePlants`
+  creates a stake-number range idempotently (existing numbers are skipped). A stake number outside
+  the garden's `stakeRange` is accepted but flagged `outOfRange`. `listPlants` orders by stake
+  number, follows `LastEvaluatedKey`, and resolves hero photos with one `BatchGetItem`.
+
 No auth yet (ADR-0004's seam is still open): `X-User-Id` is a per-browser anonymous identifier
 the frontend generates and persists (garden-onboarding.md's stories), not a verified identity.
 This handler only requires the header be present.
@@ -85,6 +95,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -125,6 +136,18 @@ APPROVAL_FOLLOWUP_OFFSET_DAYS = 3
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 WEATHER_REQUEST_TIMEOUT_SECONDS = 8
+
+# ADR-0016: Garden `context` block limits — keep the item small and the injected prompt short.
+CONTEXT_TEXT_FIELDS = ("soil", "irrigation", "intercrop", "layout", "notes")
+CONTEXT_TEXT_MAX_CHARS = 1000
+CONTEXT_MAX_RECIPIENTS = 10
+RECIPIENT_NAME_MAX_CHARS = 100
+E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
+CLIMATE_ZONE_MAX_CHARS = 100
+# ADR-0016: bulk-add cap per call (105 palms comfortably fits; bounded so one request can't run
+# past API Gateway's 29s integration timeout).
+BULK_PLANTS_MAX = 200
+STAKE_NO_MAX = 99999  # matches the zero-padded 5-digit STAKE# sort key
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
@@ -193,6 +216,132 @@ def _get_header(headers: dict[str, str] | None, name: str) -> str | None:
     return None
 
 
+def _parse_context(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Validates an API-shaped (camelCase) Garden `context` block and returns its storage
+    (snake_case) form, or an error message (ADR-0016). Every field is optional; an empty object
+    is valid and stored as an empty map."""
+    if not isinstance(raw, dict):
+        return None, "context must be a JSON object"
+    allowed = set(CONTEXT_TEXT_FIELDS) | {"stakeRange", "notificationRecipients"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        return None, f"context has unknown field(s): {', '.join(unknown)}"
+
+    stored: dict[str, Any] = {}
+    for field in CONTEXT_TEXT_FIELDS:
+        value = raw.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return None, f"context.{field} must be a string"
+        if len(value) > CONTEXT_TEXT_MAX_CHARS:
+            return None, f"context.{field} must be at most {CONTEXT_TEXT_MAX_CHARS} characters"
+        if value.strip():
+            stored[field] = value.strip()
+
+    stake_range = raw.get("stakeRange")
+    if stake_range is not None:
+        if not isinstance(stake_range, dict):
+            return None, "context.stakeRange must be an object with min and max"
+        lo, hi = stake_range.get("min"), stake_range.get("max")
+        if not (_is_positive_int(lo) and _is_positive_int(hi)) or lo > hi or hi > STAKE_NO_MAX:
+            return None, (
+                f"context.stakeRange needs integer min <= max, each between 1 and {STAKE_NO_MAX}"
+            )
+        stored["stake_range"] = {"min": lo, "max": hi}
+
+    recipients = raw.get("notificationRecipients")
+    if recipients is not None:
+        if not isinstance(recipients, list):
+            return None, "context.notificationRecipients must be an array"
+        if len(recipients) > CONTEXT_MAX_RECIPIENTS:
+            return None, (
+                f"context.notificationRecipients allows at most {CONTEXT_MAX_RECIPIENTS} entries"
+            )
+        parsed = []
+        for r in recipients:
+            if not isinstance(r, dict):
+                return None, "each notification recipient must be an object"
+            name, e164 = r.get("name"), r.get("e164")
+            if not isinstance(name, str) or not name.strip():
+                return None, "each notification recipient needs a name"
+            if len(name) > RECIPIENT_NAME_MAX_CHARS:
+                return None, (
+                    f"recipient name must be at most {RECIPIENT_NAME_MAX_CHARS} characters"
+                )
+            if not isinstance(e164, str) or not E164_PATTERN.match(e164):
+                # Deliberately doesn't echo the number back — it's personal data.
+                return None, "each notification recipient needs an E.164 number, e.g. +919800000000"
+            parsed.append({"name": name.strip(), "e164": e164})
+        stored["notification_recipients"] = parsed
+    return stored, None
+
+
+def _context_to_api(stored: dict[str, Any] | None) -> dict[str, Any]:
+    """Storage (snake_case, DynamoDB Decimal numbers) → API (camelCase, ints) for a Garden's
+    `context` block."""
+    stored = stored or {}
+    out: dict[str, Any] = {f: stored[f] for f in CONTEXT_TEXT_FIELDS if stored.get(f)}
+    if stored.get("stake_range"):
+        out["stakeRange"] = {
+            "min": int(stored["stake_range"]["min"]),
+            "max": int(stored["stake_range"]["max"]),
+        }
+    if stored.get("notification_recipients"):
+        out["notificationRecipients"] = [
+            {"name": r["name"], "e164": r["e164"]} for r in stored["notification_recipients"]
+        ]
+    return out
+
+
+def _parse_climate_zone(raw: Any) -> tuple[str | None, str | None]:
+    if not isinstance(raw, str):
+        return None, "climateZone must be a string if provided"
+    if len(raw) > CLIMATE_ZONE_MAX_CHARS:
+        return None, f"climateZone must be at most {CLIMATE_ZONE_MAX_CHARS} characters"
+    return raw.strip(), None
+
+
+def _is_positive_int(value: Any) -> bool:
+    # bool is an int subclass in Python — `true` must not pass as stake number 1.
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _stake_sk(stake_no: int) -> str:
+    """Zero-padded so STAKE# items sort numerically under the garden partition (ADR-0016)."""
+    return f"STAKE#{stake_no:05d}"
+
+
+def _is_transaction_condition_failure(error: Exception, index: int) -> bool:
+    """True when a TransactWriteItems call was cancelled because the item at `index` failed its
+    ConditionExpression — the lookup-item uniqueness check (ADR-0016)."""
+    response = getattr(error, "response", None) or {}
+    if response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    reasons = response.get("CancellationReasons") or []
+    return index < len(reasons) and reasons[index].get("Code") == "ConditionalCheckFailed"
+
+
+def _load_stake_range(garden_id: str) -> dict[str, int] | None:
+    """The garden's optional `context.stakeRange` (ints), or None. Best-effort: a read failure
+    just means the out-of-range flag can't be computed, never a failed plant write."""
+    try:
+        item = (
+            _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"}).get("Item")
+        )
+    except Exception:
+        logger.exception("Failed to read stake range for garden %s", garden_id)
+        return None
+    stake_range = ((item or {}).get("context") or {}).get("stake_range")
+    if not stake_range:
+        return None
+    return {"min": int(stake_range["min"]), "max": int(stake_range["max"])}
+
+
+def _out_of_range(stake_no: int, stake_range: dict[str, int] | None) -> bool:
+    return bool(stake_range) and not (stake_range["min"] <= stake_no <= stake_range["max"])
+
+
 def create_garden(event: dict[str, Any]) -> dict[str, Any]:
     user_id = _get_header(event.get("headers"), "X-User-Id")
     if not user_id:
@@ -220,6 +369,16 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
         return _error(400, "gardenId must be a string if provided")
     if media_id is not None and not isinstance(media_id, str):
         return _error(400, "mediaId must be a string if provided")
+    context = None
+    if payload.get("context") is not None:
+        context, err = _parse_context(payload["context"])
+        if err:
+            return _error(400, err)
+    climate_zone = None
+    if payload.get("climateZone") is not None:
+        climate_zone, err = _parse_climate_zone(payload["climateZone"])
+        if err:
+            return _error(400, err)
 
     # A garden photo (if any) has to be uploaded to `POST /gardens/{gardenId}/media` *before*
     # this call even happens (that endpoint needs an existing gardenId) — the frontend generates
@@ -240,6 +399,10 @@ def create_garden(event: dict[str, Any]) -> dict[str, Any]:
         garden_item["vision"] = vision
     if media_id:
         garden_item["media_id"] = media_id
+    if context is not None:
+        garden_item["context"] = context
+    if climate_zone:
+        garden_item["climate_zone"] = climate_zone
     ownership_item = {
         "pk": f"USER#{user_id}",
         "sk": f"GARDEN#{garden_id}",
@@ -354,6 +517,106 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
     return _response(201, {"uploadUrl": upload_url, "mediaId": media_id})
 
 
+class DuplicateStakeError(Exception):
+    """The garden already has a plant with this stake number (ADR-0016)."""
+
+
+STAGE_MAX_CHARS = 50
+
+
+def _parse_stage(raw: Any) -> tuple[str, str | None]:
+    if raw is None:
+        return "new", None
+    if not isinstance(raw, str) or not raw.strip():
+        return "", "stage must be a non-empty string if provided"
+    if len(raw) > STAGE_MAX_CHARS:
+        return "", f"stage must be at most {STAGE_MAX_CHARS} characters"
+    return raw.strip(), None
+
+
+def _write_plant(
+    garden_id: str,
+    *,
+    species: str,
+    variety: str | None,
+    stage: str,
+    stake_no: int | None,
+    media_id: str | None,
+) -> str:
+    """Writes one Plant and returns its new `plant_id`. Shared by `createPlant` and
+    `bulkCreatePlants` so both enforce the same rules.
+
+    - No stake number, no photo: a single `put_item` (unchanged from OB-02).
+    - Otherwise one transaction: the Plant, plus a `STAKE#` lookup item guarded by
+      `attribute_not_exists(pk)` (per-garden uniqueness, ADR-0016) and/or the Media link guarded
+      by `attribute_exists(pk)` (OB-02). Raises `DuplicateStakeError` when the stake lookup's
+      condition is what cancelled the transaction; any other failure propagates.
+    """
+    plant_id = str(uuid.uuid4())
+    plant_item: dict[str, Any] = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"PLANT#{plant_id}",
+        "plant_id": plant_id,
+        "garden_id": garden_id,
+        "species": species,
+        "stage": stage,
+    }
+    if variety:
+        plant_item["variety"] = variety
+    if stake_no is not None:
+        plant_item["stake_no"] = stake_no
+    if media_id:
+        # Stored on the Plant itself (not just Media.plant_id) so list_plants/this response can
+        # look up the linked photo by direct key — mirrors Goal.media_ids' role for goals.
+        plant_item["media_id"] = media_id
+
+    if stake_no is None and not media_id:
+        _get_table().put_item(Item=plant_item)
+        return plant_id
+
+    items: list[dict[str, Any]] = [
+        {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(plant_item)}}
+    ]
+    stake_index = None
+    if stake_no is not None:
+        stake_index = len(items)
+        items.append(
+            {
+                "Put": {
+                    "TableName": APP_TABLE_NAME,
+                    "Item": _to_dynamo(
+                        {
+                            "pk": f"GARDEN#{garden_id}",
+                            "sk": _stake_sk(stake_no),
+                            "stake_no": stake_no,
+                            "plant_id": plant_id,
+                        }
+                    ),
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                }
+            }
+        )
+    if media_id:
+        items.append(
+            {
+                "Update": {
+                    "TableName": APP_TABLE_NAME,
+                    "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}),
+                    "UpdateExpression": "SET plant_id = :pid",
+                    "ExpressionAttributeValues": {":pid": {"S": plant_id}},
+                    "ConditionExpression": "attribute_exists(pk)",
+                }
+            }
+        )
+    try:
+        _get_client().transact_write_items(TransactItems=items)
+    except Exception as e:
+        if stake_index is not None and _is_transaction_condition_failure(e, stake_index):
+            raise DuplicateStakeError() from e
+        raise
+    return plant_id
+
+
 def create_plant(event: dict[str, Any]) -> dict[str, Any]:
     user_id = _get_header(event.get("headers"), "X-User-Id")
     if not user_id:
@@ -379,47 +642,27 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
         return _error(400, "variety must be a string if provided")
     if media_id is not None and not isinstance(media_id, str):
         return _error(400, "mediaId must be a string if provided")
-
-    plant_id = str(uuid.uuid4())
-    plant_item = {
-        "pk": f"GARDEN#{garden_id}",
-        "sk": f"PLANT#{plant_id}",
-        "plant_id": plant_id,
-        "garden_id": garden_id,
-        "species": species,
-        "stage": "new",
-    }
-    if variety:
-        plant_item["variety"] = variety
-    if media_id:
-        # Stored on the Plant itself (not just Media.plant_id) so list_plants/this response can
-        # look up the linked photo by direct GetItem — mirrors Goal.media_ids' role for goals.
-        plant_item["media_id"] = media_id
+    stage, err = _parse_stage(payload.get("stage"))
+    if err:
+        return _error(400, err)
+    stake_no = payload.get("stakeNo")
+    if stake_no is not None and not (_is_positive_int(stake_no) and stake_no <= STAKE_NO_MAX):
+        return _error(400, f"stakeNo must be an integer between 1 and {STAKE_NO_MAX}")
 
     try:
-        if media_id:
-            _get_client().transact_write_items(
-                TransactItems=[
-                    {"Put": {"TableName": APP_TABLE_NAME, "Item": _to_dynamo(plant_item)}},
-                    {
-                        "Update": {
-                            "TableName": APP_TABLE_NAME,
-                            "Key": _to_dynamo(
-                                {"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}
-                            ),
-                            "UpdateExpression": "SET plant_id = :pid",
-                            "ExpressionAttributeValues": {":pid": {"S": plant_id}},
-                            "ConditionExpression": "attribute_exists(pk)",
-                        }
-                    },
-                ]
-            )
-        else:
-            _get_table().put_item(Item=plant_item)
+        plant_id = _write_plant(
+            garden_id,
+            species=species,
+            variety=variety,
+            stage=stage,
+            stake_no=stake_no,
+            media_id=media_id,
+        )
+    except DuplicateStakeError:
+        return _error(409, f"stake number {stake_no} is already used in this garden")
     except Exception as e:
         logger.error(
-            "Failed to write plant %s for garden %s: %s | response=%s",
-            plant_id,
+            "Failed to write plant for garden %s: %s | response=%s",
             garden_id,
             e,
             getattr(e, "response", None),
@@ -427,6 +670,10 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
         return _error(500, "could not create plant")
 
     result: dict[str, Any] = {"plantId": plant_id}
+    if stake_no is not None:
+        result["stakeNo"] = stake_no
+        if _out_of_range(stake_no, _load_stake_range(garden_id)):
+            result["outOfRange"] = True
     if media_id:
         media_item = (
             _get_table()
@@ -444,32 +691,175 @@ def list_plants(event: dict[str, Any]) -> dict[str, Any]:
         return _error(400, "gardenId is required")
 
     try:
-        resp = _get_table().query(
+        items = _query_all(
             KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
             & Key("sk").begins_with("PLANT#")
+        )
+        s3_keys = _batch_get_media_keys(
+            garden_id, [item["media_id"] for item in items if item.get("media_id")]
         )
     except Exception:
         logger.exception("Failed to list plants for garden %s", garden_id)
         return _error(500, "could not list plants")
 
+    # ADR-0016: block/grid order — stake number ascending, unnumbered plants last (stable, so
+    # unnumbered plants keep the query's own order among themselves).
+    items.sort(key=lambda i: (i.get("stake_no") is None, int(i.get("stake_no") or 0)))
+
     plants = []
-    for item in resp.get("Items", []):
-        plant = {
+    for item in items:
+        plant: dict[str, Any] = {
             "plantId": item["plant_id"],
             "species": item["species"],
             "variety": item.get("variety", ""),
             "stage": item.get("stage", "new"),
         }
-        if item.get("media_id"):
-            media_item = (
-                _get_table()
-                .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{item['media_id']}"})
-                .get("Item")
-            )
-            if media_item:
-                plant["photoUrl"] = _generate_download_url(media_item["s3_key"])
+        if item.get("stake_no") is not None:
+            plant["stakeNo"] = int(item["stake_no"])
+        s3_key = s3_keys.get(item.get("media_id") or "")
+        if s3_key:
+            plant["photoUrl"] = _generate_download_url(s3_key)
         plants.append(plant)
     return _response(200, plants)
+
+
+def _query_all(**kwargs: Any) -> list[dict[str, Any]]:
+    """`Table.query` following `LastEvaluatedKey` to the end, so a 1 MB page boundary never
+    silently truncates the result (ADR-0016, plantation scale)."""
+    items: list[dict[str, Any]] = []
+    while True:
+        resp = _get_table().query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return items
+        kwargs["ExclusiveStartKey"] = last_key
+
+
+BATCH_GET_MAX_KEYS = 100  # DynamoDB BatchGetItem's per-request limit
+BATCH_GET_MAX_ATTEMPTS = 5
+
+
+def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str]:
+    """media_id -> s3_key for the given Media records, via `BatchGetItem` in chunks of 100
+    instead of one `GetItem` per plant (ADR-0016). Retries `UnprocessedKeys` a bounded number of
+    times; a Media record that's genuinely missing is simply absent from the result."""
+    from boto3.dynamodb.types import TypeDeserializer
+
+    deserializer = TypeDeserializer()
+    result: dict[str, str] = {}
+    unique_ids = list(dict.fromkeys(media_ids))
+    for start in range(0, len(unique_ids), BATCH_GET_MAX_KEYS):
+        chunk = unique_ids[start : start + BATCH_GET_MAX_KEYS]
+        request: dict[str, Any] = {
+            APP_TABLE_NAME: {
+                "Keys": [
+                    _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{mid}"}) for mid in chunk
+                ],
+                "ProjectionExpression": "media_id, s3_key",
+            }
+        }
+        for _ in range(BATCH_GET_MAX_ATTEMPTS):
+            resp = _get_client().batch_get_item(RequestItems=request)
+            for raw in resp.get("Responses", {}).get(APP_TABLE_NAME, []):
+                item = {k: deserializer.deserialize(v) for k, v in raw.items()}
+                if item.get("media_id") and item.get("s3_key"):
+                    result[item["media_id"]] = item["s3_key"]
+            request = resp.get("UnprocessedKeys") or {}
+            if not request:
+                break
+        else:
+            logger.warning(
+                "batch_get_media_unprocessed garden_id=%s remaining=%d",
+                garden_id,
+                len(request.get(APP_TABLE_NAME, {}).get("Keys", [])),
+            )
+    return result
+
+
+def bulk_create_plants(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST /gardens/{gardenId}/plants/bulk` (CP-02, ADR-0016): creates one Plant per stake
+    number in `[stakeFrom, stakeTo]`, each through the same transactional write as `createPlant`.
+    Idempotent — a stake number already used in this garden lands in `skipped`, never duplicated
+    or overwritten — so a partial run can simply be retried."""
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    species = payload.get("species")
+    variety = payload.get("variety")
+    if not isinstance(species, str) or not species.strip():
+        return _error(400, "species is required")
+    if variety is not None and not isinstance(variety, str):
+        return _error(400, "variety must be a string if provided")
+    stage, err = _parse_stage(payload.get("stage"))
+    if err:
+        return _error(400, err)
+    stake_from, stake_to = payload.get("stakeFrom"), payload.get("stakeTo")
+    if not (_is_positive_int(stake_from) and _is_positive_int(stake_to)):
+        return _error(400, "stakeFrom and stakeTo must be positive integers")
+    if stake_from > stake_to or stake_to > STAKE_NO_MAX:
+        return _error(400, f"stakeFrom must be <= stakeTo, and stakeTo <= {STAKE_NO_MAX}")
+    if stake_to - stake_from + 1 > BULK_PLANTS_MAX:
+        return _error(400, f"at most {BULK_PLANTS_MAX} plants per call")
+
+    try:
+        garden = (
+            _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"}).get("Item")
+        )
+    except Exception:
+        logger.exception("Failed to read garden %s for bulk plant create", garden_id)
+        return _error(500, "could not read garden")
+    if not garden:
+        return _error(404, "garden not found")
+    stake_range = (garden.get("context") or {}).get("stake_range")
+    stake_range = (
+        {"min": int(stake_range["min"]), "max": int(stake_range["max"])} if stake_range else None
+    )
+
+    created: list[dict[str, Any]] = []
+    skipped: list[int] = []
+    for stake_no in range(stake_from, stake_to + 1):
+        try:
+            plant_id = _write_plant(
+                garden_id,
+                species=species,
+                variety=variety,
+                stage=stage,
+                stake_no=stake_no,
+                media_id=None,
+            )
+        except DuplicateStakeError:
+            skipped.append(stake_no)
+            continue
+        except Exception as e:
+            logger.error(
+                "bulk_plant_write_failed garden_id=%s stake_no=%d created=%d: %s | response=%s",
+                garden_id,
+                stake_no,
+                len(created),
+                e,
+                getattr(e, "response", None),
+            )
+            # Everything already created stays (idempotent retry picks up where this stopped).
+            return _error(500, f"could not create plant #{stake_no}; retry to resume")
+        entry: dict[str, Any] = {"plantId": plant_id, "stakeNo": stake_no}
+        if _out_of_range(stake_no, stake_range):
+            entry["outOfRange"] = True
+        created.append(entry)
+
+    return _response(201, {"created": created, "skipped": skipped})
 
 
 def delete_plant(event: dict[str, Any]) -> dict[str, Any]:
@@ -483,10 +873,32 @@ def delete_plant(event: dict[str, Any]) -> dict[str, Any]:
     if not garden_id or not plant_id:
         return _error(400, "gardenId and plantId are required")
 
+    plant_key = {"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"}
     try:
         # Deliberately does not cascade-delete the Plant's linked Media/S3 object — see the
-        # module docstring's note on why.
-        _get_table().delete_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"})
+        # module docstring's note on why. A numbered plant's STAKE# lookup item (ADR-0016) IS
+        # removed, in the same transaction, so its stake number becomes reusable.
+        plant = _get_table().get_item(Key=plant_key).get("Item")
+        stake_no = (plant or {}).get("stake_no")
+        if stake_no is None:
+            _get_table().delete_item(Key=plant_key)
+        else:
+            _get_client().transact_write_items(
+                TransactItems=[
+                    {"Delete": {"TableName": APP_TABLE_NAME, "Key": _to_dynamo(plant_key)}},
+                    {
+                        "Delete": {
+                            "TableName": APP_TABLE_NAME,
+                            "Key": _to_dynamo(
+                                {"pk": f"GARDEN#{garden_id}", "sk": _stake_sk(int(stake_no))}
+                            ),
+                            # Only remove the lookup if it still points at THIS plant.
+                            "ConditionExpression": "attribute_not_exists(pk) OR plant_id = :pid",
+                            "ExpressionAttributeValues": {":pid": {"S": plant_id}},
+                        }
+                    },
+                ]
+            )
     except Exception:
         logger.exception("Failed to delete plant %s for garden %s", plant_id, garden_id)
         return _error(500, "could not delete plant")
@@ -1086,6 +1498,10 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
         "ownerUserId": item["owner_user_id"],
         "createdAt": item["created_at"],
     }
+    if item.get("climate_zone"):
+        result["climateZone"] = item["climate_zone"]
+    if item.get("context") is not None:
+        result["context"] = _context_to_api(item["context"])
     if item.get("media_id"):
         media_item = table.get_item(
             Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{item['media_id']}"}
@@ -1093,6 +1509,64 @@ def get_garden(event: dict[str, Any]) -> dict[str, Any]:
         if media_item:
             result["photoUrl"] = _generate_download_url(media_item["s3_key"])
     return _response(200, result)
+
+
+def update_garden(event: dict[str, Any]) -> dict[str, Any]:
+    """`PATCH /gardens/{gardenId}` (CP-01, ADR-0016): sets any of `context` (replaced as a whole
+    block — no field-level merge), `climateZone`, `vision`. 404 if the garden doesn't exist; the
+    condition makes the update never create a half-formed Garden without its ownership index."""
+    user_id = _get_header(event.get("headers"), "X-User-Id")
+    if not user_id:
+        return _error(400, "X-User-Id header is required")
+
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+
+    updates: dict[str, Any] = {}
+    if "context" in payload:
+        context, err = _parse_context(payload["context"])
+        if err:
+            return _error(400, err)
+        updates["context"] = context
+    if "climateZone" in payload:
+        climate_zone, err = _parse_climate_zone(payload["climateZone"])
+        if err:
+            return _error(400, err)
+        updates["climate_zone"] = climate_zone
+    if "vision" in payload:
+        if not isinstance(payload["vision"], str):
+            return _error(400, "vision must be a string if provided")
+        updates["vision"] = payload["vision"]
+    if not updates:
+        return _error(400, "provide at least one of context, climateZone, vision")
+    updates["updated_at"] = datetime.now(UTC).isoformat()
+
+    names = {f"#{k}": k for k in updates}
+    values = {f":{k}": v for k, v in updates.items()}
+    try:
+        _get_table().update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": "METADATA"},
+            UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in updates),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            return _error(404, "garden not found")
+        logger.exception("Failed to update garden %s", garden_id)
+        return _error(500, "could not update garden")
+
+    return get_garden(event)
 
 
 def _geocode(query: str) -> tuple[float, float] | None:
@@ -1180,6 +1654,8 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return list_gardens(event)
         if method == "GET" and resource == "/gardens/{gardenId}":
             return get_garden(event)
+        if method == "PATCH" and resource == "/gardens/{gardenId}":
+            return update_garden(event)
         if method == "GET" and resource == "/gardens/{gardenId}/weather":
             return get_garden_weather(event)
         if method == "POST" and resource == "/gardens/{gardenId}/media":
@@ -1188,6 +1664,8 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return create_plant(event)
         if method == "GET" and resource == "/gardens/{gardenId}/plants":
             return list_plants(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/plants/bulk":
+            return bulk_create_plants(event)
         if method == "DELETE" and resource == "/gardens/{gardenId}/plants/{plantId}":
             return delete_plant(event)
         if method == "POST" and resource == "/gardens/{gardenId}/goals":

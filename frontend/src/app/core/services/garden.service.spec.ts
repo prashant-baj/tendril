@@ -269,6 +269,46 @@ describe('HttpGardenApi', () => {
     expect((result as { photoUrl?: string }[])[0].photoUrl).toBe('https://example.test/p-1.jpg');
   });
 
+  it('getPlants(gardenId) shows a stake number in the name (ADR-0016)', () => {
+    let result: unknown;
+    api.getPlants('g-1').subscribe((plants) => (result = plants));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants`);
+    req.flush([
+      { plantId: 'p-74', species: 'Coconut', stage: 'young', stakeNo: 74 },
+      { plantId: 'p-x', species: 'Coconut', stage: 'young' },
+    ]);
+
+    const plants = result as { name: string; stakeNo?: number }[];
+    expect(plants[0].name).toBe('#74 Coconut');
+    expect(plants[0].stakeNo).toBe(74);
+    expect(plants[1].name).toBe('Coconut');
+    expect('stakeNo' in plants[1]).toBeFalse();
+  });
+
+  it('getGardenById() maps climateZone and the context block (ADR-0016)', () => {
+    let result: unknown;
+    api.getGardenById('g-1').subscribe((g) => (result = g));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1`);
+    req.flush({
+      gardenId: 'g-1',
+      name: 'Bramhangaon Farm',
+      geolocation: 'Kopargaon',
+      ownerUserId: 'u',
+      createdAt: '2026-11-23T00:00:00Z',
+      climateZone: 'Semi-arid',
+      context: { soil: 'clay', stakeRange: { min: 1, max: 105 } },
+    });
+
+    expect(result).toEqual(
+      jasmine.objectContaining({
+        climateZone: 'Semi-arid',
+        context: { soil: 'clay', stakeRange: { min: 1, max: 105 } },
+      }),
+    );
+  });
+
   it('getPlants(null) falls back to the mock fixture (no garden created yet)', (done) => {
     api.getPlants(null).subscribe((plants) => {
       expect(plants.length).toBeGreaterThan(0);

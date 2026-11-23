@@ -20,17 +20,66 @@ from decimal import Decimal
 from pathlib import Path
 
 import garden_handler as handler
+import pytest
 
 
 class FakeClient:
-    def __init__(self, raise_on_transact: Exception | None = None):
+    def __init__(
+        self,
+        raise_on_transact: Exception | None = None,
+        transact_errors: list | None = None,
+        batch_get_responses: list | None = None,
+    ):
         self.raise_on_transact = raise_on_transact
+        # Per-call queue: entry i is raised on the i-th transact call (None = succeed) — lets a
+        # bulk test fail some stake numbers' transactions but not others.
+        self.transact_errors = list(transact_errors) if transact_errors is not None else None
         self.calls: list[list[dict]] = []
+        self._batch_get_responses = list(batch_get_responses or [])
+        self.batch_get_calls: list[dict] = []
 
     def transact_write_items(self, TransactItems):
         if self.raise_on_transact:
             raise self.raise_on_transact
+        if self.transact_errors:
+            err = self.transact_errors.pop(0)
+            if err is not None:
+                raise err
         self.calls.append(TransactItems)
+
+    def batch_get_item(self, RequestItems):
+        self.batch_get_calls.append(RequestItems)
+        if self._batch_get_responses:
+            return self._batch_get_responses.pop(0)
+        return {"Responses": {}}
+
+
+class FakeClientError(Exception):
+    """Mimics botocore's ClientError just enough: a `.response` dict with an Error code and,
+    for a cancelled transaction, per-item CancellationReasons."""
+
+    def __init__(self, code: str, reasons: list[str] | None = None):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+        if reasons is not None:
+            self.response["CancellationReasons"] = [{"Code": r} for r in reasons]
+
+
+def _stake_conflict(n_items: int = 2, stake_index: int = 1) -> FakeClientError:
+    reasons = ["None"] * n_items
+    reasons[stake_index] = "ConditionalCheckFailed"
+    return FakeClientError("TransactionCanceledException", reasons)
+
+
+def _media_batch_response(*pairs: tuple[str, str]) -> dict:
+    """A low-level BatchGetItem response (raw AttributeValues) for (media_id, s3_key) pairs."""
+    return {
+        "Responses": {
+            handler.APP_TABLE_NAME: [
+                {"media_id": {"S": mid}, "s3_key": {"S": key}} for mid, key in pairs
+            ]
+        }
+    }
 
 
 class FakeTable:
@@ -832,9 +881,12 @@ def test_list_plants_resolves_photo_url_for_plants_with_media(monkeypatch):
                 },
             ]
         },
-        get_item_responses={"MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/leaf.jpg"}}},
+    )
+    fake_client = FakeClient(
+        batch_get_responses=[_media_batch_response(("media-1", "g1/media-1/leaf.jpg"))]
     )
     monkeypatch.setattr(handler, "_table", fake_table)
+    monkeypatch.setattr(handler, "_client", fake_client)
     monkeypatch.setattr(handler, "_s3", FakeS3())
 
     event = _event("GET", "/gardens/{gardenId}/plants", path_params={"gardenId": "g1"})
@@ -847,6 +899,10 @@ def test_list_plants_resolves_photo_url_for_plants_with_media(monkeypatch):
         == "https://example-bucket.s3.amazonaws.com/g1/media-1/leaf.jpg?presigned=1"
     )
     assert "photoUrl" not in body[1]
+    # ADR-0016: one BatchGetItem for every plant's photo, not one GetItem per plant.
+    assert len(fake_client.batch_get_calls) == 1
+    keys = fake_client.batch_get_calls[0][handler.APP_TABLE_NAME]["Keys"]
+    assert keys == [{"pk": {"S": "GARDEN#g1"}, "sk": {"S": "MEDIA#media-1"}}]
 
 
 def test_list_plants_empty(monkeypatch):
@@ -2372,3 +2428,388 @@ def test_handler_unknown_route_returns_404():
     event = _event("DELETE", "/gardens/{gardenId}", path_params={"gardenId": "g1"})
     resp = handler.handler(event, None)
     assert resp["statusCode"] == 404
+
+
+# --- Phase A (CP-01/CP-02, ADR-0016): garden context, stake numbers, bulk create ------------
+
+BRAMHANGAON_CONTEXT = {
+    "soil": "Heavy black calcareous/saline clay; lime-locked Fe/Mg/N chlorosis",
+    "irrigation": "16 mm drip off well water, emitter ~1.5 ft off collar",
+    "intercrop": "Veg strip (brinjal, marigold) north edge; chana planned in alleys",
+    "layout": "25x25 ft square, 1.5 acre west block; 23 Tall on east fence (border)",
+    "stakeRange": {"min": 1, "max": 105},
+    "notificationRecipients": [
+        {"name": "Owner", "e164": "+919800000001"},
+        {"name": "Field worker", "e164": "+919800000002"},
+    ],
+}
+
+
+def _validate_against(schema_name: str, instance) -> None:
+    import jsonschema
+    import yaml
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    resolver = jsonschema.RefResolver.from_schema(spec)
+    jsonschema.validate(
+        instance=instance, schema=spec["components"]["schemas"][schema_name], resolver=resolver
+    )
+
+
+def _garden_item(**extra):
+    item = {
+        "pk": "GARDEN#g1",
+        "sk": "METADATA",
+        "garden_id": "g1",
+        "name": "Bramhangaon Farm",
+        "geolocation": "Kopargaon, Maharashtra",
+        "owner_user_id": "u",
+        "created_at": "2026-11-23T00:00:00+00:00",
+    }
+    item.update(extra)
+    return item
+
+
+def _post(resource, body, path_params, headers=None):
+    return _event(
+        "POST",
+        resource,
+        body=body,
+        headers={"X-User-Id": "u"} if headers is None else headers,
+        path_params=path_params,
+    )
+
+
+def test_create_garden_stores_context_in_snake_case(monkeypatch):
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    body = {
+        "name": "Bramhangaon Farm",
+        "geolocation": "Kopargaon, Maharashtra",
+        "climateZone": "Semi-arid, Deccan plateau",
+        "context": BRAMHANGAON_CONTEXT,
+    }
+    resp = handler.create_garden(_post("/gardens", body, None))
+    assert resp["statusCode"] == 201
+
+    garden = fake_client.calls[0][0]["Put"]["Item"]
+    assert garden["climate_zone"]["S"] == "Semi-arid, Deccan plateau"
+    ctx = garden["context"]["M"]
+    assert ctx["soil"]["S"].startswith("Heavy black")
+    assert ctx["stake_range"]["M"]["max"]["N"] == "105"
+    assert ctx["notification_recipients"]["L"][1]["M"]["e164"]["S"] == "+919800000002"
+
+
+def test_create_garden_without_context_is_unchanged(monkeypatch):
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    resp = handler.create_garden(_post("/gardens", {"name": "G", "geolocation": "Pune"}, None))
+    assert resp["statusCode"] == 201
+    garden = fake_client.calls[0][0]["Put"]["Item"]
+    assert "context" not in garden and "climate_zone" not in garden
+
+
+@pytest.mark.parametrize(
+    ("context", "fragment"),
+    [
+        ("not-an-object", "must be a JSON object"),
+        ({"weather": "hot"}, "unknown field"),
+        ({"soil": 5}, "context.soil must be a string"),
+        ({"soil": "x" * 1001}, "at most 1000"),
+        ({"stakeRange": {"min": 10, "max": 5}}, "stakeRange"),
+        ({"stakeRange": {"min": True, "max": 5}}, "stakeRange"),
+        ({"notificationRecipients": [{"name": "A", "e164": "9800000001"}]}, "E.164"),
+        ({"notificationRecipients": [{"e164": "+919800000001"}]}, "needs a name"),
+        ({"notificationRecipients": [{"name": "A", "e164": "+919800000001"}] * 11}, "at most 10"),
+    ],
+)
+def test_create_garden_rejects_invalid_context(monkeypatch, context, fragment):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    body = {"name": "G", "geolocation": "Pune", "context": context}
+    resp = handler.create_garden(_post("/gardens", body, None))
+    assert resp["statusCode"] == 400
+    assert fragment in json.loads(resp["body"])["message"]
+
+
+def test_invalid_recipient_error_does_not_echo_the_number(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    body = {
+        "name": "G",
+        "geolocation": "Pune",
+        "context": {"notificationRecipients": [{"name": "A", "e164": "98765-43210"}]},
+    }
+    resp = handler.create_garden(_post("/gardens", body, None))
+    assert resp["statusCode"] == 400
+    assert "98765" not in resp["body"]
+
+
+def test_get_garden_returns_context_and_climate_zone_conforming_to_schema(monkeypatch):
+    stored = {
+        "soil": BRAMHANGAON_CONTEXT["soil"],
+        "stake_range": {"min": Decimal(1), "max": Decimal(105)},
+        "notification_recipients": [{"name": "Owner", "e164": "+919800000001"}],
+    }
+    item = _garden_item(context=stored, climate_zone="Semi-arid")
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={"Item": item}))
+    resp = handler.get_garden(_event("GET", "/gardens/{gardenId}", path_params={"gardenId": "g1"}))
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    assert body["climateZone"] == "Semi-arid"
+    assert body["context"] == {
+        "soil": BRAMHANGAON_CONTEXT["soil"],
+        "stakeRange": {"min": 1, "max": 105},
+        "notificationRecipients": [{"name": "Owner", "e164": "+919800000001"}],
+    }
+    _validate_against("Garden", body)
+
+
+def test_update_garden_replaces_context_and_returns_garden(monkeypatch):
+    fake_table = FakeTable(get_item_response={"Item": _garden_item()})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    event = _event(
+        "PATCH",
+        "/gardens/{gardenId}",
+        body={"context": {"soil": "clay"}, "climateZone": "Semi-arid"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 200
+
+    call = fake_table.update_calls[0]
+    assert call["Key"] == {"pk": "GARDEN#g1", "sk": "METADATA"}
+    assert call["ConditionExpression"] == "attribute_exists(pk)"
+    values = call["ExpressionAttributeValues"]
+    assert values[":context"] == {"soil": "clay"}
+    assert values[":climate_zone"] == "Semi-arid"
+    assert ":updated_at" in values
+
+
+def test_update_garden_unknown_garden_returns_404(monkeypatch):
+    fake_table = FakeTable(raise_on_update=FakeClientError("ConditionalCheckFailedException"))
+    monkeypatch.setattr(handler, "_table", fake_table)
+    event = _event(
+        "PATCH",
+        "/gardens/{gardenId}",
+        body={"vision": "coconuts"},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "nope"},
+    )
+    assert handler.update_garden(event)["statusCode"] == 404
+
+
+def test_update_garden_requires_at_least_one_field(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    event = _event(
+        "PATCH",
+        "/gardens/{gardenId}",
+        body={},
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1"},
+    )
+    assert handler.update_garden(event)["statusCode"] == 400
+
+
+def test_update_garden_requires_user_id():
+    event = _event(
+        "PATCH", "/gardens/{gardenId}", body={"vision": "x"}, path_params={"gardenId": "g1"}
+    )
+    assert handler.update_garden(event)["statusCode"] == 400
+
+
+PLANTS = "/gardens/{gardenId}/plants"
+BULK = "/gardens/{gardenId}/plants/bulk"
+G1 = {"gardenId": "g1"}
+
+
+def test_create_plant_with_stake_writes_lookup_item_transactionally(monkeypatch):
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(handler, "_table", FakeTable())  # no garden context -> no range check
+    body = {"species": "Coconut", "variety": "Kalpa Samrudhi", "stakeNo": 74, "stage": "young"}
+    resp = handler.create_plant(_post(PLANTS, body, G1))
+    assert resp["statusCode"] == 201
+    result = json.loads(resp["body"])
+    assert result["stakeNo"] == 74 and "outOfRange" not in result
+
+    plant_put, stake_put = (i["Put"] for i in fake_client.calls[0])
+    assert plant_put["Item"]["stake_no"]["N"] == "74"
+    assert plant_put["Item"]["stage"]["S"] == "young"
+    assert stake_put["Item"]["sk"]["S"] == "STAKE#00074"
+    assert stake_put["Item"]["plant_id"]["S"] == result["plantId"]
+    assert stake_put["ConditionExpression"] == "attribute_not_exists(pk)"
+    _validate_against("PlantCreateResponse", result)
+
+
+def test_create_plant_duplicate_stake_returns_409(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient(raise_on_transact=_stake_conflict()))
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    resp = handler.create_plant(_post(PLANTS, {"species": "Coconut", "stakeNo": 74}, G1))
+    assert resp["statusCode"] == 409
+
+
+def test_create_plant_missing_media_with_stake_is_500_not_409(monkeypatch):
+    # Plant, stake lookup, media update: the MEDIA condition (index 2) failed, not the stake.
+    err = FakeClientError(
+        "TransactionCanceledException", ["None", "None", "ConditionalCheckFailed"]
+    )
+    monkeypatch.setattr(handler, "_client", FakeClient(raise_on_transact=err))
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    body = {"species": "Coconut", "stakeNo": 74, "mediaId": "missing"}
+    assert handler.create_plant(_post(PLANTS, body, G1))["statusCode"] == 500
+
+
+def test_create_plant_out_of_range_stake_is_created_but_flagged(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    garden = _garden_item(context={"stake_range": {"min": Decimal(1), "max": Decimal(105)}})
+    monkeypatch.setattr(
+        handler, "_table", FakeTable(get_item_responses={"METADATA": {"Item": garden}})
+    )
+    resp = handler.create_plant(_post(PLANTS, {"species": "Coconut", "stakeNo": 106}, G1))
+    assert resp["statusCode"] == 201
+    assert json.loads(resp["body"])["outOfRange"] is True
+
+
+@pytest.mark.parametrize("stake", [0, -3, "7", 1.5, True, 100000])
+def test_create_plant_rejects_invalid_stake_no(monkeypatch, stake):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    resp = handler.create_plant(_post(PLANTS, {"species": "Coconut", "stakeNo": stake}, G1))
+    assert resp["statusCode"] == 400
+
+
+def test_create_plant_rejects_blank_stage(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    resp = handler.create_plant(_post(PLANTS, {"species": "Coconut", "stage": "  "}, G1))
+    assert resp["statusCode"] == 400
+
+
+def test_bulk_create_plants_creates_range_and_skips_existing(monkeypatch):
+    # #2 already exists in this garden; #1 and #3 are new.
+    fake_client = FakeClient(transact_errors=[None, _stake_conflict(), None])
+    monkeypatch.setattr(handler, "_client", fake_client)
+    monkeypatch.setattr(
+        handler, "_table", FakeTable(get_item_response={"Item": _garden_item(context={})})
+    )
+    body = {
+        "species": "Coconut",
+        "variety": "Kalpa Samrudhi DxT",
+        "stage": "young",
+        "stakeFrom": 1,
+        "stakeTo": 3,
+    }
+    event = _post(BULK, body, G1)
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 201
+    result = json.loads(resp["body"])
+    assert [c["stakeNo"] for c in result["created"]] == [1, 3]
+    assert result["skipped"] == [2]
+    assert len(fake_client.calls) == 2  # the conflicting transaction never committed
+    _validate_against("PlantBulkCreateResponse", result)
+
+
+def test_bulk_create_plants_flags_out_of_range(monkeypatch):
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    garden = _garden_item(context={"stake_range": {"min": Decimal(1), "max": Decimal(2)}})
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={"Item": garden}))
+    body = {"species": "Coconut", "stakeFrom": 2, "stakeTo": 3}
+    created = json.loads(handler.bulk_create_plants(_post(BULK, body, G1))["body"])["created"]
+    assert "outOfRange" not in created[0]
+    assert created[1]["outOfRange"] is True
+
+
+def test_bulk_create_plants_unknown_garden_returns_404(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    body = {"species": "Coconut", "stakeFrom": 1, "stakeTo": 3}
+    resp = handler.bulk_create_plants(_post(BULK, body, {"gardenId": "nope"}))
+    assert resp["statusCode"] == 404
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"stakeFrom": 1, "stakeTo": 3},  # missing species
+        {"species": "Coconut", "stakeFrom": 5, "stakeTo": 1},
+        {"species": "Coconut", "stakeFrom": 0, "stakeTo": 3},
+        {"species": "Coconut", "stakeFrom": 1, "stakeTo": 201},  # over the 200 cap
+        {"species": "Coconut", "stakeFrom": "1", "stakeTo": 3},
+    ],
+)
+def test_bulk_create_plants_rejects_invalid_input(monkeypatch, body):
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={"Item": _garden_item()}))
+    assert handler.bulk_create_plants(_post(BULK, body, G1))["statusCode"] == 400
+
+
+def test_bulk_create_plants_requires_user_id(monkeypatch):
+    body = {"species": "Coconut", "stakeFrom": 1, "stakeTo": 3}
+    assert handler.bulk_create_plants(_post(BULK, body, G1, headers={}))["statusCode"] == 400
+
+
+def test_bulk_create_plants_failure_mid_run_returns_500(monkeypatch):
+    monkeypatch.setattr(
+        handler, "_client", FakeClient(transact_errors=[None, RuntimeError("throttled")])
+    )
+    monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={"Item": _garden_item()}))
+    body = {"species": "Coconut", "stakeFrom": 1, "stakeTo": 3}
+    resp = handler.bulk_create_plants(_post(BULK, body, G1))
+    assert resp["statusCode"] == 500
+    assert "#2" in json.loads(resp["body"])["message"]
+
+
+def test_list_plants_orders_by_stake_number_unnumbered_last(monkeypatch):
+    items = [
+        {"plant_id": "pa", "species": "Coconut", "stage": "new"},
+        {"plant_id": "p10", "species": "Coconut", "stage": "new", "stake_no": Decimal(10)},
+        {"plant_id": "p2", "species": "Coconut", "stage": "new", "stake_no": Decimal(2)},
+    ]
+    monkeypatch.setattr(handler, "_table", FakeTable(query_response={"Items": items}))
+    resp = handler.list_plants(_event("GET", PLANTS, path_params=G1))
+    body = json.loads(resp["body"])
+    assert [p["plantId"] for p in body] == ["p2", "p10", "pa"]
+    assert body[0]["stakeNo"] == 2 and "stakeNo" not in body[2]
+    _validate_against("Plant", body[0])
+
+
+def test_list_plants_follows_last_evaluated_key(monkeypatch):
+    page1 = {
+        "Items": [{"plant_id": "p1", "species": "Coconut", "stage": "new"}],
+        "LastEvaluatedKey": {"pk": "GARDEN#g1", "sk": "PLANT#p1"},
+    }
+    page2 = {"Items": [{"plant_id": "p2", "species": "Coconut", "stage": "new"}]}
+    fake_table = FakeTable(query_responses=[page1, page2])
+    monkeypatch.setattr(handler, "_table", fake_table)
+    resp = handler.list_plants(_event("GET", PLANTS, path_params=G1))
+    assert [p["plantId"] for p in json.loads(resp["body"])] == ["p1", "p2"]
+    assert fake_table.query_calls[1]["ExclusiveStartKey"] == page1["LastEvaluatedKey"]
+
+
+def test_batch_get_media_keys_retries_unprocessed_keys(monkeypatch):
+    unprocessed = {
+        handler.APP_TABLE_NAME: {"Keys": [{"pk": {"S": "GARDEN#g1"}, "sk": {"S": "MEDIA#m2"}}]}
+    }
+    first = _media_batch_response(("m1", "k1"))
+    first["UnprocessedKeys"] = unprocessed
+    fake_client = FakeClient(batch_get_responses=[first, _media_batch_response(("m2", "k2"))])
+    monkeypatch.setattr(handler, "_client", fake_client)
+    assert handler._batch_get_media_keys("g1", ["m1", "m2", "m1"]) == {"m1": "k1", "m2": "k2"}
+    assert len(fake_client.batch_get_calls) == 2
+    assert fake_client.batch_get_calls[1] == unprocessed
+
+
+def test_delete_numbered_plant_also_deletes_stake_lookup(monkeypatch):
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    fake_table = FakeTable(get_item_response={"Item": {"plant_id": "p1", "stake_no": Decimal(74)}})
+    monkeypatch.setattr(handler, "_table", fake_table)
+    event = _event(
+        "DELETE",
+        "/gardens/{gardenId}/plants/{plantId}",
+        headers={"X-User-Id": "u"},
+        path_params={"gardenId": "g1", "plantId": "p1"},
+    )
+    assert handler.delete_plant(event)["statusCode"] == 204
+    assert fake_table.delete_calls == []  # went through the transaction instead
+    plant_del, stake_del = (i["Delete"] for i in fake_client.calls[0])
+    assert plant_del["Key"]["sk"]["S"] == "PLANT#p1"
+    assert stake_del["Key"]["sk"]["S"] == "STAKE#00074"
+    assert stake_del["ExpressionAttributeValues"][":pid"]["S"] == "p1"

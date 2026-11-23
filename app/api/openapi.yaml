@@ -89,7 +89,7 @@ paths:
             statusCode: "200"
             responseParameters:
               method.response.header.Access-Control-Allow-Origin: "'*'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PATCH,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-User-Id'"
 
   /gardens/{gardenId}:
@@ -107,6 +107,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Garden"
+        "404":
+          description: No such garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    patch:
+      operationId: updateGarden
+      summary: Update a garden's context block, climate zone, and/or vision (ADR-0016)
+      description: >
+        `context` is replaced as a whole block (no field-level merge). Returns the updated garden.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GardenUpdateRequest"
+      responses:
+        "200":
+          description: The updated garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Garden"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: No such garden
           content:
@@ -213,6 +250,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          description: The stake number is already used by another plant in this garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
       x-amazon-apigateway-integration:
         type: aws_proxy
         httpMethod: POST
@@ -230,6 +273,49 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Plant"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants/bulk:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: bulkCreatePlants
+      summary: Create one plant per stake number in a range (CP-02, ADR-0016)
+      description: >
+        Idempotent. A stake number already used in this garden is reported under `skipped` and
+        never duplicated or overwritten, so a partial run can be retried.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlantBulkCreateRequest"
+      responses:
+        "201":
+          description: Plants created (and/or skipped)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlantBulkCreateResponse"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
       x-amazon-apigateway-integration:
         type: aws_proxy
         httpMethod: POST
@@ -559,6 +645,80 @@ components:
           type: string
           description: Id from a prior createMediaUpload call (uploaded under the same gardenId
             given above) — becomes this garden's banner photo.
+        climateZone:
+          type: string
+          maxLength: 100
+        context:
+          $ref: "#/components/schemas/GardenContext"
+
+    GardenUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        context:
+          $ref: "#/components/schemas/GardenContext"
+        climateZone:
+          type: string
+          maxLength: 100
+        vision:
+          type: string
+
+    GardenContext:
+      type: object
+      additionalProperties: false
+      description: >
+        Whole-farm facts every agent reasons with (ADR-0016). All fields optional. Injected into
+        the orchestrator and specialist prompts on every turn, except notificationRecipients,
+        which are personal data and never sent to a model.
+      properties:
+        soil:
+          type: string
+          maxLength: 1000
+        irrigation:
+          type: string
+          maxLength: 1000
+        intercrop:
+          type: string
+          maxLength: 1000
+        layout:
+          type: string
+          maxLength: 1000
+        notes:
+          type: string
+          maxLength: 1000
+        stakeRange:
+          type: object
+          required: [min, max]
+          additionalProperties: false
+          description: Valid stake-number range for the main block. A plant outside it is
+            accepted but flagged outOfRange.
+          properties:
+            min:
+              type: integer
+              minimum: 1
+            max:
+              type: integer
+              minimum: 1
+              maximum: 99999
+        notificationRecipients:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/NotificationRecipient"
+
+    NotificationRecipient:
+      type: object
+      required: [name, e164]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        e164:
+          type: string
+          pattern: "^\\+[1-9]\\d{6,14}$"
+          description: Mobile number in E.164 format, e.g. +919800000000.
 
     GardenCreateResponse:
       type: object
@@ -588,6 +748,10 @@ components:
           type: string
           description: Freshly-generated presigned GET url (per read, never stored/reused) for
             this garden's banner photo, present only if one was set at creation.
+        climateZone:
+          type: string
+        context:
+          $ref: "#/components/schemas/GardenContext"
 
     GardenWeather:
       type: object
@@ -653,6 +817,17 @@ components:
           type: string
           description: Id returned by a prior createMediaUpload call, once the upload itself
             has completed.
+        stage:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Growth stage. Defaults to "new".
+        stakeNo:
+          type: integer
+          minimum: 1
+          maximum: 99999
+          description: Optional number on the plant's physical stake (ADR-0016). Unique within
+            the garden; never generated by Tendril.
 
     PlantCreateResponse:
       type: object
@@ -660,10 +835,60 @@ components:
       properties:
         plantId:
           type: string
+        stakeNo:
+          type: integer
+        outOfRange:
+          type: boolean
+          description: True when stakeNo falls outside the garden's context.stakeRange. The
+            plant is still created.
         photoUrl:
           type: string
           description: Freshly-generated presigned GET url for the plant's linked photo (OB-03),
             present only if a mediaId was given at creation.
+
+    PlantBulkCreateRequest:
+      type: object
+      required: [species, stakeFrom, stakeTo]
+      properties:
+        species:
+          type: string
+          minLength: 1
+        variety:
+          type: string
+        stage:
+          type: string
+          minLength: 1
+          maxLength: 50
+        stakeFrom:
+          type: integer
+          minimum: 1
+        stakeTo:
+          type: integer
+          minimum: 1
+          maximum: 99999
+          description: Inclusive. At most 200 plants per call.
+
+    PlantBulkCreateResponse:
+      type: object
+      required: [created, skipped]
+      properties:
+        created:
+          type: array
+          items:
+            type: object
+            required: [plantId, stakeNo]
+            properties:
+              plantId:
+                type: string
+              stakeNo:
+                type: integer
+              outOfRange:
+                type: boolean
+        skipped:
+          type: array
+          description: Stake numbers already used in this garden (left untouched).
+          items:
+            type: integer
 
     Plant:
       type: object
@@ -677,6 +902,10 @@ components:
           type: string
         stage:
           type: string
+        stakeNo:
+          type: integer
+          description: Number on the plant's physical stake, when it has one (ADR-0016).
+            listPlants orders by it, unnumbered plants last.
         photoUrl:
           type: string
           description: Freshly-generated presigned GET url per read (OB-03) — never stored, same
