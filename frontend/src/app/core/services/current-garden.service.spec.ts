@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
-import { firstValueFrom } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import { firstValueFrom, of, throwError } from 'rxjs';
 import { CurrentGardenService } from './current-garden.service';
 import { GardenApi, MockGardenApi } from './garden.service';
 
@@ -50,5 +51,36 @@ describe('CurrentGardenService', () => {
       geolocation: 'Mumbai',
       climateZone: '',
     });
+  });
+
+  it('switches to an existing garden when the saved one was deleted (404)', async () => {
+    localStorage.setItem('tendril:currentGardenId', 'deleted');
+    const gardenApi = TestBed.inject(GardenApi);
+    spyOn(gardenApi, 'getGardenById').and.callFake((id: string) =>
+      id === 'deleted'
+        ? throwError(() => new HttpErrorResponse({ status: 404 }))
+        : of({ gardenId: id, name: 'Coconut Plot', vision: '', geolocation: 'x', climateZone: '' }),
+    );
+    spyOn(gardenApi, 'getGardens').and.returnValue(of([{ gardenId: 'plot', name: 'Coconut Plot' }]));
+
+    const service = TestBed.inject(CurrentGardenService);
+    const garden = await firstValueFrom(service.garden$);
+    expect(garden.name).toBe('Coconut Plot');
+    expect(service.gardenId()).toBe('plot');
+    expect(localStorage.getItem('tendril:currentGardenId')).toBe('plot');
+  });
+
+  it('returns to the no-garden state when the saved garden was deleted and none remain', async () => {
+    localStorage.setItem('tendril:currentGardenId', 'deleted');
+    const gardenApi = TestBed.inject(GardenApi);
+    spyOn(gardenApi, 'getGardenById').and.returnValue(
+      throwError(() => new HttpErrorResponse({ status: 404 })),
+    );
+    spyOn(gardenApi, 'getGardens').and.returnValue(of([]));
+
+    const service = TestBed.inject(CurrentGardenService);
+    const garden = await firstValueFrom(service.garden$);
+    expect(service.gardenId()).toBeNull();
+    expect(garden.gardenId).toBe('balcony-kitchen-garden');
   });
 });

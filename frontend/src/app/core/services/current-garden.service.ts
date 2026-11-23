@@ -1,6 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { toObservable } from '@angular/core/rxjs-interop';
-import { Observable, shareReplay, switchMap } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import { EMPTY, Observable, catchError, map, shareReplay, switchMap, throwError } from 'rxjs';
 import { Garden } from '../models/garden.model';
 import { GardenApi } from './garden.service';
 
@@ -24,12 +25,37 @@ export class CurrentGardenService {
   readonly gardenId = this.gardenIdSignal.asReadonly();
 
   readonly garden$: Observable<Garden> = toObservable(this.gardenIdSignal).pipe(
-    switchMap((id) => (id ? this.gardenApi.getGardenById(id) : this.gardenApi.getGarden())),
+    switchMap((id) =>
+      id
+        ? this.gardenApi.getGardenById(id).pipe(catchError((err) => this.recover(id, err)))
+        : this.gardenApi.getGarden(),
+    ),
     shareReplay({ bufferSize: 1, refCount: true }),
   );
 
   setCurrentGardenId(gardenId: string): void {
     localStorage.setItem(STORAGE_KEY, gardenId);
     this.gardenIdSignal.set(gardenId);
+  }
+
+  /** The saved garden no longer exists (404 — e.g. deleted): switch to the first garden the user
+   * still owns, or back to the pre-onboarding state when there are none, instead of silently
+   * showing the demo fixture with an id that will never load. Other errors propagate. */
+  private recover(staleId: string, err: unknown): Observable<Garden> {
+    if (!(err instanceof HttpErrorResponse) || err.status !== 404) {
+      return throwError(() => err);
+    }
+    return this.gardenApi.getGardens().pipe(
+      map((gardens) => gardens.find((g) => g.gardenId !== staleId)),
+      switchMap((next) => {
+        if (next) {
+          this.setCurrentGardenId(next.gardenId); // re-emits garden$ with the real garden
+        } else {
+          localStorage.removeItem(STORAGE_KEY);
+          this.gardenIdSignal.set(null);
+        }
+        return EMPTY;
+      }),
+    );
   }
 }
