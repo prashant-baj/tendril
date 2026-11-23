@@ -43,6 +43,26 @@
         ></textarea>
       </label>
 
+      <div class="disclosure">
+        <button
+          type="button"
+          class="disclosure-toggle"
+          (click)="toggleFarmDetails()"
+          [attr.aria-expanded]="showFarmDetails()"
+          aria-controls="farm-details"
+        >
+          <td-icon [name]="showFarmDetails() ? 'expand_less' : 'expand_more'" size="20px" />
+          <span>
+            Farm details (optional)
+            <small>Soil, irrigation, layout, numbered stakes, who gets reminders</small>
+          </span>
+        </button>
+        <!-- Kept in the DOM when collapsed so the form keeps one state; just hidden. -->
+        <div id="farm-details" class="disclosure-body" [hidden]="!showFarmDetails()">
+          <td-farm-details-fields [group]="form.controls.farm" />
+        </div>
+      </div>
+
       @if (errorMessage()) {
         <div class="form-error">
           <td-icon name="error" size="18px" />

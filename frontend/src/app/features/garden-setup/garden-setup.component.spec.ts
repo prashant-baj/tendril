@@ -48,7 +48,7 @@ describe('GardenSetupComponent', () => {
     gardenApi.createGarden.and.returnValue(of({ gardenId: 'g-123' }));
     const navigateSpy = spyOn(router, 'navigateByUrl');
 
-    component.form.setValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
+    component.form.patchValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
     component.submit();
 
     expect(gardenApi.createGarden).toHaveBeenCalledWith({
@@ -73,7 +73,7 @@ describe('GardenSetupComponent', () => {
 
     const file = new File(['x'], 'garden.jpg', { type: 'image/jpeg' });
     component.onFileSelected(file);
-    component.form.setValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
+    component.form.patchValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
     component.submit();
 
     expect(gardenApi.requestMediaUpload).toHaveBeenCalledTimes(1);
@@ -95,7 +95,7 @@ describe('GardenSetupComponent', () => {
     gardenApi.createGarden.and.returnValue(throwError(() => new Error('network down')));
     const navigateSpy = spyOn(router, 'navigateByUrl');
 
-    component.form.setValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
+    component.form.patchValue({ name: 'Balcony Garden', geolocation: 'Pune', vision: '' });
     component.submit();
 
     expect(component.errorMessage()).toBeTruthy();
@@ -106,5 +106,51 @@ describe('GardenSetupComponent', () => {
     gardenApi.createGarden.and.returnValue(of({ gardenId: 'g-456' }));
     component.submit();
     expect(navigateSpy).toHaveBeenCalledWith('/home');
+  });
+
+  // --- Farm details (ADR-0032) ---------------------------------------------------------------
+
+  it('keeps the farm details section collapsed by default', () => {
+    expect(component.showFarmDetails()).toBe(false);
+    const body = (fixture.nativeElement as HTMLElement).querySelector('#farm-details');
+    expect(body?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('sends climate zone and the filled-in context fields only', () => {
+    gardenApi.createGarden.and.returnValue(of({ gardenId: 'g-1' }));
+    spyOn(router, 'navigateByUrl');
+
+    component.form.patchValue({
+      name: 'Bramhangaon Farm',
+      geolocation: 'Kopargaon',
+      farm: {
+        climateZone: 'Semi-arid',
+        soil: '  Heavy black clay  ',
+        irrigation: '',
+        stakeMin: 1,
+        stakeMax: 105,
+      },
+    });
+    component.submit();
+
+    expect(gardenApi.createGarden).toHaveBeenCalledWith(
+      jasmine.objectContaining({
+        name: 'Bramhangaon Farm',
+        climateZone: 'Semi-arid',
+        context: { soil: 'Heavy black clay', stakeRange: { min: 1, max: 105 } },
+      }),
+    );
+  });
+
+  it('blocks submit and opens the section when a farm detail is invalid', () => {
+    component.form.patchValue({
+      name: 'Farm',
+      geolocation: 'Kopargaon',
+      farm: { stakeMin: 10 }, // max missing -> incomplete range
+    });
+    component.submit();
+
+    expect(gardenApi.createGarden).not.toHaveBeenCalled();
+    expect(component.showFarmDetails()).toBe(true);
   });
 });

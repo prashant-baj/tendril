@@ -40,6 +40,22 @@ export const routes: Routes = [
       import('./features/add-plant/add-plant.component').then((m) => m.AddPlantComponent),
   },
   {
+    path: 'add-plants',
+    data: { title: 'Add numbered plants' },
+    loadComponent: () =>
+      import('./features/bulk-add-plants/bulk-add-plants.component').then(
+        (m) => m.BulkAddPlantsComponent,
+      ),
+  },
+  {
+    path: 'garden-settings',
+    data: { title: 'Garden settings' },
+    loadComponent: () =>
+      import('./features/garden-settings/garden-settings.component').then(
+        (m) => m.GardenSettingsComponent,
+      ),
+  },
+  {
     path: 'activity',
     data: { title: 'Activity' },
     loadComponent: () => import('./features/activity/activity.component').then((m) => m.ActivityComponent),

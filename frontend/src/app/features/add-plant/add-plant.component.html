@@ -31,6 +31,21 @@
         />
       </label>
 
+      <div class="row">
+        <label class="field">
+          <span class="field-label">Stake number (optional)</span>
+          <input type="number" formControlName="stakeNo" min="1" placeholder="e.g. 74" />
+          @if (form.controls.stakeNo.invalid && form.controls.stakeNo.touched) {
+            <span class="field-error">Use a whole number from 1 to 99999.</span>
+          }
+        </label>
+
+        <label class="field">
+          <span class="field-label">Stage (optional)</span>
+          <input type="text" formControlName="stage" placeholder="e.g. seedling" autocomplete="off" />
+        </label>
+      </div>
+
       @if (errorMessage()) {
         <div class="form-error">
           <td-icon name="error" size="18px" />

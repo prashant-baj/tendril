@@ -97,3 +97,9 @@ input, textarea {
   &:active:not(:disabled) { transform: scale(.98); }
   &:disabled { opacity: .6; cursor: not-allowed; }
 }
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}

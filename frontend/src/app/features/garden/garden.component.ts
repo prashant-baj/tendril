@@ -47,6 +47,14 @@ export class GardenComponent {
     this.router.navigateByUrl('/add-plant');
   }
 
+  openBulkAdd(): void {
+    this.router.navigateByUrl('/add-plants');
+  }
+
+  openSettings(): void {
+    this.router.navigateByUrl('/garden-settings');
+  }
+
   deletePlant(plantId: string): void {
     const gardenId = this.currentGarden.gardenId();
     if (!gardenId) {

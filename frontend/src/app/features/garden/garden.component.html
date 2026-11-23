@@ -21,13 +21,19 @@
             <td-icon [name]="fact.icon" size="15px" />{{ fact.label }}
           </span>
         }
+        <button type="button" class="fact fact-action" (click)="openSettings()">
+          <td-icon name="tune" size="15px" />Garden settings
+        </button>
       </div>
     </section>
 
     <section>
       <div class="section-head">
         <h2>{{ plants().length }} plants</h2>
-        <button type="button" class="link" (click)="openAddPlant()">Add plant</button>
+        <div class="head-actions">
+          <button type="button" class="link" (click)="openBulkAdd()">Add numbered</button>
+          <button type="button" class="link" (click)="openAddPlant()">Add plant</button>
+        </div>
       </div>
       <div class="card list">
         @for (plant of plants(); track plant.plantId) {

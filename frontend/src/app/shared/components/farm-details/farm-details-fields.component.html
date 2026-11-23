@@ -1,0 +1,64 @@
+<div class="fields" [formGroup]="group">
+  <label class="field">
+    <span class="field-label">Climate zone</span>
+    <input type="text" formControlName="climateZone" placeholder="e.g. Semi-arid, Deccan plateau" autocomplete="off" />
+    @if (group.controls.climateZone.invalid && group.controls.climateZone.touched) {
+      <span class="field-error">Keep it under 100 characters.</span>
+    }
+  </label>
+
+  @for (f of textFields; track f.key) {
+    <label class="field">
+      <span class="field-label">{{ f.label }}</span>
+      <textarea [formControlName]="f.key" rows="2" [placeholder]="f.placeholder"></textarea>
+      @if (group.controls[f.key].invalid && group.controls[f.key].touched) {
+        <span class="field-error">Keep it under {{ textMax }} characters.</span>
+      }
+    </label>
+  }
+
+  <fieldset class="field">
+    <legend class="field-label">Plant stake numbers</legend>
+    <p class="hint">If your plants carry numbered stakes, enter the range (e.g. 1 to 105).</p>
+    <div class="row">
+      <input type="number" formControlName="stakeMin" min="1" placeholder="From" aria-label="Stake numbers from" />
+      <span class="to">to</span>
+      <input type="number" formControlName="stakeMax" min="1" placeholder="To" aria-label="Stake numbers to" />
+    </div>
+    @if (group.errors?.['stakeRangeIncomplete'] && (group.controls.stakeMin.touched || group.controls.stakeMax.touched)) {
+      <span class="field-error">Enter both numbers, or leave both empty.</span>
+    }
+    @if (group.errors?.['stakeRangeOrder']) {
+      <span class="field-error">"From" must not be bigger than "To".</span>
+    }
+    @if (group.controls.stakeMin.invalid || group.controls.stakeMax.invalid) {
+      <span class="field-error">Use whole numbers from 1 to 99999.</span>
+    }
+  </fieldset>
+
+  <fieldset class="field" formArrayName="recipients">
+    <legend class="field-label">WhatsApp reminders go to</legend>
+    <p class="hint">
+      Names and mobile numbers with country code (e.g. +919800000000). Used only to send
+      reminders, never shared with the AI advisors.
+    </p>
+    @for (r of recipients.controls; track r; let i = $index) {
+      <div class="recipient" [formGroupName]="i">
+        <input type="text" formControlName="name" placeholder="Name" autocomplete="off" [attr.aria-label]="'Recipient ' + (i + 1) + ' name'" />
+        <input type="tel" formControlName="e164" placeholder="+919800000000" autocomplete="off" [attr.aria-label]="'Recipient ' + (i + 1) + ' mobile number'" />
+        <button type="button" class="icon-btn" (click)="removeRecipient(i)" [attr.aria-label]="'Remove recipient ' + (i + 1)">
+          <td-icon name="close" size="18px" />
+        </button>
+        @if (r.controls.name.invalid && r.controls.name.touched) {
+          <span class="field-error wide">Enter a name.</span>
+        }
+        @if (r.controls.e164.invalid && r.controls.e164.touched) {
+          <span class="field-error wide">Use the country-code format, e.g. +919800000000.</span>
+        }
+      </div>
+    }
+    @if (recipients.length < maxRecipients) {
+      <button type="button" class="link" (click)="addRecipient()">+ Add a person</button>
+    }
+  </fieldset>
+</div>

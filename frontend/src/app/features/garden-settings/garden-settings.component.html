@@ -1,0 +1,52 @@
+<div class="screen">
+  <section class="card">
+    <div class="intro">
+      <h2>Garden settings</h2>
+      <p>
+        @if (gardenName()) {
+          Facts about <strong>{{ gardenName() }}</strong> that every advisor takes into account.
+        } @else {
+          Facts about your garden that every advisor takes into account.
+        }
+      </p>
+    </div>
+
+    @if (noGarden()) {
+      <div class="form-error">
+        <td-icon name="info" size="18px" />
+        <span>No garden found. Set up your garden first.</span>
+      </div>
+    } @else if (loading()) {
+      <p class="muted">Loading…</p>
+    } @else if (loadFailed()) {
+      <!-- No editable form after a failed load: saving empty fields would wipe the stored block. -->
+      <div class="form-error">
+        <td-icon name="error" size="18px" />
+        <span>{{ errorMessage() }}</span>
+      </div>
+    } @else {
+      <form [formGroup]="form" (ngSubmit)="save()" class="form">
+        <label class="field">
+          <span class="field-label">What are you hoping to grow?</span>
+          <textarea formControlName="vision" rows="2" placeholder="e.g. A healthy 105-palm coconut block"></textarea>
+        </label>
+
+        <td-farm-details-fields [group]="form.controls.farm" />
+
+        @if (errorMessage()) {
+          <div class="form-error">
+            <td-icon name="error" size="18px" />
+            <span>{{ errorMessage() }}</span>
+          </div>
+        }
+
+        <div class="actions">
+          <button type="button" class="btn-secondary" (click)="cancel()" [disabled]="saving()">Cancel</button>
+          <button type="submit" class="btn-primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Save' }}
+          </button>
+        </div>
+      </form>
+    }
+  </section>
+</div>

@@ -1,3 +1,4 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -8,7 +9,26 @@ import { PhotoPickerComponent } from '../../shared/components/photo-picker/photo
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 import { GardenApi } from '../../core/services/garden.service';
 
-/** OB-02 "Add a Plant (with a photo)": species (required), variety (optional), photo (optional). */
+/** User-facing text for a failed create: a taken stake number (409), the API's own validation
+ * message (400), or a generic connection message. */
+export function addPlantErrorMessage(err: unknown, stakeNo?: number): string {
+  if (err instanceof HttpErrorResponse) {
+    if (err.status === 409) {
+      return stakeNo !== undefined
+        ? `Stake #${stakeNo} is already used by another plant in this garden.`
+        : 'That stake number is already used by another plant in this garden.';
+    }
+    const message = (err.error as { message?: string } | null)?.message;
+    if (err.status === 400 && message) return `Couldn't save: ${message}`;
+  }
+  return "Couldn't save your plant. Please check your connection and try again.";
+}
+
+/**
+ * OB-02 "Add a Plant (with a photo)": species (required), variety, photo, and (ADR-0032) an
+ * optional stake number — the number on the plant's physical stake, unique within the garden —
+ * and an optional growth stage.
+ */
 @Component({
   selector: 'td-add-plant',
   standalone: true,
@@ -27,9 +47,15 @@ export class AddPlantComponent {
   readonly errorMessage = signal<string | null>(null);
   readonly selectedFile = signal<File | null>(null);
 
-  readonly form = this.fb.nonNullable.group({
-    species: ['', [Validators.required, Validators.minLength(1)]],
-    variety: [''],
+  readonly form = this.fb.group({
+    species: this.fb.nonNullable.control('', [Validators.required, Validators.minLength(1)]),
+    variety: this.fb.nonNullable.control(''),
+    stage: this.fb.nonNullable.control('', [Validators.maxLength(50)]),
+    stakeNo: this.fb.control<number | null>(null, [
+      Validators.min(1),
+      Validators.max(99999),
+      Validators.pattern(/^\d+$/),
+    ]),
   });
 
   onFileSelected(file: File | null): void {
@@ -48,7 +74,8 @@ export class AddPlantComponent {
       return;
     }
 
-    const { species, variety } = this.form.getRawValue();
+    const { species, variety, stage, stakeNo } = this.form.getRawValue();
+    const stake = stakeNo === null || `${stakeNo}` === '' ? undefined : Number(stakeNo);
     const file = this.selectedFile();
     this.submitting.set(true);
     this.errorMessage.set(null);
@@ -70,16 +97,16 @@ export class AddPlantComponent {
             species,
             variety: variety || undefined,
             mediaId,
+            ...(stage.trim() ? { stage: stage.trim() } : {}),
+            ...(stake !== undefined ? { stakeNo: stake } : {}),
           }),
         ),
       )
       .subscribe({
         next: () => this.router.navigateByUrl('/garden'),
-        error: () => {
+        error: (err: unknown) => {
           this.submitting.set(false);
-          this.errorMessage.set(
-            "Couldn't save your plant. Please check your connection and try again.",
-          );
+          this.errorMessage.set(addPlantErrorMessage(err, stake));
         },
       });
   }

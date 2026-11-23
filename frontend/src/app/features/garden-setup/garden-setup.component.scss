@@ -69,6 +69,39 @@ input, textarea {
   color: var(--td-color-red-ink);
 }
 
+.disclosure {
+  border: 1px solid var(--td-color-line);
+  border-radius: var(--td-radius-md);
+}
+
+.disclosure-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  background: none;
+  border: none;
+  text-align: left;
+  font-family: var(--td-font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--td-color-ink);
+  cursor: pointer;
+
+  small {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--td-color-ink-secondary);
+  }
+}
+
+.disclosure-body {
+  padding: 0 12px 12px;
+}
+
 .form-error {
   display: flex;
   align-items: center;

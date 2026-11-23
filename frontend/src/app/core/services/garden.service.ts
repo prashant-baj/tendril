@@ -10,9 +10,16 @@ import {
   GardenFact,
   GardenSummary,
   GardenWeather,
+  UpdateGardenRequest,
 } from '../models/garden.model';
 import { CreateGoalRequest } from '../models/goal.model';
-import { CreatePlantRequest, Plant } from '../models/plant.model';
+import {
+  BulkCreatePlantsRequest,
+  BulkCreatePlantsResponse,
+  CreatePlantRequest,
+  CreatePlantResponse,
+  Plant,
+} from '../models/plant.model';
 import { MediaUploadRequest, MediaUploadResponse } from '../models/media.model';
 
 /**
@@ -35,6 +42,8 @@ export abstract class GardenApi {
   abstract createGarden(request: CreateGardenRequest): Observable<{ gardenId: string }>;
   /** OB-01: `GET /gardens/{gardenId}`. */
   abstract getGardenById(gardenId: string): Observable<Garden>;
+  /** ADR-0032: `PATCH /gardens/{gardenId}` — returns the updated garden. */
+  abstract updateGarden(gardenId: string, request: UpdateGardenRequest): Observable<Garden>;
   /** Multi-garden switcher: `GET /gardens` — every garden the caller owns. */
   abstract getGardens(): Observable<GardenSummary[]>;
   /** `GET /gardens/{gardenId}/weather` — `undefined` when unavailable (geocoding/forecast
@@ -49,10 +58,12 @@ export abstract class GardenApi {
   abstract uploadMedia(uploadUrl: string, file: File): Observable<void>;
   /** OB-02: `POST /gardens/{gardenId}/plants`. `photoUrl` (OB-03) is present only if `mediaId`
    * was given. */
-  abstract createPlant(
+  abstract createPlant(gardenId: string, request: CreatePlantRequest): Observable<CreatePlantResponse>;
+  /** ADR-0032: `POST /gardens/{gardenId}/plants/bulk` — one plant per stake number, idempotent. */
+  abstract bulkCreatePlants(
     gardenId: string,
-    request: CreatePlantRequest,
-  ): Observable<{ plantId: string; photoUrl?: string }>;
+    request: BulkCreatePlantsRequest,
+  ): Observable<BulkCreatePlantsResponse>;
   /** Plant lifecycle: `DELETE /gardens/{gardenId}/plants/{plantId}`. */
   abstract deletePlant(gardenId: string, plantId: string): Observable<void>;
   /** WS-03/WS-05: `POST /gardens/{gardenId}/goals` — 202, async orchestration (ADR-0012). */
@@ -119,13 +130,26 @@ export class MockGardenApi extends GardenApi {
       name: request.name,
       vision: request.vision ?? '',
       geolocation: request.geolocation,
-      climateZone: '',
+      climateZone: request.climateZone ?? '',
+      ...(request.context ? { context: request.context } : {}),
     });
     return of({ gardenId });
   }
 
   getGardenById(gardenId: string): Observable<Garden> {
     return of(this.createdGardens.get(gardenId) ?? this.garden);
+  }
+
+  updateGarden(gardenId: string, request: UpdateGardenRequest): Observable<Garden> {
+    const current = this.createdGardens.get(gardenId) ?? this.garden;
+    const updated: Garden = {
+      ...current,
+      ...(request.vision !== undefined ? { vision: request.vision } : {}),
+      ...(request.climateZone !== undefined ? { climateZone: request.climateZone } : {}),
+      ...(request.context !== undefined ? { context: request.context } : {}),
+    };
+    this.createdGardens.set(gardenId, updated);
+    return of(updated);
   }
 
   getGardens(): Observable<GardenSummary[]> {
@@ -155,21 +179,40 @@ export class MockGardenApi extends GardenApi {
     return of(undefined);
   }
 
-  createPlant(_gardenId: string, request: CreatePlantRequest): Observable<{ plantId: string }> {
+  createPlant(_gardenId: string, request: CreatePlantRequest): Observable<CreatePlantResponse> {
     const plantId = `mock-plant-${Math.random().toString(36).slice(2, 10)}`;
     const plant: Plant = {
       plantId,
-      name: request.species,
+      name: request.stakeNo != null ? `#${request.stakeNo} ${request.species}` : request.species,
       species: request.species,
       variety: request.variety ?? '',
-      stage: 'new',
+      stage: request.stage ?? 'new',
       icon: 'eco',
       healthState: 'healthy',
       meta: request.variety ?? '',
+      ...(request.stakeNo != null ? { stakeNo: request.stakeNo } : {}),
     };
     this.plants.unshift(plant);
     this.plantsSummary.unshift(plant);
-    return of({ plantId });
+    return of({ plantId, ...(request.stakeNo != null ? { stakeNo: request.stakeNo } : {}) });
+  }
+
+  bulkCreatePlants(
+    gardenId: string,
+    request: BulkCreatePlantsRequest,
+  ): Observable<BulkCreatePlantsResponse> {
+    const taken = new Set(this.plants.map((p) => p.stakeNo).filter((n) => n != null));
+    const response: BulkCreatePlantsResponse = { created: [], skipped: [] };
+    for (let stakeNo = request.stakeFrom; stakeNo <= request.stakeTo; stakeNo++) {
+      if (taken.has(stakeNo)) {
+        response.skipped.push(stakeNo);
+        continue;
+      }
+      let plantId = '';
+      this.createPlant(gardenId, { ...request, stakeNo }).subscribe((r) => (plantId = r.plantId));
+      response.created.push({ plantId, stakeNo });
+    }
+    return of(response);
   }
 
   deletePlant(_gardenId: string, plantId: string): Observable<void> {
@@ -213,6 +256,18 @@ interface PlantDto {
   photoUrl?: string;
   /** Stake number (ADR-0032), when the plant has one. */
   stakeNo?: number;
+}
+
+function gardenFromDto(dto: GardenDto): Garden {
+  return {
+    gardenId: dto.gardenId,
+    name: dto.name,
+    geolocation: dto.geolocation,
+    vision: dto.vision ?? '',
+    climateZone: dto.climateZone ?? '',
+    photoUrl: dto.photoUrl,
+    ...(dto.context ? { context: dto.context } : {}),
+  };
 }
 
 function plantFromDto(dto: PlantDto): Plant {
@@ -271,19 +326,13 @@ export class HttpGardenApi extends GardenApi {
   }
 
   getGardenById(gardenId: string): Observable<Garden> {
+    return this.http.get<GardenDto>(`${this.baseUrl}/gardens/${gardenId}`).pipe(map(gardenFromDto));
+  }
+
+  updateGarden(gardenId: string, request: UpdateGardenRequest): Observable<Garden> {
     return this.http
-      .get<GardenDto>(`${this.baseUrl}/gardens/${gardenId}`)
-      .pipe(
-        map((dto) => ({
-          gardenId: dto.gardenId,
-          name: dto.name,
-          geolocation: dto.geolocation,
-          vision: dto.vision ?? '',
-          climateZone: dto.climateZone ?? '',
-          photoUrl: dto.photoUrl,
-          ...(dto.context ? { context: dto.context } : {}),
-        })),
-      );
+      .patch<GardenDto>(`${this.baseUrl}/gardens/${gardenId}`, request)
+      .pipe(map(gardenFromDto));
   }
 
   getGardens(): Observable<GardenSummary[]> {
@@ -314,12 +363,16 @@ export class HttpGardenApi extends GardenApi {
       .pipe(map(() => undefined));
   }
 
-  createPlant(
+  createPlant(gardenId: string, request: CreatePlantRequest): Observable<CreatePlantResponse> {
+    return this.http.post<CreatePlantResponse>(`${this.baseUrl}/gardens/${gardenId}/plants`, request);
+  }
+
+  bulkCreatePlants(
     gardenId: string,
-    request: CreatePlantRequest,
-  ): Observable<{ plantId: string; photoUrl?: string }> {
-    return this.http.post<{ plantId: string; photoUrl?: string }>(
-      `${this.baseUrl}/gardens/${gardenId}/plants`,
+    request: BulkCreatePlantsRequest,
+  ): Observable<BulkCreatePlantsResponse> {
+    return this.http.post<BulkCreatePlantsResponse>(
+      `${this.baseUrl}/gardens/${gardenId}/plants/bulk`,
       request,
     );
   }

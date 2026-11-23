@@ -28,3 +28,28 @@ export interface CreatePlantRequest {
   /** Optional stake number (ADR-0032) — a 409 means it's already used in this garden. */
   stakeNo?: number;
 }
+
+/** `POST /gardens/{gardenId}/plants` response. */
+export interface CreatePlantResponse {
+  plantId: string;
+  photoUrl?: string;
+  stakeNo?: number;
+  /** True when `stakeNo` is outside the garden's stake range; the plant is still created. */
+  outOfRange?: boolean;
+}
+
+/** Client API request body for `POST /gardens/{gardenId}/plants/bulk` (ADR-0032). */
+export interface BulkCreatePlantsRequest {
+  species: string;
+  variety?: string;
+  stage?: string;
+  stakeFrom: number;
+  /** Inclusive; at most 200 plants per call. */
+  stakeTo: number;
+}
+
+/** `POST /gardens/{gardenId}/plants/bulk` response. Idempotent: existing numbers are skipped. */
+export interface BulkCreatePlantsResponse {
+  created: { plantId: string; stakeNo: number; outOfRange?: boolean }[];
+  skipped: number[];
+}

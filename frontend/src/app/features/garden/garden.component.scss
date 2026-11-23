@@ -66,6 +66,20 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px 0; color: var(--td-colo
   color: var(--td-color-ink-secondary);
 }
 
+.fact-action {
+  border: none;
+  font-family: var(--td-font-sans);
+  cursor: pointer;
+  gap: 4px;
+
+  &:hover { color: var(--td-color-primary); }
+}
+
+.head-actions {
+  display: flex;
+  gap: 16px;
+}
+
 .list {
   overflow: hidden;
   display: flex;

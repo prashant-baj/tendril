@@ -5,15 +5,25 @@ import { Observable, of } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { PhotoPickerComponent } from '../../shared/components/photo-picker/photo-picker.component';
+import { FarmDetailsFieldsComponent } from '../../shared/components/farm-details/farm-details-fields.component';
+import {
+  buildFarmDetailsGroup,
+  farmDetailsToRequest,
+  isEmptyFarmDetails,
+} from '../../shared/components/farm-details/farm-details.util';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 import { GardenApi } from '../../core/services/garden.service';
 import { generateId } from '../../core/utils/id.util';
 
-/** OB-01 "Setup My Garden": name / geolocation (required), vision + photo (optional). */
+/**
+ * OB-01 "Setup My Garden": name / geolocation (required), vision + photo (optional), plus an
+ * optional, collapsed "Farm details" section (ADR-0032 context block) for farms that want their
+ * advisors to know soil, irrigation, layout and who gets reminders.
+ */
 @Component({
   selector: 'td-garden-setup',
   standalone: true,
-  imports: [ReactiveFormsModule, IconComponent, PhotoPickerComponent],
+  imports: [ReactiveFormsModule, IconComponent, PhotoPickerComponent, FarmDetailsFieldsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './garden-setup.component.html',
   styleUrl: './garden-setup.component.scss',
@@ -27,24 +37,39 @@ export class GardenSetupComponent {
   readonly submitting = signal(false);
   readonly errorMessage = signal<string | null>(null);
   readonly selectedFile = signal<File | null>(null);
+  readonly showFarmDetails = signal(false);
 
   readonly form = this.fb.nonNullable.group({
     name: ['', [Validators.required, Validators.minLength(1)]],
     geolocation: ['', [Validators.required, Validators.minLength(1)]],
     vision: [''],
+    farm: buildFarmDetailsGroup(),
   });
 
   onFileSelected(file: File | null): void {
     this.selectedFile.set(file);
   }
 
+  toggleFarmDetails(): void {
+    this.showFarmDetails.update((v) => !v);
+  }
+
   submit(): void {
     if (this.form.invalid || this.submitting()) {
       this.form.markAllAsTouched();
+      // An invalid field hidden in the collapsed section would be impossible to find.
+      if (this.form.controls.farm.invalid) this.showFarmDetails.set(true);
       return;
     }
 
     const { name, geolocation, vision } = this.form.getRawValue();
+    const farm = farmDetailsToRequest(this.form.controls.farm);
+    const farmFields = isEmptyFarmDetails(farm)
+      ? {}
+      : {
+          ...(farm.climateZone ? { climateZone: farm.climateZone } : {}),
+          ...(Object.keys(farm.context).length ? { context: farm.context } : {}),
+        };
     const file = this.selectedFile();
     this.submitting.set(true);
     this.errorMessage.set(null);
@@ -76,6 +101,7 @@ export class GardenSetupComponent {
             vision: vision || undefined,
             gardenId,
             mediaId,
+            ...farmFields,
           }),
         ),
       )

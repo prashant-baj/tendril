@@ -182,7 +182,7 @@ erDiagram
 | **Memory / Knowledge** | Real per-garden memory — a Bedrock Knowledge Base (S3 Vectors backend) each specialist retrieves/ingests against, wired into the shared agent template, not the orchestrator | Bedrock Knowledge Bases | Managed |
 | **Persistence** | Structured domain state + event/message log, single table | DynamoDB | Managed |
 | **Supervisor** *(candidate — CP-07, pending ADR; not built)* | New agent **above** the orchestrator: owns a garden's standing goals and its own agenda of scheduled checks, consumes a deterministic garden-state rollup (plant history + activity log + garden context), and when it decides to act **submits a garden-scoped goal into the existing orchestrator** — it does not replace it or call specialists directly. Model choice and whether assessment reasoning lives here or in a new garden-level specialist are decided in its ADR (`docs/stories/coconut-plantation.md` CP-07) | Strands | Lambda (EventBridge Scheduler-triggered), to be confirmed by ADR |
-| **Frontend** | Angular PWA — 8 routed screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
+| **Frontend** | Angular PWA — 10 routed screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
 
 **Not built yet** (documented gaps, not oversights): a Notification service and any push channel
 (WebSocket/WhatsApp/email/web-push) — today every follow-up is a chat message the gardener sees
@@ -441,20 +441,22 @@ documented non-goal.
 ## 8. Frontend
 
 The Angular PWA ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md)) implements the
-"Tendril App" design across 8 routed screens behind a responsive shell, deployed as a static
+"Tendril App" design across 10 routed screens behind a responsive shell, deployed as a static
 site ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)).
 
 ### 8.1 Screens & shell
 
 | Screen | Route | Purpose |
 |---|---|---|
-| Garden setup | `/garden-setup` | First-run onboarding — name, geolocation, optional photo |
+| Garden setup | `/garden-setup` | First-run onboarding — name, geolocation, optional photo, optional collapsed **Farm details** (climate zone, soil, irrigation, intercrop, layout, stake range, WhatsApp recipients — ADR-0032) |
 | Home | `/home` | Weather chip, pending-plan banner, today's tasks, goals in progress, plants strip |
-| Add plant | `/add-plant` | Record a species/variety/photo, linked to the current garden (OB-02) |
+| Add plant | `/add-plant` | Record a species/variety/photo, optional stake number + stage (409 → "stake already used"), linked to the current garden (OB-02, ADR-0032) |
+| Add numbered plants | `/add-plants` | Bulk-create one plant per stake number in a range (`POST /plants/bulk`), pre-filled from the garden's stake range; shows created/skipped (CP-02) |
 | Check a plant | `/capture` | Photo + description → real goal submission against the Client API |
 | Goal detail | `/goals/:goalId` | Plan approval (HITL), collapsible specialist trace, plan tasks, full reasoning thread, check-in |
 | Tasks | `/tasks` | Grouped Today / This week / Later task lists |
-| Garden | `/garden` | Garden hero photo/facts + full plant list, entry point to Add plant |
+| Garden | `/garden` | Garden hero photo/facts + full plant list (ordered by stake number), entry point to Add plant, Add numbered, Garden settings |
+| Garden settings | `/garden-settings` | Edit vision + farm details of the current garden (`PATCH /gardens/{id}`, replaces the whole context block); no editable form after a failed load (CP-01) |
 | Activity | `/activity` | Real event timeline (the EVENT entity, §2) |
 
 Desktop (≥900px) gets a persistent nav rail; narrower viewports get a bottom tab bar with a

@@ -1,7 +1,8 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, provideRouter } from '@angular/router';
 import { of, throwError } from 'rxjs';
-import { AddPlantComponent } from './add-plant.component';
+import { AddPlantComponent, addPlantErrorMessage } from './add-plant.component';
 import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
@@ -49,7 +50,7 @@ describe('AddPlantComponent', () => {
     gardenApi.createPlant.and.returnValue(of({ plantId: 'p-1' }));
     const navigateSpy = spyOn(router, 'navigateByUrl');
 
-    component.form.setValue({ species: 'Tomato', variety: 'Pusa Ruby' });
+    component.form.patchValue({ species: 'Tomato', variety: 'Pusa Ruby' });
     component.submit();
 
     expect(gardenApi.requestMediaUpload).not.toHaveBeenCalled();
@@ -71,7 +72,7 @@ describe('AddPlantComponent', () => {
 
     const file = new File(['x'], 'tomato.jpg', { type: 'image/jpeg' });
     component.onFileSelected(file);
-    component.form.setValue({ species: 'Tomato', variety: '' });
+    component.form.patchValue({ species: 'Tomato', variety: '' });
     component.submit();
 
     expect(gardenApi.requestMediaUpload).toHaveBeenCalledWith('g-1', {
@@ -95,12 +96,58 @@ describe('AddPlantComponent', () => {
     const navigateSpy = spyOn(router, 'navigateByUrl');
 
     component.onFileSelected(new File(['x'], 'tomato.jpg', { type: 'image/jpeg' }));
-    component.form.setValue({ species: 'Tomato', variety: '' });
+    component.form.patchValue({ species: 'Tomato', variety: '' });
     component.submit();
 
     expect(gardenApi.createPlant).not.toHaveBeenCalled();
     expect(component.errorMessage()).toBeTruthy();
     expect(component.submitting()).toBe(false);
     expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  // --- Stake number + stage (ADR-0032) ---------------------------------------------------------
+
+  it('sends the stake number and stage when given', () => {
+    gardenApi.createPlant.and.returnValue(of({ plantId: 'p-74', stakeNo: 74 }));
+    spyOn(router, 'navigateByUrl');
+
+    component.form.patchValue({ species: 'Coconut', stakeNo: 74, stage: ' young ' });
+    component.submit();
+
+    expect(gardenApi.createPlant).toHaveBeenCalledWith('g-1', {
+      species: 'Coconut',
+      variety: undefined,
+      mediaId: undefined,
+      stage: 'young',
+      stakeNo: 74,
+    });
+  });
+
+  it('explains a taken stake number (409) and stays on the page', () => {
+    gardenApi.createPlant.and.returnValue(
+      throwError(() => new HttpErrorResponse({ status: 409, error: { message: 'dup' } })),
+    );
+    const navigateSpy = spyOn(router, 'navigateByUrl');
+
+    component.form.patchValue({ species: 'Coconut', stakeNo: 74 });
+    component.submit();
+
+    expect(component.errorMessage()).toBe('Stake #74 is already used by another plant in this garden.');
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid stake number before calling the API', () => {
+    component.form.patchValue({ species: 'Coconut', stakeNo: 0 });
+    component.submit();
+    expect(gardenApi.createPlant).not.toHaveBeenCalled();
+  });
+
+  it('shows the API validation message on a 400', () => {
+    expect(
+      addPlantErrorMessage(
+        new HttpErrorResponse({ status: 400, error: { message: 'stage must be a non-empty string' } }),
+      ),
+    ).toBe("Couldn't save: stage must be a non-empty string");
+    expect(addPlantErrorMessage(new Error('offline'))).toContain('check your connection');
   });
 });

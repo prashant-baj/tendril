@@ -39,6 +39,18 @@ export interface CreateGardenRequest {
   gardenId?: string;
   /** Id from a prior requestMediaUpload call (uploaded under the same gardenId above). */
   mediaId?: string;
+  /** Optional free-text climate zone (ADR-0032). */
+  climateZone?: string;
+  /** Optional whole-farm facts (ADR-0032). */
+  context?: GardenContext;
+}
+
+/** Client API request body for `PATCH /gardens/{gardenId}` (ADR-0032). At least one field;
+ * `context` replaces the stored block as a whole (no field-level merge). */
+export interface UpdateGardenRequest {
+  vision?: string;
+  climateZone?: string;
+  context?: GardenContext;
 }
 
 /** One entry in the multi-garden switcher (`GET /gardens`) — just enough to list and switch,

@@ -343,4 +343,40 @@ describe('HttpGardenApi', () => {
 
     expect(result).toEqual({ goalId: 'goal-1', status: 'Intake' });
   });
+
+  it('updateGarden() PATCHes /gardens/{id} and maps the returned garden (ADR-0032)', () => {
+    let result: unknown;
+    const body = { climateZone: 'Semi-arid', context: { soil: 'clay' } };
+    api.updateGarden('g-1', body).subscribe((g) => (result = g));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1`);
+    expect(req.request.method).toBe('PATCH');
+    expect(req.request.body).toEqual(body);
+    req.flush({
+      gardenId: 'g-1',
+      name: 'Farm',
+      geolocation: 'Kopargaon',
+      ownerUserId: 'u',
+      createdAt: '2026-11-23T00:00:00Z',
+      climateZone: 'Semi-arid',
+      context: { soil: 'clay' },
+    });
+
+    expect(result).toEqual(
+      jasmine.objectContaining({ gardenId: 'g-1', climateZone: 'Semi-arid', context: { soil: 'clay' } }),
+    );
+  });
+
+  it('bulkCreatePlants() POSTs the range to /gardens/{id}/plants/bulk (ADR-0032)', () => {
+    let result: unknown;
+    const body = { species: 'Coconut', stakeFrom: 1, stakeTo: 3 };
+    api.bulkCreatePlants('g-1', body).subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne(`${baseUrl}/gardens/g-1/plants/bulk`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual(body);
+    req.flush({ created: [{ plantId: 'p1', stakeNo: 1 }], skipped: [2, 3] });
+
+    expect(result).toEqual({ created: [{ plantId: 'p1', stakeNo: 1 }], skipped: [2, 3] });
+  });
 });

@@ -1,0 +1,90 @@
+<div class="screen">
+  <section class="card">
+    <div class="intro">
+      <h2>Add numbered plants</h2>
+      <p>Create one plant for each stake number in a range, e.g. palms #1 to #105.</p>
+    </div>
+
+    @if (result(); as r) {
+      <div class="result" role="status">
+        <td-icon name="check_circle" size="22px" />
+        <div>
+          <p class="headline">
+            {{ r.created.length }} plant{{ r.created.length === 1 ? '' : 's' }} added
+            @if (r.skipped.length) {
+              · {{ r.skipped.length }} skipped
+            }
+          </p>
+          @if (r.skipped.length) {
+            <p class="detail">Already in your garden, left unchanged: {{ r.skipped.length > 20 ? r.skipped.length + ' numbers' : '#' + r.skipped.join(', #') }}.</p>
+          }
+          @if (outOfRangeCount) {
+            <p class="detail warn">
+              {{ outOfRangeCount }} number{{ outOfRangeCount === 1 ? ' is' : 's are' }} outside your
+              garden's stake range but {{ outOfRangeCount === 1 ? 'was' : 'were' }} added. If that's a
+              typo, delete them from your garden list; if the range is out of date, update it in
+              Garden settings.
+            </p>
+          }
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn-secondary" (click)="addMore()">Add more</button>
+        <button type="button" class="btn-primary" (click)="goToGarden()">Go to garden</button>
+      </div>
+    } @else {
+      <form [formGroup]="form" (ngSubmit)="submit()" class="form">
+        <label class="field">
+          <span class="field-label">Species</span>
+          <input type="text" formControlName="species" placeholder="e.g. Coconut" autocomplete="off" />
+          @if (form.controls.species.invalid && form.controls.species.touched) {
+            <span class="field-error">Species is required.</span>
+          }
+        </label>
+
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Variety (optional)</span>
+            <input type="text" formControlName="variety" placeholder="e.g. Kalpa Samrudhi" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span class="field-label">Stage (optional)</span>
+            <input type="text" formControlName="stage" placeholder="e.g. young" autocomplete="off" />
+          </label>
+        </div>
+
+        <fieldset class="field">
+          <legend class="field-label">Stake numbers</legend>
+          <div class="range">
+            <input type="number" formControlName="stakeFrom" min="1" placeholder="From" aria-label="Stake numbers from" />
+            <span class="to">to</span>
+            <input type="number" formControlName="stakeTo" min="1" placeholder="To" aria-label="Stake numbers to" />
+          </div>
+          @if ((form.controls.stakeFrom.invalid && form.controls.stakeFrom.touched) || (form.controls.stakeTo.invalid && form.controls.stakeTo.touched)) {
+            <span class="field-error">Enter whole numbers from 1 to 99999.</span>
+          }
+          @if (form.errors?.['order']) {
+            <span class="field-error">"From" must not be bigger than "To".</span>
+          }
+          @if (form.errors?.['tooMany']) {
+            <span class="field-error">At most {{ bulkMax }} plants at a time. Split the range into parts.</span>
+          }
+          @if (count && !form.errors) {
+            <span class="hint">This adds up to {{ count }} plant{{ count === 1 ? '' : 's' }}. Numbers already in your garden are skipped.</span>
+          }
+        </fieldset>
+
+        @if (errorMessage()) {
+          <div class="form-error">
+            <td-icon name="error" size="18px" />
+            <span>{{ errorMessage() }}</span>
+          </div>
+        }
+
+        <button type="submit" class="btn-primary" [disabled]="submitting()">
+          {{ submitting() ? 'Adding plants…' : 'Add plants' }}
+        </button>
+      </form>
+    }
+  </section>
+</div>

@@ -142,7 +142,10 @@ Accepted 2026-11-23.**
 `createGarden`/`getGarden`, new `PATCH /gardens/{id}`, garden context injected into the
 orchestrator's system prompt and every specialist prompt (recipients never sent to a model).
 **Open:** deploy to `dev` + smoke test (set the Bramhangaon context; confirm it in a specialist
-prompt in CloudWatch). No garden-settings UI yet — context is set via the API.
+prompt in CloudWatch). **UI (2026-11-23):** optional collapsed "Farm details" section on Garden
+Setup, and a new Garden settings screen (`/garden-settings`, `PATCH`) to edit an existing
+garden's facts; shared `FarmDetailsFieldsComponent` validates like the API (E.164, stake range,
+length limits).
 
 ---
 
@@ -174,6 +177,9 @@ unit/contract-tested (2026-11-23): optional `stakeNo` with a per-garden `STAKE#`
 duplicate), optional `stage`, `POST /gardens/{id}/plants/bulk` (idempotent, ≤200/call,
 out-of-range numbers created but flagged), `listPlants` stake ordering + full pagination + one
 `BatchGetItem` for photos, delete frees the stake number. Frontend shows "#74 Coconut".
+**UI (2026-11-23):** Add Plant takes an optional stake number + stage (409 → "Stake #N is
+already used"); new "Add numbered plants" screen (`/add-plants`) bulk-creates a range,
+pre-filled from the garden's stake range, and reports created/skipped/out-of-range.
 **Open:** deploy + smoke test (bulk-add #1–105 in dev, re-run to confirm all 105 skipped).
 
 ---
