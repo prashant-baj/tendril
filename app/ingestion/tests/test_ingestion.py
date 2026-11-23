@@ -190,3 +190,20 @@ def test_derived_objects_are_ignored(fakes):
     result = ingestion.handler(_s3_event(f"derived/{G}/{M}/analysis.jpg"), None)
     assert result == {"outcomes": {"skipped": 1}}
     assert lam.events == [] and table.updates == []
+
+
+def test_capture_time_is_recorded_when_the_tool_reports_one(fakes, monkeypatch):
+    _, _, table = fakes
+    monkeypatch.setattr(
+        ingestion, "_lambda", FakeLambda(body=dict(TOOL_OK, takenAt="2026-08-02T07:30:15"))
+    )
+    ingestion.handler(_s3_event(UPLOAD_KEY), None)
+    (update,) = table.updates
+    assert _values(update)[":taken_at"] == "2026-08-02T07:30:15"
+
+
+def test_no_capture_time_means_no_taken_at_field(fakes):
+    _, _, table = fakes
+    ingestion.handler(_s3_event(UPLOAD_KEY), None)
+    (update,) = table.updates
+    assert ":taken_at" not in _values(update)

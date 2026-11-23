@@ -125,11 +125,18 @@ export class GoalDetailComponent {
     (event.target as HTMLImageElement).style.display = 'none';
   }
 
-  /** The proposal an assistant message asks about, if any (ADR-0034). */
+  /** The proposal an assistant message asks about, if any (ADR-0034). A repeated proposal keeps
+   * its id across replies, so its card is shown only on the latest message that carries it. */
   actionFor(message: ChatMessage): GoalAction | undefined {
-    return message.actionId
-      ? this.detail()?.actions?.find((a) => a.actionId === message.actionId)
-      : undefined;
+    if (!message.actionId) {
+      return undefined;
+    }
+    const messages = this.detail()?.messages ?? [];
+    const latest = [...messages].reverse().find((m) => m.actionId === message.actionId);
+    if (latest && latest !== message) {
+      return undefined;
+    }
+    return this.detail()?.actions?.find((a) => a.actionId === message.actionId);
   }
 
   taskTitle(taskId: string | undefined): string {

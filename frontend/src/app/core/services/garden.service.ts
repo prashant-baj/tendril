@@ -19,6 +19,12 @@ import {
   CreatePlantRequest,
   CreatePlantResponse,
   Plant,
+  PlantDetail,
+  PlantHealthState,
+  PlantHistoryQuery,
+  PlantLogEntry,
+  PlantLogRequest,
+  PlantStatus,
 } from '../models/plant.model';
 import { MediaUploadRequest, MediaUploadResponse } from '../models/media.model';
 
@@ -66,6 +72,20 @@ export abstract class GardenApi {
   ): Observable<BulkCreatePlantsResponse>;
   /** Plant lifecycle: `DELETE /gardens/{gardenId}/plants/{plantId}`. */
   abstract deletePlant(gardenId: string, plantId: string): Observable<void>;
+  /** CP-05 / ADR-0035: `GET /gardens/{gardenId}/plants/{plantId}` — details + a history page. */
+  abstract getPlant(
+    gardenId: string,
+    plantId: string,
+    query?: PlantHistoryQuery,
+  ): Observable<PlantDetail>;
+  /** CP-03 / ADR-0035: `POST /gardens/{gardenId}/plants/{plantId}/history`. */
+  abstract addPlantLog(
+    gardenId: string,
+    plantId: string,
+    request: PlantLogRequest,
+  ): Observable<PlantLogEntry>;
+  /** ADR-0035 §8: `PATCH /gardens/{gardenId}/plants/{plantId}` — e.g. stage `removed`. */
+  abstract updatePlantStage(gardenId: string, plantId: string, stage: string): Observable<Plant>;
   /** WS-03/WS-05: `POST /gardens/{gardenId}/goals` — 202, async orchestration (ADR-0012). */
   abstract createGoal(
     gardenId: string,
@@ -225,6 +245,28 @@ export class MockGardenApi extends GardenApi {
     return of(undefined);
   }
 
+  getPlant(_gardenId: string, plantId: string): Observable<PlantDetail> {
+    const plant = this.plants.find((p) => p.plantId === plantId) ?? this.plants[0];
+    return of({ plant, history: { entries: [] } });
+  }
+
+  addPlantLog(_gardenId: string, _plantId: string, request: PlantLogRequest): Observable<PlantLogEntry> {
+    return of({
+      entryId: `mock-entry-${Math.random().toString(36).slice(2, 10)}`,
+      observedOn: request.observedOn ?? new Date().toISOString().slice(0, 10),
+      kind: 'log',
+      source: 'user',
+      photos: [],
+      ...(request.note ? { note: request.note } : {}),
+      ...(request.status ? { status: request.status } : {}),
+    });
+  }
+
+  updatePlantStage(_gardenId: string, plantId: string, stage: string): Observable<Plant> {
+    const plant = this.plants.find((p) => p.plantId === plantId) ?? this.plants[0];
+    return of({ ...plant, stage });
+  }
+
   createGoal(
     _gardenId: string,
     _request: CreateGoalRequest,
@@ -256,6 +298,29 @@ interface PlantDto {
   photoUrl?: string;
   /** Stake number (ADR-0032), when the plant has one. */
   stakeNo?: number;
+  latestStatus?: PlantStatus;
+  latestObservedOn?: string;
+  historyCount?: number;
+}
+
+/** The owner's tracker scale (ADR-0035) onto the existing health chip: `ok` reads as healthy,
+ * `watch` as watch. No status logged yet → healthy, as before. */
+const STATUS_TO_HEALTH: Record<PlantStatus, PlantHealthState> = {
+  healthy: 'healthy',
+  ok: 'healthy',
+  watch: 'watch',
+};
+
+/** "2026-11-20" → "20 Nov 2026", for plant meta lines. */
+export function formatObservedOn(date: string): string {
+  const [y, m, d] = date.split('-').map(Number);
+  if (!y || !m || !d) {
+    return date;
+  }
+  const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][
+    m - 1
+  ];
+  return `${d} ${month} ${y}`;
 }
 
 function gardenFromDto(dto: GardenDto): Garden {
@@ -282,9 +347,14 @@ function plantFromDto(dto: PlantDto): Plant {
     // No real health-tracking backend yet — a generic icon/healthy state stands in for it until
     // that story lands. The photo itself is real (OB-03); `icon` is just its no-photo fallback.
     icon: 'eco',
-    healthState: 'healthy',
-    meta: dto.variety ?? '',
+    healthState: dto.latestStatus ? STATUS_TO_HEALTH[dto.latestStatus] : 'healthy',
+    meta: [dto.variety, dto.latestObservedOn ? `Last seen ${formatObservedOn(dto.latestObservedOn)}` : '']
+      .filter(Boolean)
+      .join(' · '),
     photoUrl: dto.photoUrl,
+    ...(dto.latestStatus ? { latestStatus: dto.latestStatus } : {}),
+    ...(dto.latestObservedOn ? { latestObservedOn: dto.latestObservedOn } : {}),
+    ...(dto.historyCount != null ? { historyCount: dto.historyCount } : {}),
   };
 }
 
@@ -379,6 +449,38 @@ export class HttpGardenApi extends GardenApi {
 
   deletePlant(gardenId: string, plantId: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/gardens/${gardenId}/plants/${plantId}`);
+  }
+
+  getPlant(gardenId: string, plantId: string, query: PlantHistoryQuery = {}): Observable<PlantDetail> {
+    const params: Record<string, string> = {};
+    if (query.limit) {
+      params['limit'] = String(query.limit);
+    }
+    if (query.cursor) {
+      params['cursor'] = query.cursor;
+    }
+    if (query.order) {
+      params['order'] = query.order;
+    }
+    return this.http
+      .get<{ plant: PlantDto; history: PlantDetail['history'] }>(
+        `${this.baseUrl}/gardens/${gardenId}/plants/${plantId}`,
+        { params },
+      )
+      .pipe(map((dto) => ({ plant: plantFromDto(dto.plant), history: dto.history })));
+  }
+
+  addPlantLog(gardenId: string, plantId: string, request: PlantLogRequest): Observable<PlantLogEntry> {
+    return this.http.post<PlantLogEntry>(
+      `${this.baseUrl}/gardens/${gardenId}/plants/${plantId}/history`,
+      request,
+    );
+  }
+
+  updatePlantStage(gardenId: string, plantId: string, stage: string): Observable<Plant> {
+    return this.http
+      .patch<PlantDto>(`${this.baseUrl}/gardens/${gardenId}/plants/${plantId}`, { stage })
+      .pipe(map(plantFromDto));
   }
 
   createGoal(

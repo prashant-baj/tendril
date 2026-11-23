@@ -114,6 +114,11 @@ components:
         width: {type: integer}
         height: {type: integer}
         bytes: {type: integer}
+        takenAt:
+          type: string
+          description: >
+            Camera capture time from EXIF (DateTimeOriginal, else DateTimeDigitized), ISO local
+            time without a zone. Omitted when absent or implausible (ADR-0035).
     ResizeResult:
       allOf:
         - $ref: "#/components/schemas/InspectResult"

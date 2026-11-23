@@ -453,3 +453,57 @@ describe('GoalDetailComponent (goal not found)', () => {
     expect((fixture.nativeElement as HTMLElement).textContent).toContain('Goal not found');
   });
 });
+
+describe('GoalDetailComponent (linked plant and repeated proposals)', () => {
+  const ACTION = {
+    actionId: 'a1',
+    type: 'set_goal_plant' as const,
+    summary: 'Link this goal to #13?',
+    status: 'confirmed' as const,
+    createdAt: 'x',
+  };
+  const LINKED: GoalDetail = {
+    ...DETAIL,
+    goal: { ...DETAIL.goal, plantId: 'p13', plantStakeNo: 13 },
+    messages: [
+      { role: 'assistant', content: 'first ask', createdAt: '1', actionId: 'a1' },
+      { role: 'user', content: 'Plant # 13', createdAt: '2' },
+      { role: 'assistant', content: 'asked again', createdAt: '3', actionId: 'a1' },
+    ],
+    actions: [ACTION],
+  };
+  let fixture: ComponentFixture<GoalDetailComponent>;
+
+  beforeEach(async () => {
+    const api = new FakeGoalApi();
+    api.getGoalDetail = () => of(LINKED);
+    await TestBed.configureTestingModule({
+      imports: [GoalDetailComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GoalApi, useValue: api },
+        { provide: GardenApi, useClass: FakeGardenApi },
+        { provide: CurrentGardenService, useValue: { gardenId: () => 'g-1' } },
+        {
+          provide: ActivatedRoute,
+          useValue: { paramMap: of(convertToParamMap({ goalId: 'goal-1' })) },
+        },
+      ],
+    }).compileComponents();
+    fixture = TestBed.createComponent(GoalDetailComponent);
+    fixture.detectChanges();
+  });
+
+  it("shows the goal's plant number in the header", () => {
+    const header: HTMLElement = fixture.nativeElement.querySelector('.header');
+    expect(header.textContent).toContain('Plant #13');
+  });
+
+  it('shows a repeated proposal once, on the latest message that carries it', () => {
+    const c = fixture.componentInstance;
+    const [first, , latest] = LINKED.messages;
+    expect(c.actionFor(first)).toBeUndefined();
+    expect(c.actionFor(latest)?.actionId).toBe('a1');
+    expect(fixture.nativeElement.querySelectorAll('td-action-proposal').length).toBe(1);
+  });
+});

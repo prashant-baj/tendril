@@ -24,7 +24,7 @@
           >
             <option value="">Whole garden / not sure</option>
             @for (plant of plants(); track plant.plantId) {
-              <option [value]="plant.plantId">{{ plant.name }}</option>
+              <option [value]="plant.plantId" [selected]="plant.plantId === selectedPlantId()">{{ plant.name }}</option>
             }
           </select>
         </label>

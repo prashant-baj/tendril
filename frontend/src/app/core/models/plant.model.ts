@@ -15,6 +15,11 @@ export interface Plant {
   photoUrl?: string;
   /** Number on the plant's physical stake, when it has one (ADR-0032). Unique within a garden. */
   stakeNo?: number;
+  /** Status of the newest history entry that set one (ADR-0035). */
+  latestStatus?: PlantStatus;
+  /** Date of the newest history entry (YYYY-MM-DD). */
+  latestObservedOn?: string;
+  historyCount?: number;
 }
 
 /** Client API request body for `POST /gardens/{gardenId}/plants` (OB-02, app/api/openapi.yaml). */
@@ -52,4 +57,51 @@ export interface BulkCreatePlantsRequest {
 export interface BulkCreatePlantsResponse {
   created: { plantId: string; stakeNo: number; outOfRange?: boolean }[];
   skipped: number[];
+}
+
+/** A plant-history status (ADR-0035), the owner's tracker scale: healthy > ok > watch. */
+export type PlantStatus = 'healthy' | 'ok' | 'watch';
+
+/** A photo in a plant's history: presigned thumbnail + analysis-copy urls, fresh per read. */
+export interface PlantPhoto {
+  mediaId: string;
+  thumbUrl: string;
+  url: string;
+}
+
+/** One dated entry in a plant's history (`PlantLogEntry`, app/api/openapi.yaml). */
+export interface PlantLogEntry {
+  entryId: string;
+  /** YYYY-MM-DD — when it was observed (the photo's own date when known), not uploaded. */
+  observedOn: string;
+  observedAt?: string;
+  kind: 'photo' | 'checkin' | 'log' | 'retraction';
+  source: 'user' | 'confirmed' | 'auto' | 'migration';
+  status?: PlantStatus;
+  note?: string;
+  photos: PlantPhoto[];
+  goalId?: string;
+  taskId?: string;
+  retracts?: string;
+}
+
+/** `GET /gardens/{gardenId}/plants/{plantId}` (CP-05, ADR-0035 §6). */
+export interface PlantDetail {
+  plant: Plant;
+  history: { entries: PlantLogEntry[]; nextCursor?: string };
+}
+
+export interface PlantHistoryQuery {
+  limit?: number;
+  cursor?: string;
+  order?: 'newest' | 'oldest';
+}
+
+/** `POST /gardens/{gardenId}/plants/{plantId}/history` — at least one of note/status/mediaIds. */
+export interface PlantLogRequest {
+  note?: string;
+  status?: PlantStatus;
+  mediaIds?: string[];
+  /** YYYY-MM-DD, not in the future; defaults to the photo's date, else today. */
+  observedOn?: string;
 }

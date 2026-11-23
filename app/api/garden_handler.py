@@ -104,6 +104,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+import plant_history as ph
 from boto3.dynamodb.conditions import Key
 
 # force=True: the standard Lambda Python runtime pre-attaches its own handler to the root
@@ -699,6 +700,8 @@ def create_plant(event: dict[str, Any]) -> dict[str, Any]:
         )
         if media_item:
             result["photoUrl"] = _generate_download_url(_display_key(media_item, "thumb"))
+        # ADR-0035: the plant's first photo opens its history.
+        _append_photo_entries_best_effort(garden_id, plant_id, [media_id])
     return _response(201, result)
 
 
@@ -723,21 +726,232 @@ def list_plants(event: dict[str, Any]) -> dict[str, Any]:
     # unnumbered plants keep the query's own order among themselves).
     items.sort(key=lambda i: (i.get("stake_no") is None, int(i.get("stake_no") or 0)))
 
-    plants = []
-    for item in items:
-        plant: dict[str, Any] = {
-            "plantId": item["plant_id"],
-            "species": item["species"],
-            "variety": item.get("variety", ""),
-            "stage": item.get("stage", "new"),
+    return _response(
+        200, [_plant_to_api(item, s3_keys.get(item.get("media_id") or "")) for item in items]
+    )
+
+
+def _plant_to_api(item: dict[str, Any], photo_key: str | None) -> dict[str, Any]:
+    """The `Plant` schema, shared by listPlants and getPlant. Latest state is denormalized onto the
+    Plant by every history write (ADR-0035 §4), so neither reads history to build it."""
+    plant: dict[str, Any] = {
+        "plantId": item["plant_id"],
+        "species": item["species"],
+        "variety": item.get("variety", ""),
+        "stage": item.get("stage", "new"),
+    }
+    if item.get("stake_no") is not None:
+        plant["stakeNo"] = int(item["stake_no"])
+    if photo_key:
+        plant["photoUrl"] = _generate_download_url(photo_key)
+    if item.get("latest_status"):
+        plant["latestStatus"] = item["latest_status"]
+    if item.get("latest_observed_on"):
+        plant["latestObservedOn"] = item["latest_observed_on"]
+    if item.get("history_count") is not None:
+        plant["historyCount"] = max(0, int(item["history_count"]))
+    return plant
+
+
+def _plant_path(event: dict[str, Any]) -> tuple[str, str] | None:
+    p = event.get("pathParameters") or {}
+    ids = (p.get("gardenId"), p.get("plantId"))
+    return ids if all(ids) else None  # type: ignore[return-value]
+
+
+def get_plant(event: dict[str, Any]) -> dict[str, Any]:
+    """`GET /gardens/{gardenId}/plants/{plantId}` (CP-05, ADR-0035 §6): the plant plus one page of
+    its dated history — one `Query` on its `PLANTLOG#` prefix, never a scan."""
+    ids = _plant_path(event)
+    if not ids:
+        return _error(400, "gardenId and plantId are required")
+    garden_id, plant_id = ids
+    qs = event.get("queryStringParameters") or {}
+    limit, err = ph.parse_limit(qs.get("limit"))
+    if err:
+        return _error(400, err)
+    order = qs.get("order") or "newest"
+    if order not in ("newest", "oldest"):
+        return _error(400, "order must be newest or oldest")
+    include_retracted = qs.get("includeRetracted") == "true"
+    start_sk, err = ph.decode_cursor(qs.get("cursor"), plant_id)
+    if err:
+        return _error(400, err)
+
+    table = _get_table()
+    try:
+        plant_item = table.get_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"}
+        ).get("Item")
+        if not plant_item:
+            return _error(404, "plant not found")
+        query: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(ph.prefix(plant_id)),
+            "ScanIndexForward": order == "oldest",
+            "Limit": limit,
         }
-        if item.get("stake_no") is not None:
-            plant["stakeNo"] = int(item["stake_no"])
-        s3_key = s3_keys.get(item.get("media_id") or "")
-        if s3_key:
-            plant["photoUrl"] = _generate_download_url(s3_key)
-        plants.append(plant)
-    return _response(200, plants)
+        if start_sk:
+            query["ExclusiveStartKey"] = {"pk": f"GARDEN#{garden_id}", "sk": start_sk}
+        page = table.query(**query)
+        entries = ph.visible_page(page.get("Items", []), include_retracted)
+        media_ids = [m for e in entries for m in e.get("media_ids") or []]
+        if plant_item.get("media_id"):
+            media_ids.append(plant_item["media_id"])
+        media = _batch_get_media(garden_id, media_ids)
+    except Exception:
+        logger.exception("Failed to read plant %s for garden %s", plant_id, garden_id)
+        return _error(500, "could not read plant")
+
+    def photos(entry: dict[str, Any]) -> list[dict[str, str]]:
+        out = []
+        for mid in entry.get("media_ids") or []:
+            item = media.get(mid)
+            if item:
+                out.append(
+                    {
+                        "mediaId": mid,
+                        "thumbUrl": _generate_download_url(_display_key(item, "thumb")),
+                        "url": _generate_download_url(_display_key(item)),
+                    }
+                )
+        return out
+
+    hero = media.get(plant_item.get("media_id") or "")
+    history: dict[str, Any] = {"entries": [ph.entry_to_api(e, photos(e)) for e in entries]}
+    next_cursor = ph.encode_cursor(page.get("LastEvaluatedKey"))
+    if next_cursor:
+        history["nextCursor"] = next_cursor
+    return _response(
+        200,
+        {
+            "plant": {
+                "historyCount": 0,
+                **_plant_to_api(plant_item, _display_key(hero, "thumb") if hero else None),
+            },
+            "history": history,
+        },
+    )
+
+
+def update_plant(event: dict[str, Any]) -> dict[str, Any]:
+    """`PATCH /gardens/{gardenId}/plants/{plantId}`: changes the plant's `stage` — e.g. `removed`
+    for a palm that died, which keeps its history (deletePlant does not; ADR-0035 §8)."""
+    ids = _plant_path(event)
+    if not ids:
+        return _error(400, "gardenId and plantId are required")
+    garden_id, plant_id = ids
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict) or "stage" not in payload:
+        return _error(400, "stage is required")
+    stage, err = _parse_stage(payload.get("stage"))
+    if err:
+        return _error(400, err)
+    try:
+        item = (
+            _get_table()
+            .update_item(
+                Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"},
+                UpdateExpression="SET stage = :s",
+                ExpressionAttributeValues={":s": stage},
+                ConditionExpression="attribute_exists(pk)",
+                ReturnValues="ALL_NEW",
+            )
+            .get("Attributes")
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            return _error(404, "plant not found")
+        logger.exception("Failed to update plant %s", plant_id)
+        return _error(500, "could not update plant")
+    hero = _get_media(garden_id, item["media_id"]) if item and item.get("media_id") else None
+    return _response(200, _plant_to_api(item or {}, _display_key(hero, "thumb") if hero else None))
+
+
+def post_plant_history(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST /gardens/{gardenId}/plants/{plantId}/history` (CP-03, ADR-0035 §2): the gardener logs a
+    note and/or status, optionally with photos, dated `observedOn` (default: the photo's own date,
+    else today). Append-only; photos must be this garden's and not filed under another plant."""
+    ids = _plant_path(event)
+    if not ids:
+        return _error(400, "gardenId and plantId are required")
+    garden_id, plant_id = ids
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return _error(400, "body must be a JSON object")
+    note = payload.get("note")
+    status = payload.get("status")
+    media_ids = payload.get("mediaIds") or []
+    if note is not None and (not isinstance(note, str) or len(note) > ph.NOTE_MAX_CHARS):
+        return _error(400, f"note must be text of at most {ph.NOTE_MAX_CHARS} characters")
+    note = (note or "").strip() or None
+    if status is not None and status not in ph.STATUSES:
+        return _error(400, "status must be one of: " + ", ".join(ph.STATUSES))
+    if (
+        not isinstance(media_ids, list)
+        or len(media_ids) > ph.MAX_MEDIA_PER_ENTRY
+        or not all(isinstance(m, str) and m for m in media_ids)
+    ):
+        return _error(400, f"mediaIds must be at most {ph.MAX_MEDIA_PER_ENTRY} ids")
+    media_ids = list(dict.fromkeys(media_ids))
+    if not (note or status or media_ids):
+        return _error(400, "add a note, a status or a photo")
+    observed_on, err = ph.parse_observed_on(payload.get("observedOn"))
+    if err:
+        return _error(400, err)
+
+    try:
+        media_items = [_get_media(garden_id, m) for m in media_ids]
+    except Exception:
+        logger.exception("Failed to read media for plant %s history", plant_id)
+        return _error(500, "could not save")
+    for mid, item in zip(media_ids, media_items, strict=True):
+        if not item:
+            return _error(400, f"unknown mediaId {mid}")
+        if item.get("plant_id") and item["plant_id"] != plant_id:
+            return _error(409, "a photo is filed under another plant — move it from its goal chat")
+    first = media_items[0] if media_items else None
+    entry = ph.new_entry(
+        garden_id,
+        plant_id,
+        kind="log",
+        source="user",
+        observed_on=observed_on or (ph.observed_on_for_media(first) if first else ph.today()),
+        observed_at=None if observed_on else ph.observed_at_for_media(first),
+        media_ids=media_ids,
+        status=status,
+        note=note,
+    )
+    links = [
+        _media_link_item(garden_id, mid, {"plant_id": plant_id, "plant_link_source": "user"})
+        for mid in media_ids
+    ]
+    try:
+        written = _append_entry(
+            garden_id, entry, media_id=media_ids[0] if media_ids else None, extra_items=links
+        )
+    except Exception:
+        logger.exception("Failed to append history for plant %s", plant_id)
+        return _error(500, "could not save")
+    if not written:
+        return _error(404, "plant not found")
+    photos = [
+        {
+            "mediaId": mid,
+            "thumbUrl": _generate_download_url(_display_key(item, "thumb")),
+            "url": _generate_download_url(_display_key(item)),
+        }
+        for mid, item in zip(media_ids, media_items, strict=True)
+        if item
+    ]
+    return _response(201, ph.entry_to_api(entry, photos))
 
 
 def _query_all(**kwargs: Any) -> list[dict[str, Any]]:
@@ -758,14 +972,22 @@ BATCH_GET_MAX_ATTEMPTS = 5
 
 
 def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str]:
-    """media_id -> display key (thumbnail when processed, else the original) for the given Media
-    records, via `BatchGetItem` in chunks of 100
-    instead of one `GetItem` per plant (ADR-0032). Retries `UnprocessedKeys` a bounded number of
+    """media_id -> display key (thumbnail when processed, else the original) — plant cards show
+    the thumbnail once ingestion made one (ADR-0033)."""
+    return {
+        mid: _display_key(item, "thumb")
+        for mid, item in _batch_get_media(garden_id, media_ids).items()
+    }
+
+
+def _batch_get_media(garden_id: str, media_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """media_id -> Media item (display fields only) for the given ids, via `BatchGetItem` in chunks
+    of 100 instead of one `GetItem` each (ADR-0032). Retries `UnprocessedKeys` a bounded number of
     times; a Media record that's genuinely missing is simply absent from the result."""
     from boto3.dynamodb.types import TypeDeserializer
 
     deserializer = TypeDeserializer()
-    result: dict[str, str] = {}
+    result: dict[str, dict[str, Any]] = {}
     unique_ids = list(dict.fromkeys(media_ids))
     for start in range(0, len(unique_ids), BATCH_GET_MAX_KEYS):
         chunk = unique_ids[start : start + BATCH_GET_MAX_KEYS]
@@ -784,8 +1006,7 @@ def _batch_get_media_keys(garden_id: str, media_ids: list[str]) -> dict[str, str
             for raw in resp.get("Responses", {}).get(APP_TABLE_NAME, []):
                 item = {k: deserializer.deserialize(v) for k, v in raw.items()}
                 if item.get("media_id") and item.get("s3_key"):
-                    # Plant cards show the thumbnail once ingestion made one (ADR-0033).
-                    result[item["media_id"]] = _display_key(item, "thumb")
+                    result[item["media_id"]] = item
             request = resp.get("UnprocessedKeys") or {}
             if not request:
                 break
@@ -924,6 +1145,21 @@ def delete_plant(event: dict[str, Any]) -> dict[str, Any]:
         logger.exception("Failed to delete plant %s for garden %s", plant_id, garden_id)
         return _error(500, "could not delete plant")
 
+    # ADR-0035 §8: deleting means "this plant should not exist", so its history goes too (a palm
+    # that died is marked `stage: removed` instead, which keeps it). Photos stay — they're
+    # garden-level Media. Best-effort after the plant is gone; a retry of DELETE finishes it.
+    try:
+        entries = _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(ph.prefix(plant_id)),
+            ProjectionExpression="pk, sk",
+        )
+        with _get_table().batch_writer() as batch:
+            for entry in entries:
+                batch.delete_item(Key={"pk": entry["pk"], "sk": entry["sk"]})
+    except Exception:
+        logger.exception("Failed to delete history of plant %s", plant_id)
+
     return {
         "statusCode": 204,
         "headers": {"Access-Control-Allow-Origin": "*"},
@@ -1026,6 +1262,10 @@ def create_goal(event: dict[str, Any]) -> dict[str, Any]:
         _write_event(garden_id, "goal.submitted", {"goalId": goal_id, "description": description})
     except Exception:
         logger.exception("Failed to write goal.submitted event for goal %s", goal_id)
+    if plant_id and media_ids:
+        # ADR-0035 §2: photos the gardener filed under a plant join its history (id = media id,
+        # so the orchestrator's identity "match" on the same photo is a no-op).
+        _append_photo_entries_best_effort(garden_id, plant_id, media_ids, goal_id=goal_id)
 
     return _response(202, {"goalId": goal_id, "status": "Intake"})
 
@@ -1297,8 +1537,21 @@ def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+    goal = _goal_from_item(goal_item)
+    if goal_item.get("plant_id"):
+        # The plant's stake number for the goal header ("#13"), so a confirmed link is visible.
+        try:
+            plant_item = table.get_item(
+                Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{goal_item['plant_id']}"}
+            ).get("Item")
+        except Exception:
+            logger.exception("Failed to read plant for goal %s", goal_id)
+            plant_item = None
+        if plant_item and plant_item.get("stake_no") is not None:
+            goal["plantStakeNo"] = int(plant_item["stake_no"])
+
     detail: dict[str, Any] = {
-        "goal": _goal_from_item(goal_item),
+        "goal": goal,
         "tasks": tasks,
         "media": media,
         "messages": messages,
@@ -1631,6 +1884,218 @@ def _plant_exists_check(garden_id: str, plant_id: str) -> dict[str, Any]:
     }
 
 
+# --- Plant history (ADR-0035) ------------------------------------------------------------------
+
+
+def _get_media(garden_id: str, media_id: str) -> dict[str, Any] | None:
+    return (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"})
+        .get("Item")
+    )
+
+
+def _entry_put(entry: dict[str, Any]) -> dict[str, Any]:
+    """A PlantLog Put; `attribute_not_exists` makes a retried write (same deterministic
+    `entry_id`) cancel instead of duplicating (ADR-0035 §1)."""
+    return {
+        "Put": {
+            "TableName": APP_TABLE_NAME,
+            "Item": _to_dynamo(entry),
+            "ConditionExpression": "attribute_not_exists(pk)",
+        }
+    }
+
+
+def _plant_count_item(garden_id: str, plant_id: str, delta: int) -> dict[str, Any]:
+    """`history_count += delta` on the Plant — also the guard that the plant exists (one
+    transaction can't touch the same item twice, so this replaces a separate ConditionCheck)."""
+    return {
+        "Update": {
+            "TableName": APP_TABLE_NAME,
+            "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"}),
+            "UpdateExpression": "ADD history_count :d",
+            "ExpressionAttributeValues": _to_dynamo({":d": delta}),
+            "ConditionExpression": "attribute_exists(pk)",
+        }
+    }
+
+
+def _bump_latest(
+    garden_id: str,
+    plant_id: str,
+    observed_on: str,
+    *,
+    media_id: str | None = None,
+    status: str | None = None,
+) -> None:
+    """Denormalizes the plant's latest state onto the Plant (ADR-0035 §4), each facet only if this
+    observation is at least as new as the one already there — so backfilling an old photo never
+    replaces a newer one. Best-effort: the entry itself is already written."""
+    facets = [("latest_observed_on", {})]
+    if media_id:
+        facets.append(("latest_photo_on", {"media_id": media_id}))
+    if status:
+        facets.append(("latest_status_on", {"latest_status": status}))
+    for date_field, extra in facets:
+        fields = {date_field: observed_on, **extra}
+        try:
+            _get_table().update_item(
+                Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"},
+                UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
+                ExpressionAttributeNames={f"#{k}": k for k in fields},
+                ExpressionAttributeValues={f":{k}": v for k, v in fields.items()},
+                ConditionExpression=(
+                    f"attribute_exists(pk) AND (attribute_not_exists(#{date_field}) "
+                    f"OR #{date_field} <= :{date_field})"
+                ),
+            )
+        except Exception as e:
+            code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+            if code != "ConditionalCheckFailedException":
+                logger.exception("Failed to update latest %s on plant %s", date_field, plant_id)
+
+
+def _release_plant_photo(garden_id: str, previous_plant_id: str | None, media_id: str) -> None:
+    """A photo moved away from a plant stops being that plant's current photo (best-effort; only
+    if it still is — a newer photo is left alone)."""
+    if not previous_plant_id:
+        return
+    try:
+        _get_table().update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{previous_plant_id}"},
+            UpdateExpression="REMOVE media_id",
+            ConditionExpression="media_id = :m",
+            ExpressionAttributeValues={":m": media_id},
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code != "ConditionalCheckFailedException":
+            logger.exception(
+                "Failed to release photo %s from plant %s", media_id, previous_plant_id
+            )
+
+
+def _retraction_items(
+    garden_id: str, previous_plant_id: str, media_id: str, action_id: str
+) -> list[dict[str, Any]]:
+    """Moving a photo away from a plant (ADR-0035 §3): for each of that plant's entries still
+    showing it, mark the entry (`retracted_media_ids`) and append a `retraction` entry beside it —
+    nothing is deleted. Also adjusts the plant's `history_count` for entries left empty."""
+    entries = ph.entries_with_media(
+        _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(ph.prefix(previous_plant_id))
+        ),
+        media_id,
+    )
+    items: list[dict[str, Any]] = []
+    hidden = 0
+    for target in entries:
+        items.append(
+            {
+                "Update": {
+                    "TableName": APP_TABLE_NAME,
+                    "Key": _to_dynamo({"pk": target["pk"], "sk": target["sk"]}),
+                    "UpdateExpression": (
+                        "SET retracted_media_ids = "
+                        "list_append(if_not_exists(retracted_media_ids, :empty), :m)"
+                    ),
+                    "ExpressionAttributeValues": _to_dynamo({":empty": [], ":m": [media_id]}),
+                    "ConditionExpression": "attribute_exists(pk)",
+                }
+            }
+        )
+        items.append(
+            _entry_put(
+                ph.new_entry(
+                    garden_id,
+                    previous_plant_id,
+                    kind="retraction",
+                    source="confirmed",
+                    observed_on=target["observed_on"],
+                    entry_id=f"{action_id}-r-{target['entry_id']}"[:96],
+                    media_ids=[media_id],
+                    action_id=action_id,
+                    retracts=target["entry_id"],
+                )
+            )
+        )
+        after = {**target, "retracted_media_ids": [*ph.retracted(target), media_id]}
+        if ph.counts_as_visible(target) and not ph.counts_as_visible(after):
+            hidden += 1
+    if hidden:
+        items.append(_plant_count_item(garden_id, previous_plant_id, -hidden))
+    return items
+
+
+def _append_entry(
+    garden_id: str,
+    entry: dict[str, Any],
+    *,
+    media_id: str | None = None,
+    extra_items: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Writes one entry outside a confirm (createPlant, createGoal, the history endpoint): the
+    entry + `history_count` in one transaction, then the latest-state bump. False when it was
+    already written (same deterministic id) or the plant is gone."""
+    try:
+        _get_client().transact_write_items(
+            TransactItems=[
+                _entry_put(entry),
+                _plant_count_item(garden_id, entry["plant_id"], 1),
+                *(extra_items or []),
+            ]
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "TransactionCanceledException":
+            logger.info("plant_log_skipped entry_id=%s (exists or no plant)", entry["entry_id"])
+            return False
+        raise
+    _bump_latest(
+        garden_id,
+        entry["plant_id"],
+        entry["observed_on"],
+        media_id=media_id,
+        status=entry.get("status"),
+    )
+    return True
+
+
+def _append_photo_entries_best_effort(
+    garden_id: str,
+    plant_id: str,
+    media_ids: list[str],
+    *,
+    goal_id: str | None = None,
+) -> None:
+    """A photo the gardener filed to a plant themselves (createPlant/createGoal): one `photo`
+    entry each, id = the media id so a later identity "match" on the same photo is a no-op."""
+    for media_id in media_ids:
+        try:
+            media = _get_media(garden_id, media_id)
+            if not media:
+                continue
+            _append_entry(
+                garden_id,
+                ph.new_entry(
+                    garden_id,
+                    plant_id,
+                    kind="photo",
+                    source="user",
+                    observed_on=ph.observed_on_for_media(media),
+                    observed_at=ph.observed_at_for_media(media),
+                    entry_id=media_id,
+                    media_ids=[media_id],
+                    goal_id=goal_id,
+                ),
+                media_id=media_id,
+            )
+        except Exception:
+            logger.exception("Failed to add photo %s to plant %s history", media_id, plant_id)
+
+
 def _transact(items: list[dict[str, Any]]) -> None:
     try:
         _get_client().transact_write_items(TransactItems=items)
@@ -1639,6 +2104,58 @@ def _transact(items: list[dict[str, Any]]) -> None:
         if code == "TransactionCanceledException":
             raise ActionNotApplicable() from e
         raise
+
+
+def _confirmed_photo_items(
+    garden_id: str,
+    goal_id: str,
+    action_id: str,
+    plant_id: str,
+    media_id: str,
+    media: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """What a confirmed photo-to-plant link writes (ADR-0034 + ADR-0035 §2–3): the photo entry on
+    the new plant (+ its count, which also guards the plant exists), the Media link, and — if the
+    photo was filed under another plant — that plant's retraction."""
+    entry = ph.new_entry(
+        garden_id,
+        plant_id,
+        kind="photo",
+        source="confirmed",
+        observed_on=ph.observed_on_for_media(media),
+        observed_at=ph.observed_at_for_media(media),
+        entry_id=action_id,
+        media_ids=[media_id],
+        goal_id=goal_id,
+        action_id=action_id,
+    )
+    link = _media_link_item(
+        garden_id, media_id, {"plant_id": plant_id, "plant_link_source": "confirmed"}
+    )
+    previous = (media or {}).get("plant_id")
+    if previous == plant_id and ph.entries_with_media(
+        _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(ph.prefix(plant_id))
+        ),
+        media_id,
+    ):
+        # Already in this plant's history (e.g. filed there by the gardener): confirm the link,
+        # don't show the same photo twice.
+        return [link, _plant_exists_check(garden_id, plant_id)], entry
+    items = [_entry_put(entry), _plant_count_item(garden_id, plant_id, 1), link]
+    if previous and previous != plant_id:
+        items += _retraction_items(garden_id, previous, media_id, action_id)
+    return items, entry
+
+
+def _after_confirmed_photo(
+    garden_id: str, plant_id: str, media_id: str, media: dict[str, Any] | None, entry: dict
+) -> None:
+    _bump_latest(garden_id, plant_id, entry["observed_on"], media_id=media_id)
+    previous = (media or {}).get("plant_id")
+    if previous and previous != plant_id:
+        _release_plant_photo(garden_id, previous, media_id)
 
 
 def _apply_complete_task(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
@@ -1670,12 +2187,40 @@ def _apply_complete_task(garden_id: str, goal_id: str, action_id: str, params: d
             }
         },
     ]
+    plant_id = task.get("plant_id")
+    media = _get_media(garden_id, media_id) if media_id else None
     if media_id:
         fields: dict[str, Any] = {"task_id": task_id, "goal_id": goal_id}
-        if task.get("plant_id"):
-            fields |= {"plant_id": task["plant_id"], "plant_link_source": "confirmed"}
+        if plant_id:
+            fields |= {"plant_id": plant_id, "plant_link_source": "confirmed"}
         items.append(_media_link_item(garden_id, media_id, fields))
+    # ADR-0035 §2: the check-in joins the plant's history in the same transaction — but only if
+    # the plant still exists, so a deleted plant never blocks completing its task.
+    entry = None
+    plant_exists = bool(plant_id) and bool(
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"})
+        .get("Item")
+    )
+    if plant_exists:
+        entry = ph.new_entry(
+            garden_id,
+            plant_id,
+            kind="checkin",
+            source="confirmed",
+            observed_on=ph.observed_on_for_media(media) if media else ph.today(),
+            observed_at=ph.observed_at_for_media(media),
+            entry_id=action_id,
+            media_ids=[media_id] if media_id else None,
+            note=(params.get("note") or task.get("title") or "")[: ph.NOTE_MAX_CHARS] or None,
+            goal_id=goal_id,
+            task_id=task_id,
+            action_id=action_id,
+        )
+        items += [_entry_put(entry), _plant_count_item(garden_id, plant_id, 1)]
     _transact(items)
+    if entry:
+        _bump_latest(garden_id, plant_id, entry["observed_on"], media_id=media_id)
     try:
         _write_event(
             garden_id,
@@ -1687,24 +2232,18 @@ def _apply_complete_task(garden_id: str, goal_id: str, action_id: str, params: d
 
 
 def _apply_set_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
-    _transact(
-        [
-            _confirm_action_item(garden_id, goal_id, action_id),
-            _plant_exists_check(garden_id, params["plant_id"]),
-            _media_link_item(
-                garden_id,
-                params["media_id"],
-                {"plant_id": params["plant_id"], "plant_link_source": "confirmed"},
-            ),
-        ]
-    )
+    plant_id, media_id = params["plant_id"], params["media_id"]
+    media = _get_media(garden_id, media_id)
+    items, entry = _confirmed_photo_items(garden_id, goal_id, action_id, plant_id, media_id, media)
+    _transact([_confirm_action_item(garden_id, goal_id, action_id), *items])
+    _after_confirmed_photo(garden_id, plant_id, media_id, media, entry)
 
 
 def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
-    plant_id = params["plant_id"]
+    plant_id, media_id = params["plant_id"], params.get("media_id")
+    media = _get_media(garden_id, media_id) if media_id else None
     items = [
         _confirm_action_item(garden_id, goal_id, action_id),
-        _plant_exists_check(garden_id, plant_id),
         {
             "Update": {
                 "TableName": APP_TABLE_NAME,
@@ -1715,15 +2254,17 @@ def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: 
             }
         },
     ]
-    if params.get("media_id"):
-        items.append(
-            _media_link_item(
-                garden_id,
-                params["media_id"],
-                {"plant_id": plant_id, "plant_link_source": "confirmed"},
-            )
+    entry = None
+    if media_id:
+        photo_items, entry = _confirmed_photo_items(
+            garden_id, goal_id, action_id, plant_id, media_id, media
         )
+        items += photo_items
+    else:
+        items.append(_plant_exists_check(garden_id, plant_id))
     _transact(items)
+    if media_id and entry:
+        _after_confirmed_photo(garden_id, plant_id, media_id, media, entry)
     # Tasks proposed before the plant was known inherit it now (best-effort, like Goal → Task).
     try:
         for task in _query_all(
@@ -1741,7 +2282,9 @@ def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: 
 
 
 def _apply_create_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
-    stake_no = params["stake_no"]
+    stake_no, media_id = params["stake_no"], params.get("media_id")
+    # Read before the plant is written: `_write_plant` re-points the photo at the new plant.
+    media = _get_media(garden_id, media_id) if media_id else None
     # A plantation's plants share species/variety: copy them from an existing numbered plant.
     template = next(
         (
@@ -1761,20 +2304,21 @@ def _apply_create_plant(garden_id: str, goal_id: str, action_id: str, params: di
             variety=template.get("variety"),
             stage=template.get("stage", "new"),
             stake_no=stake_no,
-            media_id=None,
+            # The photo that revealed the new stake becomes the new plant's photo.
+            media_id=media_id,
         )
     except DuplicateStakeError as e:
         raise ActionNotApplicable() from e
     items = [_confirm_action_item(garden_id, goal_id, action_id)]
-    if params.get("media_id"):
-        items.append(
-            _media_link_item(
-                garden_id,
-                params["media_id"],
-                {"plant_id": plant_id, "plant_link_source": "confirmed"},
-            )
+    entry = None
+    if media_id:
+        photo_items, entry = _confirmed_photo_items(
+            garden_id, goal_id, action_id, plant_id, media_id, media
         )
+        items += photo_items
     _transact(items)
+    if media_id and entry:
+        _after_confirmed_photo(garden_id, plant_id, media_id, media, entry)
 
 
 ACTION_APPLIERS = {
@@ -2052,6 +2596,12 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return bulk_create_plants(event)
         if method == "DELETE" and resource == "/gardens/{gardenId}/plants/{plantId}":
             return delete_plant(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/plants/{plantId}":
+            return get_plant(event)
+        if method == "PATCH" and resource == "/gardens/{gardenId}/plants/{plantId}":
+            return update_plant(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/plants/{plantId}/history":
+            return post_plant_history(event)
         if method == "POST" and resource == "/gardens/{gardenId}/goals":
             return create_goal(event)
         if method == "GET" and resource == "/gardens/{gardenId}/goals":

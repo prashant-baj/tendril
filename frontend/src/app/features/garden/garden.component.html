@@ -39,7 +39,7 @@
         @for (plant of plants(); track plant.plantId) {
           <td-plant-row
             [plant]="plant"
-            (activate)="openCapture()"
+            (activate)="openPlant(plant.plantId)"
             (delete)="deletePlant(plant.plantId)"
           />
         }

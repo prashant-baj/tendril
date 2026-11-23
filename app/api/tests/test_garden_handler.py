@@ -147,6 +147,23 @@ class FakeTable:
         if self.raise_on_update:
             raise self.raise_on_update
         self.update_calls.append(kwargs)
+        return {"Attributes": getattr(self, "update_returns", {})}
+
+    def batch_writer(self):
+        table = self
+
+        class _Batch:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def delete_item(self, Key):
+                table.batch_deletes.append(Key)
+
+        self.batch_deletes = getattr(self, "batch_deletes", [])
+        return _Batch()
 
 
 class FakeS3:
@@ -2890,6 +2907,10 @@ def _ops_by_sk(transact_call):
     return out
 
 
+PLANT_P1 = {"Item": {"plant_id": "p1", "species": "Coconut", "stake_no": 1}}
+MEDIA_TAKEN = {"Item": dict(MEDIA_ITEM, taken_at="2026-11-20T09:15:00")}
+
+
 def test_confirm_complete_task_marks_done_links_photo_and_records_event(monkeypatch):
     params = {"task_id": "t1", "media_id": "m10", "feedback": "Looks good"}
     resp, table, client = _confirm(
@@ -2897,6 +2918,8 @@ def test_confirm_complete_task_marks_done_links_photo_and_records_event(monkeypa
         {
             "ACTION#goal-1#a1": _action("complete_task", params),
             "TASK#goal-1#t1": {"Item": TASK_ITEM},
+            "PLANT#p1": PLANT_P1,
+            "MEDIA#m10": MEDIA_TAKEN,
         },
     )
     assert resp["statusCode"] == 200
@@ -2916,17 +2939,67 @@ def test_confirm_complete_task_marks_done_links_photo_and_records_event(monkeypa
     assert media["ExpressionAttributeValues"][":plant_id"] == {"S": "p1"}
     assert media["ExpressionAttributeValues"][":plant_link_source"] == {"S": "confirmed"}
     assert table.put_calls[0]["type"] == "task.checkin"
+    # ADR-0035: the check-in joins #1's history in the same transaction, dated by the photo.
+    entry = ops[("Put", "PLANTLOG#p1#2026-11-20#a1")]
+    assert entry["ConditionExpression"] == "attribute_not_exists(pk)"
+    assert entry["Item"]["kind"] == {"S": "checkin"} and entry["Item"]["task_id"] == {"S": "t1"}
+    assert entry["Item"]["note"] == {"S": "Check drip irrigation"}
+    assert ops[("Update", "PLANT#p1")]["UpdateExpression"] == "ADD history_count :d"
+    # ...and the photo becomes #1's latest photo (if nothing newer is there).
+    photo = next(c for c in table.update_calls if "latest_photo_on" in str(c))
+    assert photo["ExpressionAttributeValues"][":media_id"] == "m10"
+    assert "<= :latest_photo_on" in photo["ConditionExpression"]
 
 
-def test_confirm_set_plant_moves_the_photo_after_checking_the_plant_exists(monkeypatch):
+def test_confirm_complete_task_of_a_deleted_plant_still_completes(monkeypatch):
     resp, _, client = _confirm(
         monkeypatch,
-        {"ACTION#goal-1#a1": _action("set_plant", {"media_id": "m10", "plant_id": "p10"})},
+        {
+            "ACTION#goal-1#a1": _action("complete_task", {"task_id": "t1"}),
+            "TASK#goal-1#t1": {"Item": TASK_ITEM},
+        },
     )
     assert resp["statusCode"] == 200
+    assert not [k for k in _ops_by_sk(client.calls[0]) if k[1].startswith("PLANTLOG#")]
+
+
+def test_confirm_set_plant_moves_the_photo_and_records_the_move_in_both_histories(monkeypatch):
+    misfiled = {
+        "pk": "GARDEN#g1",
+        "sk": "PLANTLOG#p1#2026-11-20#e1",
+        "entry_id": "e1",
+        "plant_id": "p1",
+        "observed_on": "2026-11-20",
+        "kind": "photo",
+        "source": "user",
+        "media_ids": ["m10"],
+    }
+    table, _ = _api_tables(
+        monkeypatch,
+        {
+            "ACTION#goal-1#a1": _action("set_plant", {"media_id": "m10", "plant_id": "p10"}),
+            "MEDIA#m10": {"Item": dict(MEDIA_TAKEN["Item"], plant_id="p1")},  # misfiled under #1
+        },
+    )
+    table._query_response = {"Items": [misfiled]}
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.confirm_action(_event("POST", ACTION_CONFIRM, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
     ops = _ops_by_sk(client.calls[0])
-    assert ("ConditionCheck", "PLANT#p10") in ops
+    # #10 gains the photo (its count update also guards that #10 exists)...
+    assert ops[("Put", "PLANTLOG#p10#2026-11-20#a1")]["Item"]["source"] == {"S": "confirmed"}
+    assert ops[("Update", "PLANT#p10")]["ConditionExpression"] == "attribute_exists(pk)"
     assert ops[("Update", "MEDIA#m10")]["ExpressionAttributeValues"][":plant_id"] == {"S": "p10"}
+    # ...#1 keeps its entry, marked, plus a retraction beside it; nothing is deleted.
+    mark = ops[("Update", "PLANTLOG#p1#2026-11-20#e1")]
+    assert "retracted_media_ids" in mark["UpdateExpression"]
+    retraction = ops[("Put", "PLANTLOG#p1#2026-11-20#a1-r-e1")]["Item"]
+    assert retraction["kind"] == {"S": "retraction"} and retraction["retracts"] == {"S": "e1"}
+    assert ops[("Update", "PLANT#p1")]["ExpressionAttributeValues"][":d"] == {"N": "-1"}
+    # #1 stops showing the moved photo — only if it is still #1's current photo.
+    (release,) = [c for c in table.update_calls if c["UpdateExpression"] == "REMOVE media_id"]
+    assert release["Key"]["sk"] == "PLANT#p1" and release["ConditionExpression"] == "media_id = :m"
 
 
 def test_confirm_set_goal_plant_updates_goal_media_and_unlinked_tasks(monkeypatch):
@@ -2944,7 +3017,20 @@ def test_confirm_set_goal_plant_updates_goal_media_and_unlinked_tasks(monkeypatc
     ops = _ops_by_sk(client.calls[0])
     assert ops[("Update", "GOAL#goal-1")]["ExpressionAttributeValues"][":p"] == {"S": "p10"}
     assert ("Update", "MEDIA#m10") in ops
-    assert table.update_calls[0]["ExpressionAttributeValues"][":p"] == "p10"  # task inherits
+    assert ops[("Update", "PLANT#p10")]["UpdateExpression"] == "ADD history_count :d"
+    assert any(k[0] == "Put" and k[1].startswith("PLANTLOG#p10#") for k in ops)
+    task_updates = [c for c in table.update_calls if c["Key"]["sk"] == "TASK#goal-1#t1"]
+    assert task_updates[0]["ExpressionAttributeValues"][":p"] == "p10"  # task inherits
+
+
+def test_confirm_set_goal_plant_without_a_photo_only_checks_the_plant(monkeypatch):
+    resp, _, client = _confirm(
+        monkeypatch, {"ACTION#goal-1#a1": _action("set_goal_plant", {"plant_id": "p10"})}
+    )
+    assert resp["statusCode"] == 200
+    ops = _ops_by_sk(client.calls[0])
+    assert ("ConditionCheck", "PLANT#p10") in ops
+    assert not [k for k in ops if k[1].startswith("PLANTLOG#")]
 
 
 def test_confirm_create_plant_copies_species_from_the_plantation(monkeypatch):
@@ -2969,6 +3055,40 @@ def test_confirm_create_plant_copies_species_from_the_plantation(monkeypatch):
     assert resp["statusCode"] == 200
     plant_put = client.calls[0][0]["Put"]["Item"]
     assert plant_put["species"]["S"] == "Coconut" and plant_put["stake_no"]["N"] == "59"
+
+
+def test_confirm_create_plant_uses_the_photo_as_the_new_plants_photo(monkeypatch):
+    table, _ = _api_tables(
+        monkeypatch,
+        {"ACTION#goal-1#a1": _action("create_plant", {"stake_no": 59, "media_id": "m10"})},
+    )
+    table._query_response = {"Items": []}
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.confirm_action(_event("POST", ACTION_CONFIRM, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
+    assert client.calls[0][0]["Put"]["Item"]["media_id"]["S"] == "m10"
+
+
+def test_goal_detail_shows_the_goals_plant_stake_number(monkeypatch):
+    goal = {
+        "goal_id": "goal-1",
+        "description": "tracking",
+        "status": "Intake",
+        "plant_id": "p13",
+    }
+    table = FakeTable(
+        get_item_responses={
+            "GOAL#goal-1": {"Item": goal},
+            "PLANT#p13": {"Item": {"plant_id": "p13", "stake_no": Decimal(13)}},
+        },
+        query_responses=[{"Items": []}, {"Items": []}, {"Items": []}],
+    )
+    monkeypatch.setattr(handler, "_table", table)
+    event = _event("GET", "/gardens/{gardenId}/goals/{goalId}", path_params=GOAL_PATH)
+    body = json.loads(handler.get_goal_detail(event)["body"])
+    assert body["goal"]["plantId"] == "p13" and body["goal"]["plantStakeNo"] == 13
+    _validate_against("GoalDetail", body)
 
 
 def test_confirm_is_idempotent_and_refuses_resolved_actions(monkeypatch):
@@ -3080,3 +3200,198 @@ def test_goal_detail_returns_actions_and_message_photos_conforming_to_schema(mon
         }
     ]
     _validate_against("GoalDetail", body)
+
+
+# --- Plant history + plant endpoint (ADR-0035) ---------------------------------------------------
+
+PLANT_PATH = {"gardenId": "g1", "plantId": "p13"}
+PLANT_RESOURCE = "/gardens/{gardenId}/plants/{plantId}"
+HISTORY_RESOURCE = "/gardens/{gardenId}/plants/{plantId}/history"
+PLANT_13 = {
+    "plant_id": "p13",
+    "species": "Coconut",
+    "variety": "Kalpa Samrudhi",
+    "stage": "young",
+    "stake_no": Decimal(13),
+    "media_id": "m2",
+    "latest_status": "watch",
+    "latest_observed_on": "2026-11-23",
+    "history_count": Decimal(2),
+}
+
+
+def _plant_event(method, resource=PLANT_RESOURCE, *, body=None, qs=None):
+    event = _event(method, resource, body=body, path_params=PLANT_PATH)
+    event["queryStringParameters"] = qs
+    return event
+
+
+def _log_item(entry_id, observed_on, kind="photo", media=("m1",), **extra):
+    return {
+        "pk": "GARDEN#g1",
+        "sk": f"PLANTLOG#p13#{observed_on}#{entry_id}",
+        "entry_id": entry_id,
+        "plant_id": "p13",
+        "observed_on": observed_on,
+        "kind": kind,
+        "source": "user",
+        "media_ids": list(media),
+        **extra,
+    }
+
+
+def test_get_plant_returns_details_and_a_page_of_history(monkeypatch):
+    newest = _log_item("e2", "2026-11-23", kind="log", media=("m2",), status="watch", note="dry")
+    moved = _log_item("e1", "2026-11-20", retracted_media_ids=["m1"])
+    table = FakeTable(
+        get_item_responses={"PLANT#p13": {"Item": PLANT_13}},
+        query_response={
+            "Items": [newest, moved],
+            "LastEvaluatedKey": {"pk": "GARDEN#g1", "sk": moved["sk"]},
+        },
+    )
+    client = FakeClient(batch_get_responses=[_media_batch_response(("m2", "uploads/g1/m2/a.jpg"))])
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_client", client)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+
+    resp = handler.handler(_plant_event("GET", qs={"limit": "2"}), None)
+    assert resp["statusCode"] == 200
+    body = json.loads(resp["body"])
+    plant = body["plant"]
+    assert plant["stakeNo"] == 13 and plant["latestStatus"] == "watch"
+    assert plant["historyCount"] == 2 and "uploads/g1/m2/a.jpg" in plant["photoUrl"]
+    # The moved-away photo entry is hidden; the page is newest-first with a cursor.
+    (entry,) = body["history"]["entries"]
+    assert entry["entryId"] == "e2" and entry["status"] == "watch" and entry["note"] == "dry"
+    assert entry["photos"][0]["mediaId"] == "m2"
+    query = table.query_calls[0]
+    assert query["ScanIndexForward"] is False and query["Limit"] == 2
+    next_page = handler.handler(
+        _plant_event("GET", qs={"cursor": body["history"]["nextCursor"]}), None
+    )
+    assert table.query_calls[1]["ExclusiveStartKey"]["sk"] == moved["sk"]
+    assert next_page["statusCode"] == 200
+    _validate_against("PlantDetail", body)
+
+
+@pytest.mark.parametrize(
+    "qs",
+    [{"limit": "0"}, {"order": "sideways"}, {"cursor": "bogus"}],
+)
+def test_get_plant_rejects_bad_query(monkeypatch, qs):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    assert handler.get_plant(_plant_event("GET", qs=qs))["statusCode"] == 400
+
+
+def test_get_plant_not_in_this_garden_is_404(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    assert handler.get_plant(_plant_event("GET"))["statusCode"] == 404
+
+
+def test_add_plant_log_with_status_and_photo(monkeypatch):
+    table = FakeTable(get_item_responses={"MEDIA#m5": {"Item": dict(MEDIA_ITEM, media_id="m5")}})
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_client", client)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    body = {"note": "New frond opening", "status": "healthy", "mediaIds": ["m5"]}
+    resp = handler.handler(
+        _plant_event("POST", HISTORY_RESOURCE, body={**body, "observedOn": "2026-11-01"}), None
+    )
+    assert resp["statusCode"] == 201
+    entry = json.loads(resp["body"])
+    assert entry["kind"] == "log" and entry["observedOn"] == "2026-11-01"
+    assert entry["status"] == "healthy" and entry["photos"][0]["mediaId"] == "m5"
+    _validate_against("PlantLogEntry", entry)
+    ops = _ops_by_sk(client.calls[0])
+    put = next(v for (op, sk), v in ops.items() if op == "Put")
+    assert put["ConditionExpression"] == "attribute_not_exists(pk)"
+    assert ops[("Update", "PLANT#p13")]["UpdateExpression"] == "ADD history_count :d"
+    link = ops[("Update", "MEDIA#m5")]["ExpressionAttributeValues"]
+    assert link[":plant_id"] == {"S": "p13"} and link[":plant_link_source"] == {"S": "user"}
+    # Latest status and photo move only forward in time.
+    status = next(c for c in table.update_calls if "latest_status_on" in str(c))
+    assert status["ExpressionAttributeValues"][":latest_status"] == "healthy"
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ({}, 400),
+        ({"note": "   "}, 400),
+        ({"status": "dying"}, 400),
+        ({"note": "x" * 1001}, 400),
+        ({"mediaIds": ["a", "b", "c", "d", "e"]}, 400),
+        ({"note": "ok", "observedOn": "2999-01-01"}, 400),
+        ({"mediaIds": ["missing"]}, 400),
+        ({"mediaIds": ["m10"]}, 409),  # filed under another plant
+    ],
+)
+def test_add_plant_log_validation(monkeypatch, body, status):
+    table = FakeTable(get_item_responses={"MEDIA#m10": {"Item": dict(MEDIA_ITEM, plant_id="p1")}})
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    resp = handler.post_plant_history(_plant_event("POST", HISTORY_RESOURCE, body=body))
+    assert resp["statusCode"] == status
+
+
+def test_add_plant_log_for_a_missing_plant_is_404(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    monkeypatch.setattr(
+        handler,
+        "_client",
+        FakeClient(raise_on_transact=FakeClientError("TransactionCanceledException")),
+    )
+    resp = handler.post_plant_history(_plant_event("POST", HISTORY_RESOURCE, body={"note": "x"}))
+    assert resp["statusCode"] == 404
+
+
+def test_update_plant_stage_to_removed_keeps_it(monkeypatch):
+    table = FakeTable()
+    table.update_returns = dict(PLANT_13, stage="removed", media_id=None)
+    monkeypatch.setattr(handler, "_table", table)
+    resp = handler.handler(_plant_event("PATCH", body={"stage": "removed"}), None)
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"])["stage"] == "removed"
+    assert table.update_calls[0]["ConditionExpression"] == "attribute_exists(pk)"
+    _validate_against("Plant", json.loads(resp["body"]))
+
+
+def test_update_plant_validation_and_404(monkeypatch):
+    monkeypatch.setattr(handler, "_table", FakeTable())
+    assert handler.update_plant(_plant_event("PATCH", body={}))["statusCode"] == 400
+    monkeypatch.setattr(
+        handler,
+        "_table",
+        FakeTable(raise_on_update=FakeClientError("ConditionalCheckFailedException")),
+    )
+    assert handler.update_plant(_plant_event("PATCH", body={"stage": "x"}))["statusCode"] == 404
+
+
+def test_delete_plant_also_deletes_its_history(monkeypatch):
+    table = FakeTable(query_response={"Items": [_log_item("e1", "2026-11-20")]})
+    monkeypatch.setattr(handler, "_table", table)
+    event = _event("DELETE", PLANT_RESOURCE, headers={"X-User-Id": "u1"}, path_params=PLANT_PATH)
+    assert handler.delete_plant(event)["statusCode"] == 204
+    assert table.batch_deletes == [{"pk": "GARDEN#g1", "sk": "PLANTLOG#p13#2026-11-20#e1"}]
+
+
+def test_goal_filed_under_a_plant_adds_its_photos_to_the_history(monkeypatch):
+    table = FakeTable(get_item_responses={"MEDIA#m1": {"Item": dict(MEDIA_ITEM, media_id="m1")}})
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_client", client)
+    monkeypatch.setattr(handler, "_events", FakeEvents())
+    event = _event(
+        "POST",
+        "/gardens/{gardenId}/goals",
+        body={"description": "tracking", "mediaIds": ["m1"], "plantId": "p13"},
+        headers={"X-User-Id": "u1"},
+        path_params={"gardenId": "g1"},
+    )
+    assert handler.create_goal(event)["statusCode"] == 202
+    goal_tx, history_tx = client.calls
+    put = next(i["Put"] for i in history_tx if "Put" in i)
+    assert put["Item"]["sk"]["S"].startswith("PLANTLOG#p13#")
+    assert put["Item"]["entry_id"] == {"S": "m1"}  # same id an identity "match" would use

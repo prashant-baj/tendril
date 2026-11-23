@@ -208,7 +208,7 @@ photo.)*
 **Tasks** — ADR for the history key/entity (incl. the optional `stake_no` from CP-02); write
 endpoint (e.g. `POST /gardens/{id}/plants/{plantId}/history`); migration-friendly (CP-04 writes
 into it); tests.
-**Dependencies:** CP-02. **Blocking ADR:** Plant history entity + access pattern. **Status:** ☐ to do.
+**Dependencies:** CP-02. **Blocking ADR:** ADR-0035 (Accepted 2026-11-23): `PLANTLOG#{plant_id}#{observed_on}#{entry_id}` in the garden partition, retractions for moves, latest state denormalized onto Plant. **Status:** ◐ built + tested 2026-11-23. Covers the entry model, all write paths (confirm, goal/plant creation, identity links, `POST …/history`), EXIF capture dates and `scripts/backfill_plant_history.py`. **Open:** deploy, run the backfill in dev, CP-04 writes `source: migration`.
 
 ---
 
@@ -253,8 +253,10 @@ shapes); S3 + DynamoDB batch writes; KB ingest; dry-run + verify mode; run again
 
 **Tasks** — `getPlant` handler; OpenAPI contract (`getPlant` operation + schemas); Angular
 plant-detail screen + route; tests (contract-validated); dev smoke test with migrated data.
-**Dependencies:** CP-03 (data model), data via CP-04. **Blocking ADR:** Plant history read contract
-(same ADR as CP-03). **Status:** ☐ to do.
+**Dependencies:** CP-03 (data model), data via CP-04. **Blocking ADR:** ADR-0035 §6–7
+(Accepted). **Status:** ◐ built + tested 2026-11-23 (`getPlant` with cursor paging, `PATCH` stage,
+the `/plants/:plantId` screen with timeline, then-and-now compare, add-note form). **Open:** dev
+smoke test; migrated data arrives with CP-04.
 
 ---
 

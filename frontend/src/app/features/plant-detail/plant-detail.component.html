@@ -1,0 +1,115 @@
+<div class="screen">
+  <a routerLink="/garden" class="back"><td-icon name="arrow_back" size="18px" />Garden</a>
+
+  @if (notFound()) {
+    <section class="card pad">
+      <h1>Plant not found</h1>
+      <p class="muted">It may have been deleted. Go back to your garden to pick another plant.</p>
+    </section>
+  }
+  @if (!notFound()) {
+  @if (plant(); as p) {
+    <section class="card pad header">
+      <div class="chips">
+        <td-chip shape="pill">{{ p.stage }}</td-chip>
+        @if (p.latestStatus) {
+          <td-chip shape="pill" [tone]="statusTone(p.latestStatus)">{{ p.latestStatus }}</td-chip>
+        }
+      </div>
+      <h1>{{ title(p) }}</h1>
+      <p class="muted">
+        {{ p.variety }}
+        @if (lastSeen(p)) {
+          · Last seen {{ lastSeen(p) }}
+        }
+      </p>
+      <div class="actions">
+        <button type="button" class="btn primary" (click)="checkThisPlant()">
+          <td-icon name="photo_camera" size="18px" />Check this plant
+        </button>
+        @if (p.stage !== 'removed') {
+          <button type="button" class="btn" (click)="markRemoved()">Mark as removed</button>
+        }
+      </div>
+    </section>
+
+    @if (showCompare()) {
+      <section class="card pad">
+        <h2>Then and now</h2>
+        <div class="compare">
+          <a [href]="firstPhoto()!.url" target="_blank" rel="noopener"><img [src]="firstPhoto()!.thumbUrl" alt="First photo" /></a>
+          <a [href]="latestPhoto()!.url" target="_blank" rel="noopener"><img [src]="latestPhoto()!.thumbUrl" alt="Latest photo" /></a>
+        </div>
+      </section>
+    }
+
+    <section class="card pad">
+      <h2>Add a note</h2>
+      <form [formGroup]="logForm" (ngSubmit)="saveLog()" class="log-form">
+        <textarea formControlName="note" rows="2" maxlength="1000" placeholder="What did you see or do?"></textarea>
+        <div class="row">
+          <select formControlName="status" aria-label="Status">
+            <option value="">No status</option>
+            @for (s of statuses; track s) {
+              <option [value]="s">{{ s }}</option>
+            }
+          </select>
+          <input type="date" formControlName="observedOn" [max]="today" aria-label="Date observed" />
+          <label class="btn icon-btn" aria-label="Add a photo">
+            <td-icon name="add_a_photo" size="18px" />
+            <input type="file" accept="image/*" hidden (change)="onLogPhoto($event)" />
+          </label>
+        </div>
+        @if (logPhoto(); as f) {
+          <p class="muted">Photo: {{ f.name }} <button type="button" class="link" (click)="logPhoto.set(null)">remove</button></p>
+        }
+        <button type="submit" class="btn primary" [disabled]="!canSave || saving()">
+          {{ saving() ? 'Saving…' : 'Save' }}
+        </button>
+      </form>
+      @if (error()) {
+        <p class="error" role="alert">{{ error() }}</p>
+      }
+    </section>
+
+    <section class="card pad">
+      <h2>History</h2>
+      @for (day of days(); track day.observedOn) {
+        <div class="day">
+          <h3>{{ day.label }}</h3>
+          @for (e of day.entries; track e.entryId) {
+            <div class="entry">
+              <div class="entry-head">
+                <span class="kind">{{ kindLabel[e.kind] }}</span>
+                @if (e.status) {
+                  <td-chip shape="pill" [tone]="statusTone(e.status)">{{ e.status }}</td-chip>
+                }
+                @if (e.goalId) {
+                  <a class="link" [routerLink]="['/goals', e.goalId]">Open goal</a>
+                }
+              </div>
+              @if (e.note) {
+                <p>{{ e.note }}</p>
+              }
+              @if (e.photos.length) {
+                <div class="photos">
+                  @for (ph of e.photos; track ph.mediaId) {
+                    <a [href]="ph.url" target="_blank" rel="noopener"><img [src]="ph.thumbUrl" alt="Plant photo" /></a>
+                  }
+                </div>
+              }
+            </div>
+          }
+        </div>
+      } @empty {
+        <p class="muted">Nothing recorded yet. Photos filed to this plant and confirmed check-ins appear here.</p>
+      }
+      @if (nextCursor()) {
+        <button type="button" class="btn" [disabled]="loadingMore()" (click)="loadMore()">
+          {{ loadingMore() ? 'Loading…' : 'Show older' }}
+        </button>
+      }
+    </section>
+  }
+  }
+</div>

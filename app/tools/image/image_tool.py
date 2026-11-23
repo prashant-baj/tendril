@@ -30,6 +30,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -253,16 +254,55 @@ def _parse_outputs(raw: Any) -> list[dict[str, Any]]:
     return outputs
 
 
+EXIF_IFD = 0x8769
+EXIF_DATETIME_ORIGINAL = 36867
+EXIF_DATETIME_DIGITIZED = 36868
+EARLIEST_PLAUSIBLE_YEAR = 2000
+
+
+def taken_at(img: Image.Image, now: datetime | None = None) -> str | None:
+    """The camera's capture time (EXIF DateTimeOriginal, else DateTimeDigitized) as an ISO local
+    time without a zone, or None when absent or implausible (before 2000, or in the future). Read
+    from the original, before any output strips metadata (ADR-0035 §5)."""
+    try:
+        exif_ifd = img.getexif().get_ifd(EXIF_IFD)
+    except Exception:
+        return None
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    for tag in (EXIF_DATETIME_ORIGINAL, EXIF_DATETIME_DIGITIZED):
+        raw = exif_ifd.get(tag)
+        if not isinstance(raw, str):
+            continue
+        try:
+            value = datetime.strptime(raw.strip().rstrip("\x00")[:19], "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            continue
+        # A day of slack: the camera's clock is local time, `now` is UTC.
+        if value.year >= EARLIEST_PLAUSIBLE_YEAR and value <= now + timedelta(days=1):
+            return value.isoformat()
+    return None
+
+
+def _with_taken_at(result: dict[str, Any], img: Image.Image) -> dict[str, Any]:
+    when = taken_at(img)
+    if when:
+        result["takenAt"] = when
+    return result
+
+
 def inspect(payload: dict[str, Any]) -> dict[str, Any]:
     data = _load_source(payload.get("source"))
     img, fmt = _open(data)
     oriented = ImageOps.exif_transpose(img)
-    return {
-        "detectedFormat": fmt,
-        "width": oriented.width,
-        "height": oriented.height,
-        "bytes": len(data),
-    }
+    return _with_taken_at(
+        {
+            "detectedFormat": fmt,
+            "width": oriented.width,
+            "height": oriented.height,
+            "bytes": len(data),
+        },
+        img,
+    )
 
 
 def resize(payload: dict[str, Any]) -> dict[str, Any]:
@@ -290,13 +330,16 @@ def resize(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             result["base64"] = base64.b64encode(jpeg).decode("ascii")
         results.append(result)
-    return {
-        "detectedFormat": fmt,
-        "width": rgb.width,
-        "height": rgb.height,
-        "bytes": len(data),
-        "outputs": results,
-    }
+    return _with_taken_at(
+        {
+            "detectedFormat": fmt,
+            "width": rgb.width,
+            "height": rgb.height,
+            "bytes": len(data),
+            "outputs": results,
+        },
+        img,
+    )
 
 
 ROUTES = {"/inspect": inspect, "/resize": resize}

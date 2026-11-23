@@ -213,7 +213,10 @@ pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`
 | `/gardens/{gardenId}/media` | POST | Get a presigned upload URL + create the Media record |
 | `/gardens/{gardenId}/plants` | POST, GET | Add (optional `stakeNo`, unique per garden — 409 on a duplicate) / list plants (with photos, ordered by stake number) |
 | `/gardens/{gardenId}/plants/bulk` | POST | Create one plant per stake number in a range; idempotent, skips existing numbers (ADR-0032) |
-| `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant (and free its stake number) |
+| `/gardens/{gardenId}/plants/{plantId}` | GET | A plant and one page of its dated history; `limit`, `cursor`, `order`, `includeRetracted` (CP-05, ADR-0035) |
+| `/gardens/{gardenId}/plants/{plantId}` | PATCH | Change a plant's stage (e.g. `removed`, which keeps its history) |
+| `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant, its history and its stake number (photos stay) |
+| `/gardens/{gardenId}/plants/{plantId}/history` | POST | Log a note and/or status, optionally with photos and a past date (CP-03, ADR-0035) |
 | `/gardens/{gardenId}/goals` | POST, GET | Submit an issue (async — 202, orchestrator decomposes it); list goals |
 | `/gardens/{gardenId}/goals/{goalId}` | GET | Goal + plan + tasks + media + full message thread |
 | `/gardens/{gardenId}/goals/{goalId}/messages` | POST | Send a chat message (text and/or up to 4 photos, optionally a check-in on one task, ADR-0034) (async) |
@@ -459,7 +462,8 @@ site ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)).
 | Check a plant | `/capture` | Photo + description → real goal submission against the Client API |
 | Goal detail | `/goals/:goalId` | Plan approval (HITL), collapsible specialist trace, plan tasks, full reasoning thread, check-in |
 | Tasks | `/tasks` | Grouped Today / This week / Later task lists |
-| Garden | `/garden` | Garden hero photo/facts + full plant list (ordered by stake number), entry point to Add plant, Add numbered, Garden settings |
+| Garden | `/garden` | Garden hero photo/facts + full plant list (ordered by stake number, with latest status and date); a plant opens its page; entry point to Add plant, Add numbered, Garden settings |
+| Plant | `/plants/:plantId` | A plant's details, dated photo/note timeline (paged), first vs latest photo, add a note/status/photo, "Check this plant", mark as removed (CP-05, ADR-0035) |
 | Garden settings | `/garden-settings` | Edit vision + farm details of the current garden (`PATCH /gardens/{id}`, replaces the whole context block); no editable form after a failed load (CP-01) |
 | Activity | `/activity` | Real event timeline (the EVENT entity, §2) |
 

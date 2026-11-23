@@ -10,6 +10,10 @@ import pytest
 G = "g1"
 
 
+class ConditionalCheckFailed(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
 class DictTable:
     """Just enough of a DynamoDB Table: get/put/update(SET a = :x, nested params.feedback)/query."""
 
@@ -20,8 +24,11 @@ class DictTable:
         item = self.items.get((Key["pk"], Key["sk"]))
         return {"Item": dict(item)} if item else {}
 
-    def put_item(self, Item):
-        self.items[(Item["pk"], Item["sk"])] = dict(Item)
+    def put_item(self, Item, ConditionExpression=None):
+        key = (Item["pk"], Item["sk"])
+        if ConditionExpression == "attribute_not_exists(pk)" and key in self.items:
+            raise ConditionalCheckFailed()
+        self.items[key] = dict(Item)
 
     def update_item(
         self,
@@ -37,6 +44,10 @@ class DictTable:
         values = ExpressionAttributeValues or {}
         if ConditionExpression == "#s = :prop" and item.get("status") != values[":prop"]:
             raise RuntimeError("ConditionalCheckFailed")
+        if UpdateExpression.startswith("ADD "):
+            field, value = UpdateExpression.removeprefix("ADD ").split()
+            item[field] = item.get(field, 0) + values[value]
+            return
         set_part = UpdateExpression.split(" REMOVE ")[0].removeprefix("SET ")
         for assignment in set_part.split(","):
             if "=" not in assignment:
@@ -240,6 +251,8 @@ def test_matching_checkin_proposes_complete_task_and_links_photo(env):
     # Nothing was marked done — only proposed.
     assert table.items[(f"GARDEN#{G}", "TASK#goal-1#t1")]["status"] == "pending"
     assert table.items[(f"GARDEN#{G}", "MEDIA#m10")]["plant_link_source"] == "user"
+    # A check-in photo joins #1's history only when the check-in is confirmed (ADR-0035 §2).
+    assert table.of_prefix("PLANTLOG#") == []
     # The identifier read the analysis copy, by code.
     pid_call = next(p for arn, p in core.calls if arn == "arn:pid")
     assert "derived/g1/m10/analysis.jpg" in pid_call["imageUrl"]
@@ -298,6 +311,11 @@ def test_auto_link_only_when_enabled(env, monkeypatch):
     assert _actions(table) == []
     assert table.items[(f"GARDEN#{G}", "GOAL#goal-1")]["plant_id"] == "p10"
     assert table.items[(f"GARDEN#{G}", "MEDIA#m10")]["plant_link_source"] == "auto"
+    # ...and joins #10's history, becoming its current photo (ADR-0035).
+    (entry,) = table.of_prefix("PLANTLOG#p10#")
+    assert entry["entry_id"] == "m10" and entry["source"] == "auto" and entry["goal_id"] == "goal-1"
+    plant = table.items[(f"GARDEN#{G}", "PLANT#p10")]
+    assert plant["media_id"] == "m10" and plant["history_count"] == 1
 
 
 def test_unsure_read_asks_with_candidates(env):
@@ -361,3 +379,48 @@ def test_a_new_proposal_supersedes_the_open_one(env):
     handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
     statuses = sorted(a["status"] for a in _actions(table))
     assert statuses == ["proposed", "superseded"]
+
+
+def test_an_identical_open_proposal_is_kept_not_raised_again(env):
+    """Dev, 2026-11-23: answering "Plant # 13" re-proposed the same link, superseding the first."""
+    open_link = {
+        "pk": f"GARDEN#{G}",
+        "sk": "ACTION#goal-1#first",
+        "action_id": "first",
+        "goal_id": "goal-1",
+        "type": "set_goal_plant",
+        "params": {"plant_id": "p10", "media_id": "m10"},
+        "status": "proposed",
+    }
+    table, _ = env(_garden_items() + [open_link])
+    action_id = handler._propose_action(
+        G, "goal-1", "set_goal_plant", {"plant_id": "p10", "media_id": "m10"}, "Link to #10?"
+    )
+    assert action_id == "first"
+    (action,) = _actions(table)
+    assert action["status"] == "proposed"
+
+    # A different proposal still supersedes it.
+    other = handler._propose_action(
+        G, "goal-1", "set_goal_plant", {"plant_id": "p17", "media_id": "m10"}, "Link to #17?"
+    )
+    assert other and other != "first"
+    assert sorted(a["status"] for a in _actions(table)) == ["proposed", "superseded"]
+
+
+def test_a_chat_photo_of_the_goals_plant_joins_its_history_once(env):
+    """The goal is #10's; a chat photo reads #10 → filed and added to #10's history, dated by the
+    photo's capture time. Filing it again (e.g. createGoal already did) adds nothing."""
+    items = _garden_items(goal_plant="p10") + [_user_message("new frond", ["m10"])]
+    table, _ = env(items, _stake(10))
+    table.items[(f"GARDEN#{G}", "MEDIA#m10")]["taken_at"] = "2026-11-20T08:00:00"
+    handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+
+    (entry,) = table.of_prefix("PLANTLOG#p10#")
+    assert entry["sk"] == "PLANTLOG#p10#2026-11-20#m10"
+    assert entry["observed_on"] == "2026-11-20" and entry["source"] == "user"
+    assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["latest_photo_on"] == "2026-11-20"
+
+    handler._link_media_to_plant(G, "m10", "p10", "user", goal_id="goal-1")
+    assert len(table.of_prefix("PLANTLOG#p10#")) == 1
+    assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["history_count"] == 1

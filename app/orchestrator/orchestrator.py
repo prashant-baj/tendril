@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -642,14 +643,27 @@ def _validate_action(garden_id: str, goal_id: str, kind: str, params: dict[str, 
     return None
 
 
-def _supersede_open_actions(garden_id: str, goal_id: str) -> None:
+def _open_actions(garden_id: str, goal_id: str) -> list[dict[str, Any]]:
     resp = _get_table().query(
         KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
         & Key("sk").begins_with(f"ACTION#{goal_id}#")
     )
-    for item in resp.get("Items", []):
-        if item.get("status") != "proposed":
-            continue
+    return [i for i in resp.get("Items", []) if i.get("status") == "proposed"]
+
+
+def _same_params(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Proposal params compared on what they change; `feedback` (the reply text) and
+    `candidates` (display only) don't make a proposal different."""
+    ignore = {"feedback", "candidates"}
+
+    def norm(d: dict[str, Any]) -> dict[str, str]:
+        return {k: str(v) for k, v in d.items() if k not in ignore and v is not None}
+
+    return norm(a) == norm(b)
+
+
+def _supersede_actions(garden_id: str, open_items: list[dict[str, Any]]) -> None:
+    for item in open_items:
         try:
             _get_table().update_item(
                 Key=_key(garden_id, item["sk"]),
@@ -670,13 +684,19 @@ def _propose_action(
     garden_id: str, goal_id: str, kind: str, params: dict[str, Any], summary: str
 ) -> str | None:
     """Validates and stores a proposal (`ACTION#{goal_id}#{action_id}`, status `proposed`),
-    superseding older open ones on this goal. Only the Client API's confirm endpoint applies it."""
+    superseding older open ones on this goal. Only the Client API's confirm endpoint applies it.
+    An identical proposal that's still open is kept and its id returned — not raised again."""
     params = {k: v for k, v in params.items() if v is not None}
     error = _validate_action(garden_id, goal_id, kind, params)
     if error:
         logger.warning("action_rejected goal_id=%s type=%s reason=%s", goal_id, kind, error)
         return None
-    _supersede_open_actions(garden_id, goal_id)
+    open_items = _open_actions(garden_id, goal_id)
+    for item in open_items:
+        if item.get("type") == kind and _same_params(item.get("params") or {}, params):
+            logger.info("action_repeated goal_id=%s action_id=%s", goal_id, item["action_id"])
+            return item["action_id"]
+    _supersede_actions(garden_id, open_items)
     action_id = uuid.uuid4().hex
     _get_table().put_item(
         Item={
@@ -712,7 +732,17 @@ def _set_action_feedback(garden_id: str, goal_id: str, action_id: str, feedback:
         logger.exception("action_feedback_failed action_id=%s", action_id)
 
 
-def _link_media_to_plant(garden_id: str, media_id: str, plant_id: str, source: str) -> None:
+def _link_media_to_plant(
+    garden_id: str,
+    media_id: str,
+    plant_id: str,
+    source: str,
+    *,
+    goal_id: str | None = None,
+    add_to_history: bool = True,
+) -> None:
+    """Files a photo under a plant. Unless a check-in will record it (the confirmed `complete_task`
+    writes the plant's history entry then), it also joins the plant's history (ADR-0035 §2)."""
     try:
         _get_table().update_item(
             Key=_key(garden_id, f"MEDIA#{media_id}"),
@@ -722,6 +752,81 @@ def _link_media_to_plant(garden_id: str, media_id: str, plant_id: str, source: s
         )
     except Exception:
         logger.exception("media_link_failed media_id=%s", media_id)
+        return
+    if add_to_history:
+        _append_photo_history(garden_id, plant_id, media_id, source, goal_id)
+
+
+def _photo_observed_on(media: dict[str, Any] | None) -> str:
+    """ADR-0035 §1: the photo's capture date, else its upload date, else today. (Mirrors the Client
+    API's `plant_history.observed_on_for_media` — separate deployable units.)"""
+    for field in ("taken_at", "uploaded_at"):
+        value = (media or {}).get(field)
+        if isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}", value):
+            return value[:10]
+    return datetime.now(UTC).date().isoformat()
+
+
+def _append_photo_history(
+    garden_id: str, plant_id: str, media_id: str, source: str, goal_id: str | None
+) -> None:
+    """One `photo` entry `PLANTLOG#{plant_id}#{date}#{media_id}` — id = the media id, so the same
+    photo filed twice (createGoal, then this identity match) is written once. Then the plant's
+    count and latest photo, each only moving forward in time. Best-effort, like every link here."""
+    media = _get(garden_id, f"MEDIA#{media_id}") or {}
+    observed_on = _photo_observed_on(media)
+    entry = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"PLANTLOG#{plant_id}#{observed_on}#{media_id}",
+        "entry_id": media_id,
+        "plant_id": plant_id,
+        "observed_on": observed_on,
+        "kind": "photo",
+        "source": source,
+        "media_ids": [media_id],
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if isinstance(media.get("taken_at"), str) and len(media["taken_at"]) > 10:
+        entry["observed_at"] = media["taken_at"]
+    if goal_id:
+        entry["goal_id"] = goal_id
+    try:
+        _get_table().put_item(Item=entry, ConditionExpression="attribute_not_exists(pk)")
+    except Exception as e:
+        if _error_code(e) != "ConditionalCheckFailedException":
+            logger.exception("plant_history_failed plant_id=%s media_id=%s", plant_id, media_id)
+        return
+    updates = [
+        ("ADD history_count :d", {":d": 1}, "attribute_exists(pk)"),
+        (
+            "SET latest_observed_on = :o",
+            {":o": observed_on},
+            "attribute_exists(pk) AND (attribute_not_exists(latest_observed_on) "
+            "OR latest_observed_on <= :o)",
+        ),
+        (
+            "SET media_id = :m, latest_photo_on = :o",
+            {":m": media_id, ":o": observed_on},
+            "attribute_exists(pk) AND (attribute_not_exists(latest_photo_on) "
+            "OR latest_photo_on <= :o)",
+        ),
+    ]
+    for expression, values, condition in updates:
+        try:
+            _get_table().update_item(
+                Key=_key(garden_id, f"PLANT#{plant_id}"),
+                UpdateExpression=expression,
+                ExpressionAttributeValues=values,
+                ConditionExpression=condition,
+            )
+        except Exception as e:
+            if _error_code(e) != "ConditionalCheckFailedException":
+                logger.exception("plant_latest_failed plant_id=%s", plant_id)
+    logger.info("plant_history_photo plant_id=%s media_id=%s source=%s", plant_id, media_id, source)
+
+
+def _error_code(e: Exception) -> str | None:
+    return (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
 
 
 def _label(stake_no: int | None) -> str:
@@ -764,7 +869,15 @@ def _identify_photo(
 
     if decision.kind in ("match", "no_stake"):
         if expected_plant:
-            _link_media_to_plant(garden_id, media_id, expected_plant, "user")
+            _link_media_to_plant(
+                garden_id,
+                media_id,
+                expected_plant,
+                "user",
+                goal_id=goal_id,
+                # A check-in photo joins the history as the confirmed check-in, not twice.
+                add_to_history=task is None,
+            )
         if task:
             action_id = _propose_action(
                 garden_id,
@@ -823,7 +936,7 @@ def _identify_photo(
                 UpdateExpression="SET plant_id = :p",
                 ExpressionAttributeValues={":p": decision.plant_id},
             )
-            _link_media_to_plant(garden_id, media_id, decision.plant_id, "auto")
+            _link_media_to_plant(garden_id, media_id, decision.plant_id, "auto", goal_id=goal_id)
             return IdentityOutcome(
                 note=f"(Filed this photo and goal under {_label(n)} from its stake number. "
                 "Mention it briefly; the gardener can tell you if it's a different plant.)"

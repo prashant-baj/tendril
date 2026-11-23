@@ -351,6 +351,89 @@ paths:
     parameters:
       - $ref: "#/components/parameters/GardenId"
       - $ref: "#/components/parameters/PlantId"
+    get:
+      operationId: getPlant
+      security:
+        - api_key: []
+      summary: A plant and one page of its dated history (CP-05, ADR-0035)
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque `nextCursor` from the previous page.
+          schema: {type: string}
+        - name: order
+          in: query
+          required: false
+          schema: {type: string, enum: [newest, oldest], default: newest}
+        - name: includeRetracted
+          in: query
+          required: false
+          description: Also return moved-away photos and the retraction entries (audit trail).
+          schema: {type: string, enum: ["true", "false"], default: "false"}
+      responses:
+        "200":
+          description: The plant and a page of its history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlantDetail"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such plant in this garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    patch:
+      operationId: updatePlant
+      security:
+        - api_key: []
+      summary: Change a plant's stage (e.g. `removed` for a palm that died — keeps its history)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlantUpdateRequest"
+      responses:
+        "200":
+          description: The updated plant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Plant"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such plant in this garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
     delete:
       operationId: deletePlant
       security:
@@ -363,6 +446,56 @@ paths:
           description: Plant deleted (idempotent — also returned if it didn't exist)
         "400":
           description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/plants/{plantId}/history:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/PlantId"
+    post:
+      operationId: addPlantLog
+      security:
+        - api_key: []
+      summary: Log a note and/or status (optionally with photos) in a plant's history (CP-03, ADR-0035)
+      description: >
+        Append-only. Dated `observedOn` when given, else by the first photo's own capture date,
+        else today. Photos must belong to this garden and not be filed under another plant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlantLogCreateRequest"
+      responses:
+        "201":
+          description: The new history entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlantLogEntry"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such plant in this garden
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A photo is filed under another plant
           content:
             application/json:
               schema:
@@ -1083,6 +1216,104 @@ components:
           type: string
           description: Freshly-generated presigned GET url per read (OB-03) — never stored, same
             posture as GoalMedia's downloadUrl. Absent if the plant has no linked photo.
+        latestStatus:
+          type: string
+          enum: [healthy, ok, watch]
+          description: Status of the newest history entry that set one (ADR-0035 §4).
+        latestObservedOn:
+          type: string
+          format: date
+          description: Date of the newest history entry.
+        historyCount:
+          type: integer
+          minimum: 0
+          description: Number of visible history entries.
+
+    PlantUpdateRequest:
+      type: object
+      required: [stage]
+      properties:
+        stage:
+          type: string
+          minLength: 1
+          description: e.g. "young", "bearing", or "removed" for a plant that died.
+
+    PlantPhoto:
+      type: object
+      required: [mediaId, thumbUrl, url]
+      properties:
+        mediaId: {type: string}
+        thumbUrl:
+          type: string
+          description: Presigned GET url of the 512 px thumbnail (or the original if unprocessed).
+        url:
+          type: string
+          description: Presigned GET url of the analysis copy (or the original if unprocessed).
+
+    PlantLogEntry:
+      type: object
+      required: [entryId, observedOn, kind, source, photos]
+      properties:
+        entryId: {type: string}
+        observedOn: {type: string, format: date}
+        observedAt:
+          type: string
+          description: Capture time from the photo, when known (local camera time, no zone).
+        kind:
+          type: string
+          enum: [photo, checkin, log, retraction]
+        source:
+          type: string
+          enum: [user, confirmed, auto, migration]
+        status:
+          type: string
+          enum: [healthy, ok, watch]
+        note: {type: string}
+        photos:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlantPhoto"
+        goalId: {type: string}
+        taskId: {type: string}
+        retracts:
+          type: string
+          description: For a retraction, the entry whose photo was moved away.
+
+    PlantDetail:
+      type: object
+      required: [plant, history]
+      properties:
+        plant:
+          $ref: "#/components/schemas/Plant"
+        history:
+          type: object
+          required: [entries]
+          properties:
+            entries:
+              type: array
+              items:
+                $ref: "#/components/schemas/PlantLogEntry"
+            nextCursor:
+              type: string
+              description: Pass as `cursor` to get the next page; absent on the last page.
+
+    PlantLogCreateRequest:
+      type: object
+      properties:
+        note:
+          type: string
+          maxLength: 1000
+        status:
+          type: string
+          enum: [healthy, ok, watch]
+        mediaIds:
+          type: array
+          maxItems: 4
+          items: {type: string}
+        observedOn:
+          type: string
+          format: date
+          description: When this was observed (not in the future). Default — see the operation.
 
     GoalCreateRequest:
       type: object
@@ -1135,6 +1366,11 @@ components:
             type: string
         plantId:
           type: string
+        plantStakeNo:
+          type: integer
+          description: >
+            Stake number of the goal's plant, when it has one. Set only by getGoalDetail, for
+            the goal header (ADR-0034 follow-up).
 
     Plan:
       type: object

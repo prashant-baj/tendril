@@ -6,6 +6,9 @@
 
     <section class="card header">
       <td-chip [tone]="planStatusTone" shape="pill">{{ d.goal.status }}</td-chip>
+      @if (d.goal.plantStakeNo != null) {
+        <td-chip tone="green" shape="pill" icon="eco" class="plant-chip">Plant #{{ d.goal.plantStakeNo }}</td-chip>
+      }
       <h1>{{ d.goal.description }}</h1>
       @if (d.plan) {
         <p><strong>Done when:</strong> {{ d.plan.successCriteria }}</p>

@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, inject, OnInit, signal } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
 import { Observable, of } from 'rxjs';
 import { map, switchMap } from 'rxjs/operators';
 import { IconComponent } from '../../shared/components/icon/icon.component';
@@ -28,6 +29,7 @@ type CapturePhase = 'idle' | 'submitting' | 'submitted' | 'error';
 export class CaptureComponent implements OnInit {
   private readonly gardenApi = inject(GardenApi);
   private readonly currentGarden = inject(CurrentGardenService);
+  private readonly route = inject(ActivatedRoute, { optional: true });
 
   readonly phase = signal<CapturePhase>('idle');
   readonly errorMessage = signal<string | null>(null);
@@ -38,6 +40,11 @@ export class CaptureComponent implements OnInit {
   readonly selectedPlantId = signal<string>('');
 
   ngOnInit(): void {
+    // "Check this plant" on a plant's page (ADR-0035 §7) arrives with ?plantId= preselected.
+    const preselected = this.route?.snapshot.queryParamMap.get('plantId');
+    if (preselected) {
+      this.selectedPlantId.set(preselected);
+    }
     const gardenId = this.currentGarden.gardenId();
     this.gardenApi.getPlants(gardenId).subscribe((plants) => this.plants.set(plants));
   }

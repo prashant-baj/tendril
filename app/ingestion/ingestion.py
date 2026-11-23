@@ -201,6 +201,8 @@ def process_object(key: str, size: int | None) -> str:
             "analysis_s3_key": analysis_key,
             "thumb_s3_key": thumb_key,
             "analysis_bytes": analysis.get("bytes"),
+            # ADR-0035 §5: the photo's own capture time dates its plant-history entry.
+            **({"taken_at": result["takenAt"]} if result.get("takenAt") else {}),
         },
         remove=["processing_error"],
     )

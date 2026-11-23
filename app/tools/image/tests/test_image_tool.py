@@ -260,3 +260,47 @@ def test_storage_failure_is_502_and_urls_are_not_echoed(monkeypatch):
     status, result = _call("/resize", body)
     assert status == 502
     assert "secret" not in json.dumps(result)
+
+
+# --- capture time (ADR-0035 §5) ----------------------------------------------------------------
+
+
+def _with_capture_time(original: str | None, digitized: str | None = None) -> bytes:
+    exif = Image.Exif()
+    ifd = exif.get_ifd(tool.EXIF_IFD)
+    if original:
+        ifd[tool.EXIF_DATETIME_ORIGINAL] = original
+    if digitized:
+        ifd[tool.EXIF_DATETIME_DIGITIZED] = digitized
+    return _jpeg(Image.new("RGB", (400, 200)), exif=exif.tobytes())
+
+
+def test_capture_time_is_read_from_the_original_before_metadata_is_stripped():
+    data = _with_capture_time("2026:08:02 07:30:15")
+    _, inspected = _call("/inspect", {"source": {"base64": _b64(data)}})
+    assert inspected["takenAt"] == "2026-08-02T07:30:15"
+    _, resized = _call("/resize", {"source": {"base64": _b64(data)}, "outputs": [ANALYSIS]})
+    assert resized["takenAt"] == "2026-08-02T07:30:15"
+    out = Image.open(io.BytesIO(base64.b64decode(resized["outputs"][0]["base64"])))
+    assert "exif" not in out.info  # still stripped from the copy
+
+
+@pytest.mark.parametrize(
+    ("original", "digitized", "expected"),
+    [
+        (None, "2026:08:03 10:00:00", "2026-08-03T10:00:00"),  # falls back to digitized
+        ("1999:12:31 23:59:59", None, None),  # implausibly old (camera clock never set)
+        ("2999:01:01 00:00:00", None, None),  # in the future
+        ("not a date", None, None),
+        (None, None, None),
+    ],
+)
+def test_implausible_or_missing_capture_times_are_omitted(original, digitized, expected):
+    data = _with_capture_time(original, digitized)
+    _, body = _call("/inspect", {"source": {"base64": _b64(data)}})
+    assert body.get("takenAt") == expected
+
+
+def test_png_without_exif_has_no_capture_time():
+    _, body = _call("/inspect", {"source": {"base64": _b64(_png((40, 40)))}})
+    assert "takenAt" not in body

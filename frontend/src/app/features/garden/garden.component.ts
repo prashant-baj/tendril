@@ -37,10 +37,9 @@ export class GardenComponent {
     { initialValue: [] },
   );
 
-  // No per-plant detail screen yet — matches the mockup, which sends every plant row into
-  // the capture flow rather than a dedicated plant page.
-  openCapture(): void {
-    this.router.navigateByUrl('/capture');
+  // CP-05 / ADR-0035: a plant row opens that plant's page (details + dated history).
+  openPlant(plantId: string): void {
+    this.router.navigate(['/plants', plantId]);
   }
 
   openAddPlant(): void {

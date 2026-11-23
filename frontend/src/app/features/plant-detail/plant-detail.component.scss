@@ -1,0 +1,78 @@
+.screen { display: flex; flex-direction: column; gap: 16px; }
+
+.card {
+  background: var(--td-color-bg-surface);
+  border: 1px solid var(--td-color-line);
+  border-radius: var(--td-radius-lg);
+  box-shadow: var(--td-shadow-card);
+}
+.pad { padding: 16px; }
+
+.back {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--td-color-ink-secondary);
+}
+
+h1 { font-size: 22px; font-weight: 600; margin: 10px 0 0; }
+h2 { font-size: 16px; font-weight: 600; margin: 0 0 12px; }
+h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--td-color-ink-secondary); }
+p { margin: 6px 0 0; font-size: 14px; line-height: 20px; }
+.muted { color: var(--td-color-ink-secondary); }
+.error { color: var(--td-color-red-ink); }
+
+.chips, .actions, .row, .entry-head, .photos, .compare { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.actions { margin-top: 12px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: var(--td-radius-md);
+  border: 1px solid var(--td-color-line);
+  background: var(--td-color-bg-surface);
+  color: var(--td-color-ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  &.primary { background: var(--td-color-primary); border-color: var(--td-color-primary); color: #fff; }
+  &:disabled { opacity: .5; cursor: default; }
+}
+.icon-btn { padding: 0 10px; }
+.link { background: none; border: 0; padding: 0; color: var(--td-color-primary); font-size: 13px; font-weight: 600; cursor: pointer; }
+
+.log-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  textarea, select, input[type='date'] {
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+    border: 1px solid var(--td-color-line);
+    border-radius: var(--td-radius-md);
+    background: var(--td-color-bg-surface);
+  }
+  textarea { resize: vertical; }
+  .btn.primary { align-self: flex-start; }
+}
+
+.day { padding: 12px 0; border-top: 1px solid var(--td-color-line-soft); }
+.entry + .entry { margin-top: 10px; }
+.kind { font-size: 13px; font-weight: 600; }
+
+.photos img, .compare img {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: var(--td-radius-md);
+  margin-top: 6px;
+}
+.compare img { width: 140px; height: 140px; }

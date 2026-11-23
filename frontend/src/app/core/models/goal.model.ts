@@ -8,6 +8,8 @@ export interface Goal {
   mediaIds?: string[];
   /** Set when this goal is about one specific plant, not the whole garden. */
   plantId?: string;
+  /** The goal's plant's stake number, when it has one (getGoalDetail only). */
+  plantStakeNo?: number;
 }
 
 /** Client API request for `POST /gardens/{gardenId}/goals` (WS-03/WS-05). */
