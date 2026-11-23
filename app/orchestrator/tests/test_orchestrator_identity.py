@@ -67,6 +67,9 @@ class DictTable:
         found = [dict(v) for (p, s), v in self.items.items() if p == pk and s.startswith(prefix)]
         return {"Items": sorted(found, key=lambda i: i["sk"])}
 
+    def delete_item(self, Key):
+        self.items.pop((Key["pk"], Key["sk"]), None)
+
     def of_prefix(self, prefix):
         return [v for (p, s), v in self.items.items() if s.startswith(prefix)]
 
@@ -424,3 +427,57 @@ def test_a_chat_photo_of_the_goals_plant_joins_its_history_once(env):
     handler._link_media_to_plant(G, "m10", "p10", "user", goal_id="goal-1")
     assert len(table.of_prefix("PLANTLOG#p10#")) == 1
     assert table.items[(f"GARDEN#{G}", "PLANT#p10")]["history_count"] == 1
+
+
+# --- ADR-0036: a turn without a plan on a goal without one -> InformationSaved ----------------
+
+
+def _goal_status(table):
+    return table.items[(f"GARDEN#{G}", "GOAL#goal-1")]["status"]
+
+
+def test_a_check_in_goal_without_a_plan_ends_as_information_saved(env):
+    """Dev, 2026-11-23: "Initial check in" for #13 replied without a plan and stayed Decomposing."""
+    items = _garden_items(goal_plant="p10")
+    items[1]["media_ids"] = ["m10"]
+    table, _ = env(items, _stake(10))
+    handler.handle_goal_submitted({"gardenId": G, "goalId": "goal-1"})
+    assert _goal_status(table) == "InformationSaved"
+    assert table.of_prefix("PLAN#") == []
+    assert len(table.of_prefix("PLANTLOG#p10#")) == 1  # the photo is saved to #10's history
+
+
+def test_a_stuck_decomposing_goal_resolves_on_its_next_chat_turn(env):
+    items = _garden_items() + [_user_message("anything to worry about?")]
+    items[1]["status"] = "Decomposing"
+    table, _ = env(items)
+    handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    assert _goal_status(table) == "InformationSaved"
+
+
+def test_a_goal_with_a_plan_keeps_its_status_on_a_turn_without_one(env):
+    plan = {"pk": f"GARDEN#{G}", "sk": "PLAN#goal-1", "plan_id": "goal-1", "status": "Approved"}
+    items = _garden_items() + [plan, _user_message("how is it going?")]
+    items[1]["status"] = "Approved"
+    table, _ = env(items)
+    handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    assert _goal_status(table) == "Approved"
+
+
+def test_a_later_plan_moves_a_saved_goal_to_plan_proposed(env, monkeypatch):
+    items = _garden_items() + [_user_message("please make a plan")]
+    items[1]["status"] = "InformationSaved"
+    table, _ = env(items)
+    plan = handler.PlanProposal(
+        success_criteria="Soil stays moist", tasks=[handler.TaskProposal(title="Mulch", detail="d")]
+    )
+    original = FakeAgent.__call__
+
+    def with_plan(self, prompt=None, *, structured_output_model=None, **kw):
+        if structured_output_model is not None:
+            return _Result(handler.ChatTurnResult(reply="Here's a plan.", updated_plan=plan))
+        return original(self, prompt, **kw)
+
+    monkeypatch.setattr(FakeAgent, "__call__", with_plan)
+    handler.handle_goal_message_received({"gardenId": G, "goalId": "goal-1"})
+    assert _goal_status(table) == "PlanProposed"

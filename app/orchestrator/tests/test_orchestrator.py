@@ -1501,3 +1501,11 @@ def test_goal_with_unreadable_photo_tells_the_agent_and_sends_no_image(monkeypat
     monkeypatch.setattr(handler, "_agentcore", fake_client)
     vision_tool("what is this?")
     assert "imageUrl" not in json.loads(fake_client.calls[0]["payload"])
+
+
+def test_steps_in_the_reply_must_be_a_structured_plan():
+    """Dev, 2026-11-23: two "Initial check in" goals got numbered steps in the reply but no plan,
+    leaving the goal in Decomposing. The prompt and the schema both say steps belong in the plan."""
+    assert "those steps ARE the plan" in handler.ORCHESTRATOR_SYSTEM_PROMPT
+    field = handler.ChatTurnResult.model_fields["updated_plan"]
+    assert "never appear only in the reply text" in field.description

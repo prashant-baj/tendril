@@ -5,7 +5,7 @@
     </a>
 
     <section class="card header">
-      <td-chip [tone]="planStatusTone" shape="pill">{{ d.goal.status }}</td-chip>
+      <td-chip [tone]="goalTone(d.goal.status)" shape="pill">{{ goalLabel(d.goal.status) }}</td-chip>
       @if (d.goal.plantStakeNo != null) {
         <td-chip tone="green" shape="pill" icon="eco" class="plant-chip">Plant #{{ d.goal.plantStakeNo }}</td-chip>
       }

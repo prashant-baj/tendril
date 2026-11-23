@@ -69,6 +69,8 @@ describe('HomeComponent goals split', () => {
   const goals: Goal[] = [
     { goalId: 'g1', description: 'Approved goal', type: 'diagnosis', status: 'Approved' },
     { goalId: 'g2', description: 'Awaiting approval', type: 'diagnosis', status: 'PlanProposed' },
+    // ADR-0036: a saved check-in needs nothing from the gardener and isn't in progress either.
+    { goalId: 'g3', description: 'Initial check in', type: 'diagnosis', status: 'InformationSaved' },
   ];
 
   beforeEach(async () => {

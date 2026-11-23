@@ -2,8 +2,7 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { ChipComponent, ChipTone } from '../chip/chip.component';
 import { Goal } from '../../../core/models/goal.model';
-
-const IN_PROGRESS_STATUSES = new Set(['Approved', 'InProgress']);
+import { goalStatusLabel, goalStatusTone } from '../goal-status.util';
 
 /** A goal-in-progress card on the Home screen's "Goals in progress" grid. */
 @Component({
@@ -22,6 +21,10 @@ export class GoalCardComponent {
   }
 
   get statusTone(): ChipTone {
-    return IN_PROGRESS_STATUSES.has(this.goal.status) ? 'green' : 'amber';
+    return goalStatusTone(this.goal.status);
+  }
+
+  get statusLabel(): string {
+    return goalStatusLabel(this.goal.status);
   }
 }

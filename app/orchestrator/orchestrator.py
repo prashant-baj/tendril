@@ -161,7 +161,14 @@ class ChatTurnResult(BaseModel):
             "never as the whole reply."
         )
     )
-    updated_plan: PlanProposal | None = None
+    updated_plan: PlanProposal | None = Field(
+        default=None,
+        description=(
+            "The plan, as concrete tasks. Required whenever the reply recommends steps for the "
+            "gardener to take — steps must never appear only in the reply text. Leave empty only "
+            "when you are asking a clarifying question or there is genuinely nothing to do."
+        ),
+    )
     proposed_action: ProposedAction | None = None
 
 
@@ -180,7 +187,9 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
     "step-by-step detail, so your reply doesn't need to repeat it — just say what you "
     "concluded and why in a sentence or two. If you genuinely need more information "
     "first, ask one specific clarifying question instead of guessing — it's fine not "
-    "to propose a plan on this turn. You never change anything yourself: when the gardener "
+    "to propose a plan on this turn. But whenever your reply recommends concrete steps "
+    "for the gardener to take, those steps ARE the plan: put them in updated_plan as tasks, "
+    "never only in the reply text. You never change anything yourself: when the gardener "
     "says they finished a task, or tells you which numbered plant a photo is about, set "
     "proposed_action and tell them to tap Confirm; a typed 'yes' does not confirm anything. "
     "When a note in the conversation says a confirmation question was already shown, don't "
@@ -188,6 +197,8 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
 )
 
 FALLBACK_TASK_TITLE_MAX_CHARS = 60
+# ADR-0036: a turn ended without a plan on a goal that has none (a check-in, a question).
+GOAL_INFORMATION_SAVED = "InformationSaved"
 # Phase 7.5+: how far forward a followup.due nudge pushes a task's due-date, so the tracker
 # doesn't re-fire for the same task on its next tick before the gardener responds. Own copy, not
 # shared with garden_handler.py's equivalent constant (separate deployable units, no cross-package
@@ -1180,7 +1191,13 @@ def _apply_turn_result(
     if turn.updated_plan is not None:
         _write_plan_and_tasks(garden_id, goal_id, turn.updated_plan, plant_id, trace)
         _update_goal(garden_id, goal_id, status="PlanProposed", updated_at=now)
+    elif _get(garden_id, f"PLAN#{goal_id}") is None:
+        # ADR-0036: no plan this turn and none before — what the gardener shared is recorded
+        # (reply, photo link, plant history) and there is nothing to approve. Never "stuck in
+        # Decomposing"; a later turn that proposes a plan moves the goal to PlanProposed.
+        _update_goal(garden_id, goal_id, status=GOAL_INFORMATION_SAVED, updated_at=now)
     else:
+        # A goal that already has a plan keeps its status on a turn that doesn't revise it.
         _update_goal(garden_id, goal_id, updated_at=now)
 
 

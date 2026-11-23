@@ -9,6 +9,7 @@ import { ChipComponent, ChipTone } from '../../shared/components/chip/chip.compo
 import { PlanTaskCardComponent } from '../../shared/components/plan-task-card/plan-task-card.component';
 import { TraceEntryComponent } from '../../shared/components/trace-entry/trace-entry.component';
 import { ActionProposalComponent } from '../../shared/components/action-proposal/action-proposal.component';
+import { IN_PROGRESS_STATUSES, goalStatusLabel, goalStatusTone } from '../../shared/components/goal-status.util';
 import { MarkdownPipe } from '../../shared/pipes/markdown.pipe';
 import { GoalApi, GoalDetail } from '../../core/services/goal.service';
 import { ChatMessage, GoalAction } from '../../core/models/message.model';
@@ -16,7 +17,6 @@ import { MAX_PHOTO_BYTES } from '../../shared/components/photo-picker/photo-pick
 import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
-const IN_PROGRESS_STATUSES = new Set(['Approved', 'InProgress']);
 
 // After sending a message, poll for the orchestrator's (asynchronous) reply every 2s — no
 // WebSocket channel exists yet (plan-approval.md's PA-02 Context note), so this is how the
@@ -98,9 +98,13 @@ export class GoalDetailComponent {
     });
   }
 
-  get planStatusTone(): ChipTone {
-    const plan = this.detail()?.plan;
-    return plan && IN_PROGRESS_STATUSES.has(plan.status) ? 'green' : 'amber';
+  // The header chip shows the goal's own status (ADR-0036: InformationSaved reads "Saved").
+  goalTone(status: string): ChipTone {
+    return goalStatusTone(status);
+  }
+
+  goalLabel(status: string): string {
+    return goalStatusLabel(status);
   }
 
   get planIsApproved(): boolean {

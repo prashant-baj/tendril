@@ -1360,6 +1360,11 @@ components:
             to set once it understands the goal; always a generic default at Intake time.
         status:
           type: string
+          description: >
+            Goal lifecycle (architecture.md §7.3): Intake, Decomposing, PlanProposed, Approved, or
+            InformationSaved — a turn ended without a plan on a goal that has none (a check-in or
+            a question); a later plan moves it to PlanProposed (ADR-0036). Not a closed enum:
+            clients should show unknown values as-is.
         mediaIds:
           type: array
           items:

@@ -7,13 +7,13 @@ import { GoalCardComponent } from '../../shared/components/goal-card/goal-card.c
 import { PlantCardComponent } from '../../shared/components/plant-card/plant-card.component';
 import { TaskApi } from '../../core/services/task.service';
 import { GoalApi } from '../../core/services/goal.service';
+import { IN_PROGRESS_STATUSES, goalNeedsAttention } from '../../shared/components/goal-status.util';
 import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
-// A goal further along than this is "in progress"; anything earlier (Intake/Decomposing/
-// PlanProposed — architecture.md §7.3) still needs the gardener's attention (a question to
-// answer, or a plan to approve) before Tendril can act on it.
-const IN_PROGRESS_STATUSES = new Set(['Approved', 'InProgress']);
+// A goal further along than PlanProposed is "in progress"; Intake/Decomposing/PlanProposed
+// (architecture.md §7.3) still need the gardener's attention. InformationSaved (ADR-0036) is in
+// neither group: what was shared is recorded and there is nothing to approve.
 
 @Component({
   selector: 'td-home',
@@ -57,7 +57,7 @@ export class HomeComponent {
   // Real replacement for the fully-fictitious "Waiting on you" banner removed earlier — backed
   // by actual Goal status, not a static string.
   readonly goalsNeedingAttention = computed(() =>
-    this.allGoals().filter((g) => !IN_PROGRESS_STATUSES.has(g.status)),
+    this.allGoals().filter((g) => goalNeedsAttention(g.status)),
   );
 
   readonly plants = toSignal(
