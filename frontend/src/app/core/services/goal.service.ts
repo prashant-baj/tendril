@@ -5,7 +5,7 @@ import { map } from 'rxjs/operators';
 import { CLIENT_API_BASE_URL } from '../config/client-api.config';
 import { Goal } from '../models/goal.model';
 import { Plan, Task } from '../models/plan.model';
-import { ChatMessage } from '../models/message.model';
+import { ChatMessage, GoalAction } from '../models/message.model';
 
 /** A goal's attached photo(s), with a freshly-generated presigned download URL (PA-03). */
 export interface GoalMedia {
@@ -21,6 +21,14 @@ export interface GoalDetail {
   tasks: Task[];
   media: GoalMedia[];
   messages: ChatMessage[];
+  /** Proposals on this goal, oldest first (ADR-0034). */
+  actions?: GoalAction[];
+}
+
+/** Extras a chat message can carry (ADR-0034): photos, and a task to check in on. */
+export interface MessageExtras {
+  mediaIds?: string[];
+  taskId?: string;
 }
 
 /**
@@ -33,10 +41,19 @@ export abstract class GoalApi {
   abstract getGoals(gardenId: string | null): Observable<Goal[]>;
   abstract getGoalDetail(gardenId: string | null, goalId: string): Observable<GoalDetail | undefined>;
   /** PA-02: send a chat message about a goal — asks/adjusts the proposed plan. Async (202). */
-  abstract sendMessage(gardenId: string, goalId: string, content: string): Observable<void>;
+  abstract sendMessage(
+    gardenId: string,
+    goalId: string,
+    content: string,
+    extras?: MessageExtras,
+  ): Observable<void>;
+  /** ADR-0034: apply a proposed action (the only way it changes anything). */
+  abstract confirmAction(gardenId: string, goalId: string, actionId: string): Observable<void>;
+  /** ADR-0034: dismiss a proposed action. */
+  abstract rejectAction(gardenId: string, goalId: string, actionId: string): Observable<void>;
   /** PA-02: approve a proposed plan — a synchronous, deterministic status flip. */
   abstract approve(gardenId: string, planId: string): Observable<void>;
-  /** Attaches a check-in photo to a task, flipping it to done. */
+  /** Checks in on a task with a photo. ADR-0034: proposes completion; Confirm marks it done. */
   abstract checkinTask(
     gardenId: string,
     goalId: string,
@@ -57,7 +74,20 @@ export class MockGoalApi extends GoalApi {
     return of(undefined);
   }
 
-  sendMessage(_gardenId: string, _goalId: string, _content: string): Observable<void> {
+  sendMessage(
+    _gardenId: string,
+    _goalId: string,
+    _content: string,
+    _extras?: MessageExtras,
+  ): Observable<void> {
+    return of(undefined);
+  }
+
+  confirmAction(_gardenId: string, _goalId: string, _actionId: string): Observable<void> {
+    return of(undefined);
+  }
+
+  rejectAction(_gardenId: string, _goalId: string, _actionId: string): Observable<void> {
     return of(undefined);
   }
 
@@ -90,6 +120,7 @@ interface GoalDetailDto {
   tasks: Task[];
   media: GoalMedia[];
   messages: ChatMessage[];
+  actions?: GoalAction[];
 }
 
 /**
@@ -119,9 +150,35 @@ export class HttpGoalApi extends GoalApi {
       .pipe(map((dto) => dto as GoalDetail));
   }
 
-  sendMessage(gardenId: string, goalId: string, content: string): Observable<void> {
+  sendMessage(
+    gardenId: string,
+    goalId: string,
+    content: string,
+    extras?: MessageExtras,
+  ): Observable<void> {
+    const body: Record<string, unknown> = { content };
+    if (extras?.mediaIds?.length) body['mediaIds'] = extras.mediaIds;
+    if (extras?.taskId) body['taskId'] = extras.taskId;
     return this.http
-      .post<void>(`${this.baseUrl}/gardens/${gardenId}/goals/${goalId}/messages`, { content })
+      .post<void>(`${this.baseUrl}/gardens/${gardenId}/goals/${goalId}/messages`, body)
+      .pipe(map(() => undefined));
+  }
+
+  confirmAction(gardenId: string, goalId: string, actionId: string): Observable<void> {
+    return this.http
+      .post<void>(
+        `${this.baseUrl}/gardens/${gardenId}/goals/${goalId}/actions/${actionId}/confirm`,
+        {},
+      )
+      .pipe(map(() => undefined));
+  }
+
+  rejectAction(gardenId: string, goalId: string, actionId: string): Observable<void> {
+    return this.http
+      .post<void>(
+        `${this.baseUrl}/gardens/${gardenId}/goals/${goalId}/actions/${actionId}/reject`,
+        {},
+      )
       .pipe(map(() => undefined));
   }
 

@@ -216,8 +216,10 @@ pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`
 | `/gardens/{gardenId}/plants/{plantId}` | DELETE | Remove a plant (and free its stake number) |
 | `/gardens/{gardenId}/goals` | POST, GET | Submit an issue (async — 202, orchestrator decomposes it); list goals |
 | `/gardens/{gardenId}/goals/{goalId}` | GET | Goal + plan + tasks + media + full message thread |
-| `/gardens/{gardenId}/goals/{goalId}/messages` | POST | Send a chat message on an existing goal (async) |
-| `/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins` | POST | Attach a check-in photo, mark the task done (async feedback) |
+| `/gardens/{gardenId}/goals/{goalId}/messages` | POST | Send a chat message (text and/or up to 4 photos, optionally a check-in on one task, ADR-0034) (async) |
+| `/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins` | POST | Check in with a photo — **202, proposes** completion after an identity check; done only on confirm (ADR-0034) |
+| `/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/confirm` | POST | Apply a proposed action (task done, photo/goal linked to a plant, plant created) — sync, no model call |
+| `/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject` | POST | Dismiss a proposed action |
 | `/gardens/{gardenId}/plans/{planId}/approve` | POST | Human-in-the-loop plan approval (sync, no model call) |
 | `/gardens/{gardenId}/tasks` | GET | All tasks across every goal in the garden |
 | `/gardens/{gardenId}/activity` | GET | The garden's event timeline, newest first |

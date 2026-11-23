@@ -162,18 +162,27 @@ call, roughly 5–10 s), acceptable because check-ins are asynchronous chat turn
 
 ## Action Items
 
+Built 2026-11-23. Notes from the build: identity rules live in `app/orchestrator/plant_identity.py`
+(pure, unit-tested); confident reads still become a `set_goal_plant` proposal until the CDK
+context flag `auto_link_enabled=true` sets `AUTO_LINK_ENABLED` on the orchestrator (only after the
+eval passes); the model's `proposed_action` covers text-only cases ("mulching done", "it's #12")
+and is validated by code like every other proposal; `create_plant` copies species/variety/stage
+from an existing numbered plant in the garden.
+
+
 1. [x] Human review: approved 2026-11-23; auto-link accuracy target set to below 1% wrong
    high-confidence reads (§5).
-2. [ ] Registry `internal` flag (AgentCoreStack manifest + orchestrator tool building); the
+2. [x] Registry `internal` flag (AgentCoreStack manifest + orchestrator tool building); the
    `plant_identifier` entry, prompt and guardrail.
-3. [ ] Orchestrator: identity step on goal intake, chat photos and check-ins; identity policy;
+3. [x] Orchestrator: identity step on goal intake, chat photos and check-ins; identity policy;
    `proposed_action` in the structured output; proposal validation; `Action` writes.
-4. [ ] Client API + OpenAPI: messages with `mediaIds`/`taskId`; `confirm`/`reject` endpoints;
+4. [x] Client API + OpenAPI: messages with `mediaIds`/`taskId`; `confirm`/`reject` endpoints;
    `postTaskCheckin` → `202` proposal; `getGoalDetail` returns open actions.
-5. [ ] Frontend: chat attachments + task picker; Confirm/Change on proposals; "move photo" action.
-6. [ ] Eval scenarios from the archive (folder names as ground truth); tracing of identity
-   decisions.
-7. [ ] Docs: `data-architecture.md` (Message, Media, Action), `architecture.md` §4.1/§7, stories
+5. [x] Frontend: chat attachments + task picker; Confirm/Change on proposals; "move photo" action.
+6. [x] Eval script from the archive (`scripts/eval_plant_identifier.py`, folder names as ground
+   truth; reports wrong-high-confidence rate vs the 1% gate); identity decisions logged
+   (`stake_read`, `identity_decision`). [ ] Run it against the deployed runtime.
+7. [x] Docs: `data-architecture.md` (Message, Media, Action), `architecture.md` §4.1/§7, stories
    (CP-08 rewritten), backlog.
-8. [ ] Dev verification: the #10 photo without a plant gets "Filed under #10" (or a confirm
+8. [ ] Dev verification (pending deploy): the #10 photo without a plant gets "Filed under #10" (or a confirm
    prompt); the #10 photo on #1's task triggers the mismatch question; confirming completes the task.

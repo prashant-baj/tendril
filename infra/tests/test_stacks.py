@@ -5,6 +5,9 @@ we depend on: guardrail policies, the file-sourced prompt, and the agent runtime
 vars + IAM. Runs offline; skips if aws-cdk-lib isn't installed.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 aws_cdk = pytest.importorskip("aws_cdk")
@@ -52,8 +55,11 @@ def test_guardrail_resource_and_policies():
     tpl = Template.from_stack(GuardrailsStack(app, "gr", env_name="dev", env=ENV))
     # One per guardrails/*.json: vision (WS-04) + agronomy/irrigation/pest-disease/pruning
     # (configured 2026-09-13, ahead of PA-01's structured plan proposal).
-    tpl.resource_count_is("AWS::Bedrock::Guardrail", 5)
-    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", 5)
+    # + plant_identifier (ADR-0034). Counted from the folder so a new specialist needs no edit.
+    n_policies = len(list((Path(__file__).resolve().parents[2] / "guardrails").glob("*.json")))
+    assert n_policies == 6
+    tpl.resource_count_is("AWS::Bedrock::Guardrail", n_policies)
+    tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", n_policies)
     tpl.has_resource_properties(
         "AWS::Bedrock::Guardrail",
         {
@@ -87,7 +93,15 @@ def test_prompt_uses_file_text():
     tpl = Template.from_stack(PromptsStack(app, "pr", env_name="dev", env=ENV))
     # One per PROMPT_CATALOG entry: vision (WS-04) + agronomy/irrigation/pest-disease/pruning
     # (configured 2026-09-13, ahead of PA-01's structured plan proposal).
-    tpl.resource_count_is("AWS::Bedrock::Prompt", 5)
+    # + plant-identifier-system (ADR-0034). Every catalog entry must have its prompt file, and
+    # every registry entry's prompt_name must be in the catalog (or the runtime starts unprompted).
+    from stacks.prompts_stack import PROMPT_CATALOG
+
+    tpl.resource_count_is("AWS::Bedrock::Prompt", len(PROMPT_CATALOG))
+    registry = Path(__file__).resolve().parents[2] / "agents" / "registry"
+    for entry_path in registry.glob("*.json"):
+        prompt_name = json.loads(entry_path.read_text(encoding="utf-8"))["prompt_name"]
+        assert prompt_name in PROMPT_CATALOG, f"{entry_path.name}: {prompt_name} not deployed"
     tpl.has_resource_properties(
         "AWS::Bedrock::Prompt",
         Match.object_like(
@@ -1202,3 +1216,25 @@ def test_ingestion_failures_go_to_a_queue_after_two_retries():
             }
         ),
     )
+
+
+# --- ADR-0034: internal plant_identifier --------------------------------------------------------
+
+
+def test_plant_identifier_is_deployed_but_marked_internal_in_the_manifest():
+    tpl = Template.from_stack(AgentCoreStack(_app(), "ac-pid", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::BedrockAgentCore::Runtime",
+        Match.object_like({"AgentRuntimeName": "tendril_dev_plant_identifier"}),
+    )
+    orchestrator = next(
+        r
+        for r in tpl.find_resources("AWS::Lambda::Function").values()
+        if r["Properties"].get("FunctionName") == "tendril-dev-orchestrator"
+    )
+    manifest_json = json.dumps(
+        orchestrator["Properties"]["Environment"]["Variables"]["AGENT_MANIFEST"]
+    )
+    # The manifest is a CDK token join; the flags appear as literal JSON fragments.
+    assert '\\"internal\\":true' in manifest_json.replace(" ", "")
+    assert '\\"internal\\":false' in manifest_json.replace(" ", "")

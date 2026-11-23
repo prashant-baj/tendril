@@ -2,7 +2,7 @@ import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testin
 import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/router';
 import { Observable, of } from 'rxjs';
 import { GoalDetailComponent } from './goal-detail.component';
-import { GoalApi, GoalDetail } from '../../core/services/goal.service';
+import { GoalApi, GoalDetail, MessageExtras } from '../../core/services/goal.service';
 import { GardenApi } from '../../core/services/garden.service';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
@@ -46,8 +46,29 @@ class FakeGoalApi {
     return of(DETAIL);
   }
 
-  sendMessage(gardenId: string, goalId: string, content: string): Observable<void> {
+  lastExtras: MessageExtras | undefined;
+
+  sendMessage(
+    gardenId: string,
+    goalId: string,
+    content: string,
+    extras?: MessageExtras,
+  ): Observable<void> {
     this.lastSendMessage = { gardenId, goalId, content };
+    this.lastExtras = extras;
+    return of(undefined);
+  }
+
+  lastConfirm: string | undefined;
+  lastReject: string | undefined;
+
+  confirmAction(_g: string, _goal: string, actionId: string): Observable<void> {
+    this.lastConfirm = actionId;
+    return of(undefined);
+  }
+
+  rejectAction(_g: string, _goal: string, actionId: string): Observable<void> {
+    this.lastReject = actionId;
     return of(undefined);
   }
 
@@ -105,7 +126,7 @@ describe('GoalDetailComponent', () => {
   });
 
   it('sending a reply calls GoalApi.sendMessage with the garden/goal id and content', () => {
-    fixture.componentInstance.replyForm.setValue({ content: 'Can we water less?' });
+    fixture.componentInstance.replyForm.patchValue({ content: 'Can we water less?' });
     fixture.componentInstance.sendMessage();
 
     expect(fakeGoalApi.lastSendMessage).toEqual({
@@ -116,7 +137,7 @@ describe('GoalDetailComponent', () => {
   });
 
   it('does not send an empty reply', () => {
-    fixture.componentInstance.replyForm.setValue({ content: '' });
+    fixture.componentInstance.replyForm.patchValue({ content: '' });
     fixture.componentInstance.sendMessage();
 
     expect(fakeGoalApi.lastSendMessage).toBeUndefined();
@@ -128,7 +149,7 @@ describe('GoalDetailComponent', () => {
     expect(fakeGoalApi.lastApprove).toEqual({ gardenId: 'g-1', planId: 'goal-1' });
   });
 
-  it('checking in a task uploads the photo, then calls GoalApi.checkinTask, then polls for feedback', () => {
+  it('checking in a task uploads the photo, then calls GoalApi.checkinTask, then waits for the reply', () => {
     const file = new File(['x'], 'proof.jpg', { type: 'image/jpeg' });
     fixture.componentInstance.onTaskCheckin('t1', file);
 
@@ -140,6 +161,54 @@ describe('GoalDetailComponent', () => {
     });
     expect(fixture.componentInstance.checkingInTaskId()).toBeNull();
     expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBe('t1');
+  });
+
+  it('sends a photo and a task with a chat message (ADR-0034)', () => {
+    const c = fixture.componentInstance;
+    const input = document.createElement('input');
+    input.type = 'file';
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'p.jpg', { type: 'image/jpeg' })] });
+    c.onChatPhoto({ target: input } as unknown as Event);
+    c.replyForm.patchValue({ content: '', taskId: 't1' });
+    expect(c.canSend).toBeTrue();
+
+    c.sendMessage();
+
+    expect(fakeGoalApi.lastSendMessage?.content).toBe('');
+    expect(fakeGoalApi.lastExtras).toEqual({ mediaIds: ['media-2'], taskId: 't1' });
+    expect(c.chatPhoto()).toBeNull();
+  });
+
+  it('refuses a chat photo over 10 MB before uploading', () => {
+    const c = fixture.componentInstance;
+    const big = new File(['x'], 'big.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(big, 'size', { value: 11 * 1024 * 1024 });
+    const input = document.createElement('input');
+    input.type = 'file';
+    Object.defineProperty(input, 'files', { value: [big] });
+    c.onChatPhoto({ target: input } as unknown as Event);
+    expect(c.chatPhoto()).toBeNull();
+    expect(c.chatError()).toContain('up to 10 MB');
+  });
+
+  it('lists only pending tasks in the check-in picker', () => {
+    expect(fixture.componentInstance.pendingTasks().map((t) => t.taskId)).toEqual(['t1']);
+  });
+
+  it('Confirm and Not now call the action endpoints, never a typed message', () => {
+    const c = fixture.componentInstance;
+    const action = {
+      actionId: 'a1',
+      type: 'set_plant' as const,
+      summary: 'Is it #10?',
+      status: 'proposed' as const,
+      createdAt: 'x',
+    };
+    c.confirmAction(action);
+    expect(fakeGoalApi.lastConfirm).toBe('a1');
+    c.rejectAction({ ...action, actionId: 'a2' });
+    expect(fakeGoalApi.lastReject).toBe('a2');
+    expect(fakeGoalApi.lastSendMessage).toBeUndefined();
   });
 
   it('does not render "How this was decided" when the plan has no trace', () => {
@@ -198,7 +267,7 @@ describe('GoalDetailComponent (polling for the orchestrator\'s reply)', () => {
     const fixture = TestBed.createComponent(GoalDetailComponent);
     fixture.detectChanges();
 
-    fixture.componentInstance.replyForm.setValue({ content: 'more info' });
+    fixture.componentInstance.replyForm.patchValue({ content: 'more info' });
     fixture.componentInstance.sendMessage();
 
     expect(fixture.componentInstance.waitingForReply()).toBe(true);
@@ -214,19 +283,34 @@ describe('GoalDetailComponent (polling for the orchestrator\'s reply)', () => {
   }));
 });
 
-describe('GoalDetailComponent (polling for check-in feedback)', () => {
+describe('GoalDetailComponent (check-in is a chat turn, ADR-0034)', () => {
   class CheckinPollingFakeGoalApi {
     callCount = 0;
 
     getGoalDetail(): Observable<GoalDetail> {
       this.callCount += 1;
-      // Call 1 is the initial constructor fetch, call 2 is the poll's immediate first check
-      // (still no feedback) — call 3+ (after one interval tick) simulates the orchestrator
-      // having written feedback by then. Mirrors PollingFakeGoalApi's callCount convention above.
-      const feedback = this.callCount >= 3 ? 'Looking good, keep it up!' : undefined;
+      // Call 1 = initial fetch, call 2 = the poll's immediate check (nothing yet); call 3+ (one
+      // tick later) has the check-in message and Tendril's reply carrying a proposal.
+      if (this.callCount < 3) {
+        return of(DETAIL);
+      }
       return of({
         ...DETAIL,
-        tasks: [{ ...DETAIL.tasks[0], status: 'done', feedback }],
+        messages: [
+          ...DETAIL.messages,
+          { role: 'user' as const, content: 'Check-in: Water deeply', createdAt: 'x1', taskId: 't1' },
+          { role: 'assistant' as const, content: 'Soil looks moist now.', createdAt: 'x2', actionId: 'a1' },
+        ],
+        actions: [
+          {
+            actionId: 'a1',
+            type: 'complete_task' as const,
+            summary: "Mark 'Water deeply' done?",
+            status: 'proposed' as const,
+            createdAt: 'x2',
+            taskId: 't1',
+          },
+        ],
       });
     }
 
@@ -247,7 +331,7 @@ describe('GoalDetailComponent (polling for check-in feedback)', () => {
     }
   }
 
-  it('shows the waiting indicator, then the feedback once it arrives — no manual refresh needed', fakeAsync(() => {
+  it('waits for the reply with a Confirm button; the task stays pending until confirmed', fakeAsync(() => {
     TestBed.configureTestingModule({
       imports: [GoalDetailComponent],
       providers: [
@@ -264,18 +348,18 @@ describe('GoalDetailComponent (polling for check-in feedback)', () => {
     const fixture = TestBed.createComponent(GoalDetailComponent);
     fixture.detectChanges();
 
-    const file = new File(['x'], 'proof.jpg', { type: 'image/jpeg' });
-    fixture.componentInstance.onTaskCheckin('t1', file);
-
+    fixture.componentInstance.onTaskCheckin('t1', new File(['x'], 'proof.jpg', { type: 'image/jpeg' }));
     expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBe('t1');
-    expect(fixture.componentInstance.detail()?.tasks[0].feedback).toBeUndefined();
 
     tick(2000);
+    fixture.detectChanges();
 
     expect(fixture.componentInstance.awaitingFeedbackForTaskId()).toBeNull();
-    expect(fixture.componentInstance.detail()?.tasks[0].feedback).toBe(
-      'Looking good, keep it up!',
-    );
+    expect(fixture.componentInstance.detail()?.tasks[0].status).toBe('pending');
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain("Mark 'Water deeply' done?");
+    expect(text).toContain('Confirm');
+    expect(text).toContain('Check-in: Water deeply');
   }));
 });
 

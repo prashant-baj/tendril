@@ -337,7 +337,13 @@ pick a plant by hand.
 
 **Tasks** — ADR (plant-identity / auto-map policy + confidence threshold); map-on-upload flow;
 confirm + correction UI; eval scenarios for the vision read; dev smoke test.
-**Dependencies:** CP-12, CP-03. **Blocking ADR:** ADR-0034 (Accepted). **Status:** ☐ to do.
+**Dependencies:** CP-12, CP-03. **Blocking ADR:** ADR-0034 (Accepted). **Status:** ◐ built + tested
+2026-11-23: internal `plant_identifier` specialist (registry `internal` flag, prompt, guardrail);
+identity rules (`plant_identity.py`); proposals (`ACTION#` items) + `confirmAction`/`rejectAction`;
+chat messages with photos and a task; per-task check-in returns 202 and proposes; goal chat shows
+photos, a task picker and Confirm / Not now; `scripts/eval_plant_identifier.py`. Auto-link stays
+off (`auto_link_enabled`) until the eval shows < 1% wrong confident reads. **Open:** deploy; run the
+eval on the archive; dev check: #10 photo on #1's task asks instead of completing.
 
 ---
 

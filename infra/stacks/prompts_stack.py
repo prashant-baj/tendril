@@ -40,6 +40,10 @@ PROMPT_CATALOG = {
         "cid": "PestDisease",
         "description": "System prompt for the pest & disease specialist: diagnosis and treatment advice.",
     },
+    "plant-identifier-system": {
+        "cid": "PlantIdentifier",
+        "description": "System prompt for the internal plant identifier (ADR-0034): reads a plant's stake number from a photo, JSON only.",
+    },
     "pruning-system": {
         "cid": "Pruning",
         "description": "System prompt for the pruning specialist: timing and technique advice.",

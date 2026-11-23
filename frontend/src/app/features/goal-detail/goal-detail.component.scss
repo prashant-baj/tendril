@@ -185,8 +185,9 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px 0; color: var(--td-colo
   display: flex;
   gap: 8px;
 
-  input {
+  input[type='text'] {
     flex: 1;
+    min-width: 0;
     height: 44px;
     padding: 0 12px;
     border-radius: var(--td-radius-md);
@@ -194,6 +195,21 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px 0; color: var(--td-colo
     font-size: 14px;
   }
 }
+
+// ADR-0034 composer: photo attach, task picker, attached-file chip.
+.reply-box { display: flex; flex-direction: column; gap: 8px; }
+.attach {
+  display: flex; align-items: center; justify-content: center; width: 44px; height: 44px;
+  border: 1px solid var(--td-color-line); border-radius: var(--td-radius-md); cursor: pointer;
+  input { display: none; }
+}
+.task-pick, .attached, .checkin-tag {
+  display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--td-color-ink-secondary);
+}
+.task-pick select { flex: 1; min-width: 0; height: 36px; border-radius: var(--td-radius-md); }
+.icon-btn { border: none; background: none; cursor: pointer; display: flex; }
+.message-photo { display: block; max-width: 220px; border-radius: var(--td-radius-md); margin: 4px 0; }
+.chat-error { margin: 0; font-size: 13px; color: var(--td-color-red-ink); }
 
 .btn-primary {
   display: flex;

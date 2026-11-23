@@ -1182,6 +1182,60 @@ def _write_event(garden_id: str, event_type: str, payload: dict[str, Any]) -> No
     )
 
 
+def _message_from_item(table, garden_id: str, m: dict[str, Any]) -> dict[str, Any]:
+    """API shape of a chat Message, with its photos (thumbnails), check-in task and the proposed
+    action it asks the gardener to confirm, when present (ADR-0034)."""
+    out: dict[str, Any] = {"role": m["role"], "content": m["content"], "createdAt": m["created_at"]}
+    if m.get("message_id"):
+        out["messageId"] = m["message_id"]
+    if m.get("task_id"):
+        out["taskId"] = m["task_id"]
+    if m.get("action_id"):
+        out["actionId"] = m["action_id"]
+    photos = []
+    for media_id in m.get("media_ids") or []:
+        media_item = table.get_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}
+        ).get("Item")
+        if media_item:
+            photos.append(
+                {
+                    "mediaId": media_id,
+                    "downloadUrl": _generate_download_url(_display_key(media_item, "thumb")),
+                }
+            )
+    if photos:
+        out["media"] = photos
+    return out
+
+
+def _load_actions(table, garden_id: str, goal_id: str) -> list[dict[str, Any]]:
+    """Every proposal on this goal (ADR-0034), oldest first. The frontend shows Confirm/Change on
+    the `proposed` ones; the rest are history."""
+    resp = table.query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"ACTION#{goal_id}#")
+    )
+    actions = []
+    for a in sorted(resp.get("Items", []), key=lambda i: i.get("created_at", "")):
+        if not str(a.get("sk", "")).startswith(f"ACTION#{goal_id}#"):
+            continue  # defensive: only real Action items
+        params = a.get("params") or {}
+        item: dict[str, Any] = {
+            "actionId": a["action_id"],
+            "type": a["type"],
+            "summary": a.get("summary", ""),
+            "status": a["status"],
+            "createdAt": a.get("created_at", ""),
+        }
+        if params.get("task_id"):
+            item["taskId"] = params["task_id"]
+        if params.get("candidates"):
+            item["candidates"] = [int(c["stake_no"]) for c in params["candidates"]]
+        actions.append(item)
+    return actions
+
+
 def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
     path_params = event.get("pathParameters") or {}
     garden_id = path_params.get("gardenId")
@@ -1221,9 +1275,14 @@ def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
     # sk (GOALMSG#{goalId}#{iso_timestamp}#{messageId}) sorts chronologically already —
     # explicit sort here just guards against a fake/non-ordering table in tests.
     messages = [
-        {"role": m["role"], "content": m["content"], "createdAt": m["created_at"]}
+        _message_from_item(table, garden_id, m)
         for m in sorted(messages_resp.get("Items", []), key=lambda m: m["sk"])
     ]
+    try:
+        actions = _load_actions(table, garden_id, goal_id)
+    except Exception:
+        logger.exception("Failed to read actions for goal %s", goal_id)
+        actions = []  # proposals are an add-on; never fail the whole goal view over them
 
     media = []
     for media_id in goal_item.get("media_ids") or []:
@@ -1243,6 +1302,7 @@ def get_goal_detail(event: dict[str, Any]) -> dict[str, Any]:
         "tasks": tasks,
         "media": media,
         "messages": messages,
+        "actions": actions,
     }
     if plan_item:
         detail["plan"] = {
@@ -1281,39 +1341,99 @@ def post_goal_message(event: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return _error(400, "body must be a JSON object")
 
-    content = payload.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return _error(400, "content is required")
+    # ADR-0034 §3: a message may carry photos and/or a task (a check-in). Text is optional then.
+    content = payload.get("content", "")
+    media_ids = payload.get("mediaIds") or []
+    task_id = payload.get("taskId")
+    if not isinstance(content, str):
+        return _error(400, "content must be a string")
+    if not isinstance(media_ids, list) or not all(
+        isinstance(m, str) and m.strip() for m in media_ids
+    ):
+        return _error(400, "mediaIds must be an array of ids")
+    if len(media_ids) > MAX_MESSAGE_MEDIA:
+        return _error(400, f"at most {MAX_MESSAGE_MEDIA} photos per message")
+    if task_id is not None and (not isinstance(task_id, str) or not task_id.strip()):
+        return _error(400, "taskId must be a string if provided")
+    if not content.strip() and not media_ids and not task_id:
+        return _error(400, "content is required (or attach a photo or pick a task)")
 
-    message_id = str(uuid.uuid4())
-    created_at = datetime.now(UTC).isoformat()
+    table = _get_table()
+    try:
+        for media_id in media_ids:
+            if not table.get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}).get(
+                "Item"
+            ):
+                return _error(404, "media not found")
+        if task_id:
+            task = table.get_item(
+                Key={"pk": f"GARDEN#{garden_id}", "sk": f"TASK#{goal_id}#{task_id}"}
+            ).get("Item")
+            if not task:
+                return _error(404, "task not found")
+            if task.get("status") != "pending":
+                return _error(409, "that task is already done")
+    except Exception:
+        logger.exception("Failed to validate message for goal %s", goal_id)
+        return _error(500, "could not send message")
 
     try:
-        _get_table().put_item(
-            Item={
-                "pk": f"GARDEN#{garden_id}",
-                "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
-                "message_id": message_id,
-                "goal_id": goal_id,
-                "role": "user",
-                "content": content,
-                "created_at": created_at,
-            }
-        )
-        _get_events().put_events(
-            Entries=[
-                {
-                    "Source": GOAL_EVENT_SOURCE,
-                    "DetailType": GOAL_MESSAGE_RECEIVED_DETAIL_TYPE,
-                    "Detail": json.dumps({"gardenId": garden_id, "goalId": goal_id}),
-                }
-            ]
-        )
+        message_id = _create_user_message(garden_id, goal_id, content, media_ids, task_id)
     except Exception:
         logger.exception("Failed to send message for goal %s", goal_id)
         return _error(500, "could not send message")
 
-    return {"statusCode": 202, "headers": {"Access-Control-Allow-Origin": "*"}, "body": ""}
+    return _response(202, {"messageId": message_id})
+
+
+MAX_MESSAGE_MEDIA = 4
+
+
+def _create_user_message(
+    garden_id: str,
+    goal_id: str,
+    content: str,
+    media_ids: list[str],
+    task_id: str | None,
+) -> str:
+    """Writes a user chat Message (optionally with photos and a check-in task, ADR-0034) and
+    publishes `goal.message.received`; the orchestrator reloads it from the table."""
+    message_id = str(uuid.uuid4())
+    created_at = datetime.now(UTC).isoformat()
+    item: dict[str, Any] = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
+        "message_id": message_id,
+        "goal_id": goal_id,
+        "role": "user",
+        "content": content,
+        "created_at": created_at,
+    }
+    if media_ids:
+        item["media_ids"] = media_ids
+    if task_id:
+        item["task_id"] = task_id
+    _get_table().put_item(Item=item)
+    for media_id in media_ids:
+        try:  # traceability: which goal/message a chat photo belongs to (best-effort)
+            _get_table().update_item(
+                Key={"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"},
+                UpdateExpression="SET goal_id = :g, message_id = :m",
+                ExpressionAttributeValues={":g": goal_id, ":m": message_id},
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except Exception:
+            logger.exception("Failed to link media %s to message %s", media_id, message_id)
+    _get_events().put_events(
+        Entries=[
+            {
+                "Source": GOAL_EVENT_SOURCE,
+                "DetailType": GOAL_MESSAGE_RECEIVED_DETAIL_TYPE,
+                "Detail": json.dumps({"gardenId": garden_id, "goalId": goal_id}),
+            }
+        ]
+    )
+    return message_id
 
 
 def approve_plan(event: dict[str, Any]) -> dict[str, Any]:
@@ -1392,11 +1512,10 @@ def approve_plan(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
-    """Attaches a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
-    chain and marks the task done in the same write. One check-in per task, not a repeatable
-    progress log — that's the Phase 7+ tracker/outcome loop, not this. Also clears the task's
-    TasksDueIndex attributes (Phase 7.5+) — a done task must never still appear in "which tasks
-    are overdue" once it's been checked in."""
+    """The per-task check-in button (ADR-0034 §3). No longer marks the task done on its own: it
+    posts a check-in chat message (photo + task) so the orchestrator can check the photo's plant
+    identity and *propose* completing the task; only `confirmAction` then marks it done. Returns
+    202 with `pending_confirmation`."""
     path_params = event.get("pathParameters") or {}
     garden_id = path_params.get("gardenId")
     goal_id = path_params.get("goalId")
@@ -1414,6 +1533,9 @@ def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
     media_id = payload.get("mediaId")
     if not isinstance(media_id, str) or not media_id.strip():
         return _error(400, "mediaId is required")
+    note = payload.get("note", "")
+    if not isinstance(note, str):
+        return _error(400, "note must be a string if provided")
 
     table = _get_table()
     task_sk = f"TASK#{goal_id}#{task_id}"
@@ -1431,82 +1553,309 @@ def post_task_checkin(event: dict[str, Any]) -> dict[str, Any]:
         return _error(404, "task not found")
     if not media_item:
         return _error(404, "media not found")
-
-    media_update_expr = "SET task_id = :tid, goal_id = :gid"
-    media_values: dict[str, Any] = {":tid": {"S": task_id}, ":gid": {"S": goal_id}}
-    if task_item.get("plant_id"):
-        media_update_expr += ", plant_id = :pid"
-        media_values[":pid"] = {"S": task_item["plant_id"]}
+    if task_item.get("status") != "pending":
+        return _error(409, "that task is already done")
 
     try:
-        _get_client().transact_write_items(
-            TransactItems=[
-                {
-                    "Update": {
-                        "TableName": APP_TABLE_NAME,
-                        "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": task_sk}),
-                        # REMOVE is a safe no-op for tasks that never had these attributes (e.g.
-                        # a plan never approved through approve_plan) — no ConditionExpression
-                        # change needed. Keeps TasksDueIndex sparse (Phase 7.5+): a checked-in
-                        # task drops out of "awaiting follow-up" immediately.
-                        "UpdateExpression": (
-                            "SET #status = :status, media_id = :mid REMOVE gsi1pk, gsi1sk, due_date"
-                        ),
-                        "ExpressionAttributeNames": {"#status": "status"},
-                        "ExpressionAttributeValues": {
-                            ":status": {"S": "done"},
-                            ":mid": {"S": media_id},
-                        },
-                        "ConditionExpression": "attribute_exists(pk)",
-                    }
-                },
-                {
-                    "Update": {
-                        "TableName": APP_TABLE_NAME,
-                        "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}),
-                        "UpdateExpression": media_update_expr,
-                        "ExpressionAttributeValues": media_values,
-                        "ConditionExpression": "attribute_exists(pk)",
-                    }
-                },
-            ]
+        message_id = _create_user_message(
+            garden_id,
+            goal_id,
+            note.strip() or f"Check-in: {task_item.get('title', '')}",
+            [media_id],
+            task_id,
         )
     except Exception:
         logger.exception("Failed to check in task %s for garden %s", task_id, garden_id)
         return _error(500, "could not check in task")
 
-    # Best-effort, deliberately NOT folded into the transaction's try/except above (PA-05): the
-    # check-in's core contract (done + photo linked) already committed successfully at this
-    # point and is useful on its own — losing just the bonus agent-feedback event shouldn't turn
-    # an already-successful check-in into a 500, unlike goal.submitted where a lost event leaves
-    # the goal permanently stuck with no other path forward.
-    try:
-        _get_events().put_events(
-            Entries=[
-                {
-                    "Source": GOAL_EVENT_SOURCE,
-                    "DetailType": TASK_CHECKIN_RECEIVED_DETAIL_TYPE,
-                    "Detail": json.dumps(
-                        {"gardenId": garden_id, "goalId": goal_id, "taskId": task_id}
-                    ),
-                }
-            ]
-        )
-    except Exception:
-        logger.exception(
-            "Failed to publish task.checkin.received for task %s garden %s", task_id, garden_id
-        )
+    return _response(
+        202, {"taskId": task_id, "status": "pending_confirmation", "messageId": message_id}
+    )
 
+
+class ActionNotApplicable(Exception):
+    """The proposed change can no longer be applied (task already done, plant gone, ...)."""
+
+
+def _action_params(garden_id: str, goal_id: str, action_id: str) -> tuple[dict, dict] | None:
+    item = (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"ACTION#{goal_id}#{action_id}"})
+        .get("Item")
+    )
+    return (item, item.get("params") or {}) if item else None
+
+
+def _confirm_action_item(garden_id: str, goal_id: str, action_id: str) -> dict[str, Any]:
+    """The action's own status flip, conditional on it still being `proposed` — included in every
+    confirm transaction so a change is applied at most once."""
+    return {
+        "Update": {
+            "TableName": APP_TABLE_NAME,
+            "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"ACTION#{goal_id}#{action_id}"}),
+            "UpdateExpression": "SET #s = :confirmed, resolved_at = :now",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": _to_dynamo(
+                {
+                    ":confirmed": "confirmed",
+                    ":proposed": "proposed",
+                    ":now": datetime.now(UTC).isoformat(),
+                }
+            ),
+            "ConditionExpression": "#s = :proposed",
+        }
+    }
+
+
+def _media_link_item(garden_id: str, media_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    names = {f"#{k}": k for k in fields}
+    return {
+        "Update": {
+            "TableName": APP_TABLE_NAME,
+            "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{media_id}"}),
+            "UpdateExpression": "SET " + ", ".join(f"#{k} = :{k}" for k in fields),
+            "ExpressionAttributeNames": names,
+            "ExpressionAttributeValues": _to_dynamo({f":{k}": v for k, v in fields.items()}),
+            "ConditionExpression": "attribute_exists(pk)",
+        }
+    }
+
+
+def _plant_exists_check(garden_id: str, plant_id: str) -> dict[str, Any]:
+    return {
+        "ConditionCheck": {
+            "TableName": APP_TABLE_NAME,
+            "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"}),
+            "ConditionExpression": "attribute_exists(pk)",
+        }
+    }
+
+
+def _transact(items: list[dict[str, Any]]) -> None:
+    try:
+        _get_client().transact_write_items(TransactItems=items)
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "TransactionCanceledException":
+            raise ActionNotApplicable() from e
+        raise
+
+
+def _apply_complete_task(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
+    task_id, media_id = params["task_id"], params.get("media_id")
+    task_sk = f"TASK#{goal_id}#{task_id}"
+    task = _get_table().get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": task_sk}).get("Item")
+    if not task:
+        raise ActionNotApplicable()
+    sets = ["#status = :done"]
+    values: dict[str, Any] = {":done": "done", ":pending": "pending"}
+    if media_id:
+        sets.append("media_id = :mid")
+        values[":mid"] = media_id
+    if params.get("feedback"):
+        sets.append("feedback = :fb")
+        values[":fb"] = params["feedback"]
+    items = [
+        _confirm_action_item(garden_id, goal_id, action_id),
+        {
+            "Update": {
+                "TableName": APP_TABLE_NAME,
+                "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": task_sk}),
+                # Same write the old instant check-in made, now only after a confirmed proposal:
+                # done + photo + feedback, and out of TasksDueIndex (Phase 7.5+).
+                "UpdateExpression": "SET " + ", ".join(sets) + " REMOVE gsi1pk, gsi1sk, due_date",
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": _to_dynamo(values),
+                "ConditionExpression": "#status = :pending",
+            }
+        },
+    ]
+    if media_id:
+        fields: dict[str, Any] = {"task_id": task_id, "goal_id": goal_id}
+        if task.get("plant_id"):
+            fields |= {"plant_id": task["plant_id"], "plant_link_source": "confirmed"}
+        items.append(_media_link_item(garden_id, media_id, fields))
+    _transact(items)
     try:
         _write_event(
             garden_id,
             "task.checkin",
-            {"goalId": goal_id, "taskId": task_id, "taskTitle": task_item.get("title", "")},
+            {"goalId": goal_id, "taskId": task_id, "taskTitle": task.get("title", "")},
         )
     except Exception:
         logger.exception("Failed to write task.checkin event for task %s", task_id)
 
-    return _response(200, {"taskId": task_id, "status": "done"})
+
+def _apply_set_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
+    _transact(
+        [
+            _confirm_action_item(garden_id, goal_id, action_id),
+            _plant_exists_check(garden_id, params["plant_id"]),
+            _media_link_item(
+                garden_id,
+                params["media_id"],
+                {"plant_id": params["plant_id"], "plant_link_source": "confirmed"},
+            ),
+        ]
+    )
+
+
+def _apply_set_goal_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
+    plant_id = params["plant_id"]
+    items = [
+        _confirm_action_item(garden_id, goal_id, action_id),
+        _plant_exists_check(garden_id, plant_id),
+        {
+            "Update": {
+                "TableName": APP_TABLE_NAME,
+                "Key": _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{goal_id}"}),
+                "UpdateExpression": "SET plant_id = :p",
+                "ExpressionAttributeValues": _to_dynamo({":p": plant_id}),
+                "ConditionExpression": "attribute_exists(pk)",
+            }
+        },
+    ]
+    if params.get("media_id"):
+        items.append(
+            _media_link_item(
+                garden_id,
+                params["media_id"],
+                {"plant_id": plant_id, "plant_link_source": "confirmed"},
+            )
+        )
+    _transact(items)
+    # Tasks proposed before the plant was known inherit it now (best-effort, like Goal → Task).
+    try:
+        for task in _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(f"TASK#{goal_id}#")
+        ):
+            if not task.get("plant_id"):
+                _get_table().update_item(
+                    Key={"pk": task["pk"], "sk": task["sk"]},
+                    UpdateExpression="SET plant_id = :p",
+                    ExpressionAttributeValues={":p": plant_id},
+                )
+    except Exception:
+        logger.exception("Failed to propagate plant %s to goal %s tasks", plant_id, goal_id)
+
+
+def _apply_create_plant(garden_id: str, goal_id: str, action_id: str, params: dict) -> None:
+    stake_no = params["stake_no"]
+    # A plantation's plants share species/variety: copy them from an existing numbered plant.
+    template = next(
+        (
+            p
+            for p in _query_all(
+                KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+                & Key("sk").begins_with("PLANT#")
+            )
+            if p.get("stake_no") is not None
+        ),
+        {},
+    )
+    try:
+        plant_id = _write_plant(
+            garden_id,
+            species=template.get("species", "Unknown"),
+            variety=template.get("variety"),
+            stage=template.get("stage", "new"),
+            stake_no=stake_no,
+            media_id=None,
+        )
+    except DuplicateStakeError as e:
+        raise ActionNotApplicable() from e
+    items = [_confirm_action_item(garden_id, goal_id, action_id)]
+    if params.get("media_id"):
+        items.append(
+            _media_link_item(
+                garden_id,
+                params["media_id"],
+                {"plant_id": plant_id, "plant_link_source": "confirmed"},
+            )
+        )
+    _transact(items)
+
+
+ACTION_APPLIERS = {
+    "complete_task": _apply_complete_task,
+    "set_plant": _apply_set_plant,
+    "set_goal_plant": _apply_set_goal_plant,
+    "create_plant": _apply_create_plant,
+}
+
+
+def _action_path(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    p = event.get("pathParameters") or {}
+    ids = (p.get("gardenId"), p.get("goalId"), p.get("actionId"))
+    return ids if all(ids) else None
+
+
+def confirm_action(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST …/goals/{goalId}/actions/{actionId}/confirm` (ADR-0034 §3): the only way a proposed
+    identity or task change is applied. Synchronous, no model call (the PA-02 approve pattern),
+    acts only on `proposed` actions, idempotent for an already-confirmed one."""
+    ids = _action_path(event)
+    if not ids:
+        return _error(400, "gardenId, goalId and actionId are required")
+    garden_id, goal_id, action_id = ids
+    try:
+        found = _action_params(garden_id, goal_id, action_id)
+    except Exception:
+        logger.exception("Failed to read action %s", action_id)
+        return _error(500, "could not confirm")
+    if not found:
+        return _error(404, "action not found")
+    action, params = found
+    if action.get("status") == "confirmed":
+        return _response(
+            200, {"actionId": action_id, "status": "confirmed", "type": action["type"]}
+        )
+    if action.get("status") != "proposed":
+        return _error(409, f"this suggestion is {action.get('status')}")
+    applier = ACTION_APPLIERS.get(action.get("type"))
+    if applier is None:
+        return _error(409, "unknown action type")
+    try:
+        applier(garden_id, goal_id, action_id, params)
+    except ActionNotApplicable:
+        return _error(409, "this suggestion no longer applies (it may already be done)")
+    except Exception:
+        logger.exception("Failed to confirm action %s", action_id)
+        return _error(500, "could not confirm")
+    return _response(200, {"actionId": action_id, "status": "confirmed", "type": action["type"]})
+
+
+def reject_action(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST …/actions/{actionId}/reject`: dismisses a proposal; changes nothing else."""
+    ids = _action_path(event)
+    if not ids:
+        return _error(400, "gardenId, goalId and actionId are required")
+    garden_id, goal_id, action_id = ids
+    try:
+        _get_table().update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"ACTION#{goal_id}#{action_id}"},
+            UpdateExpression="SET #s = :rejected, resolved_at = :now",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":rejected": "rejected",
+                ":proposed": "proposed",
+                ":now": datetime.now(UTC).isoformat(),
+            },
+            ConditionExpression="#s = :proposed",
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            found = _action_params(garden_id, goal_id, action_id)
+            if not found:
+                return _error(404, "action not found")
+            if found[0].get("status") == "rejected":
+                return _response(200, {"actionId": action_id, "status": "rejected"})
+            return _error(409, f"this suggestion is {found[0].get('status')}")
+        logger.exception("Failed to reject action %s", action_id)
+        return _error(500, "could not reject")
+    return _response(200, {"actionId": action_id, "status": "rejected"})
 
 
 def get_garden(event: dict[str, Any]) -> dict[str, Any]:
@@ -1718,6 +2067,16 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             return post_task_checkin(event)
         if method == "POST" and resource == "/gardens/{gardenId}/plans/{planId}/approve":
             return approve_plan(event)
+        if (
+            method == "POST"
+            and resource == "/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/confirm"
+        ):
+            return confirm_action(event)
+        if (
+            method == "POST"
+            and resource == "/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject"
+        ):
+            return reject_action(event)
         if method == "GET" and resource == "/gardens/{gardenId}/tasks":
             return list_tasks(event)
         if method == "GET" and resource == "/gardens/{gardenId}/activity":

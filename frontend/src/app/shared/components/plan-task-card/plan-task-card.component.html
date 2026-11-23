@@ -17,9 +17,14 @@
         <div class="feedback pending">Tendril is reviewing your check-in…</div>
       }
     } @else if (task.status !== 'done') {
-      <div class="checkin">
-        <td-photo-picker (fileSelected)="onPhotoSelected($event)" />
-      </div>
+      @if (awaitingFeedback) {
+        <!-- ADR-0034: a check-in is a proposal now; the task is done only after Confirm. -->
+        <div class="feedback pending">Tendril is checking your photo — confirm in the chat below.</div>
+      } @else {
+        <div class="checkin">
+          <td-photo-picker (fileSelected)="onPhotoSelected($event)" />
+        </div>
+      }
     }
   </div>
 </div>

@@ -205,10 +205,13 @@ class AgentCoreStack(Stack):
 
         # agent name -> {arn, description}, built from the SAME registry + the runtimes just
         # provisioned above (in-memory CDK tokens — never a cross-stack reference).
+        # `internal` (ADR-0034): deployed and invokable by orchestrator code, but never offered to
+        # the orchestrator's model as a tool (e.g. plant_identifier runs on every photo by rule).
         agent_manifest = {
             name: {
                 "arn": runtime.agent_runtime_arn,
                 "description": registry_entries[name]["description"],
+                "internal": bool(registry_entries[name].get("internal", False)),
             }
             for name, runtime in self.runtimes.items()
         }
@@ -226,6 +229,14 @@ class AgentCoreStack(Stack):
                 "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
                 "AGENT_STATE_BUCKET_NAME": agent_state_bucket.bucket_name,
                 "MODEL_ID": context_model_id,
+                # ADR-0034 §5: auto-link only after the archive eval shows < 1% wrong
+                # high-confidence reads (scripts/eval_plant_identifier.py). Off unless the
+                # owner sets the CDK context flag `auto_link_enabled=true`.
+                "AUTO_LINK_ENABLED": (
+                    "true"
+                    if str(self.node.try_get_context("auto_link_enabled")).strip().lower() == "true"
+                    else "false"
+                ),
                 "LOG_LEVEL": "INFO",
                 "AGENT_MANIFEST": self.to_json_string(agent_manifest),
             },

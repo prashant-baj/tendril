@@ -473,8 +473,8 @@ paths:
       security:
         - api_key: []
       summary: >
-        Send a chat message about a goal — asks/adjusts the proposed plan; triggers the
-        orchestrator asynchronously (PA-02)
+        Send a chat message about a goal — text and/or up to 4 photos, optionally about one task
+        (a check-in, ADR-0034); triggers the orchestrator asynchronously (PA-02)
       requestBody:
         required: true
         content:
@@ -485,9 +485,28 @@ paths:
         "202":
           description: >
             Message accepted — persisted and handed off for async orchestration, same posture
-            as createGoal. Not a synchronous result.
+            as createGoal. Not a synchronous result; any proposed action arrives with the reply.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messageId]
+                properties:
+                  messageId: {type: string}
         "400":
           description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: A photo or the task isn't in this garden/goal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The task is already done
           content:
             application/json:
               schema:
@@ -509,8 +528,9 @@ paths:
       security:
         - api_key: []
       summary: >
-        Attach a check-in photo to a task — completes the Plant/Goal/Task/Media traceability
-        chain and marks the task done (one check-in per task; not a repeatable progress log)
+        Check in on a task with a photo (ADR-0034). Posts a check-in chat message; the
+        orchestrator checks which plant the photo shows and proposes completing the task. The
+        task is only marked done when the gardener confirms (confirmAction).
       requestBody:
         required: true
         content:
@@ -518,8 +538,23 @@ paths:
             schema:
               $ref: "#/components/schemas/TaskCheckinRequest"
       responses:
-        "200":
-          description: Task checked in
+        "202":
+          description: Check-in posted; completion awaits confirmation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [taskId, status, messageId]
+                properties:
+                  taskId: {type: string}
+                  status: {type: string, enum: [pending_confirmation]}
+                  messageId: {type: string}
+        "409":
+          description: The task is already done
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "400":
           description: Missing/invalid input
           content:
@@ -528,6 +563,80 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: No such task or media
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}/actions/{actionId}/confirm:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+      - $ref: "#/components/parameters/ActionId"
+    post:
+      operationId: confirmAction
+      security:
+        - api_key: []
+      summary: >
+        Confirm a proposed action (ADR-0034) — the only way a proposed task completion or
+        plant-identity change is applied. Synchronous, no model call, idempotent.
+      responses:
+        "200":
+          description: Applied (or already confirmed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+        "404":
+          description: No such action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Already rejected/superseded, or no longer applicable (e.g. task done)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/GoalId"
+      - $ref: "#/components/parameters/ActionId"
+    post:
+      operationId: rejectAction
+      security:
+        - api_key: []
+      summary: Dismiss a proposed action (ADR-0034); changes nothing else. Idempotent.
+      responses:
+        "200":
+          description: Dismissed (or already dismissed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+        "404":
+          description: No such action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Already confirmed or superseded
           content:
             application/json:
               schema:
@@ -652,6 +761,13 @@ components:
 
     TaskId:
       name: taskId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    ActionId:
+      name: actionId
       in: path
       required: true
       schema:
@@ -1100,19 +1216,78 @@ components:
         mediaId:
           type: string
           description: Id from a prior createMediaUpload call, once the upload itself has completed.
+        note:
+          type: string
+          description: Optional words to go with the check-in; becomes the chat message text.
 
     Message:
       type: object
       required: [role, content, createdAt]
       properties:
+        messageId:
+          type: string
         role:
           type: string
           description: "\"user\" or \"assistant\"."
         content:
           type: string
+          description: May be empty for a user message that only carries photos or a task.
         createdAt:
           type: string
           format: date-time
+        media:
+          type: array
+          description: Photos attached to a user message (thumbnail URLs, ADR-0033/0034).
+          items:
+            $ref: "#/components/schemas/GoalMedia"
+        taskId:
+          type: string
+          description: Present when the message is a check-in on this task (ADR-0034).
+        actionId:
+          type: string
+          description: On an assistant reply, the proposed action it asks the gardener to confirm.
+
+    Action:
+      type: object
+      description: >
+        A change the orchestrator proposed (ADR-0034). Only confirmAction applies it; the
+        frontend shows Confirm/Change on `proposed` ones.
+      required: [actionId, type, summary, status, createdAt]
+      properties:
+        actionId:
+          type: string
+        type:
+          type: string
+          enum: [complete_task, set_plant, set_goal_plant, create_plant]
+        summary:
+          type: string
+          description: >
+            The sentence shown to the gardener, e.g. "This photo shows #10, but the task is
+            for #1. Is it #10's photo?"
+        status:
+          type: string
+          enum: [proposed, confirmed, rejected, superseded]
+        createdAt:
+          type: string
+        taskId:
+          type: string
+        candidates:
+          type: array
+          description: Stake numbers to choose from when the read was unsure.
+          items:
+            type: integer
+
+    ActionResult:
+      type: object
+      required: [actionId, status]
+      properties:
+        actionId:
+          type: string
+        status:
+          type: string
+          enum: [confirmed, rejected]
+        type:
+          type: string
 
     GoalMedia:
       type: object
@@ -1164,11 +1339,24 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Message"
+        actions:
+          type: array
+          description: Every proposal on this goal, oldest first (ADR-0034).
+          items:
+            $ref: "#/components/schemas/Action"
 
     GoalMessageCreateRequest:
       type: object
-      required: [content]
+      description: At least one of content (non-blank), mediaIds or taskId (ADR-0034).
       properties:
         content:
           type: string
-          minLength: 1
+        mediaIds:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+          description: Ids from prior createMediaUpload calls.
+        taskId:
+          type: string
+          description: Makes the message a check-in on this pending task; text and photo optional.

@@ -59,6 +59,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import boto3
+import plant_identity as pid
 from boto3.dynamodb.conditions import Key
 from pydantic import BaseModel, Field
 from strands import Agent, tool
@@ -130,6 +131,25 @@ class PlanProposal(BaseModel):
     tasks: list[TaskProposal]
 
 
+class ProposedAction(BaseModel):
+    """ADR-0034: something the gardener asked for that changes data. The model only *proposes*;
+    code validates it and the gardener confirms it with a tap. Never used for identity checks on
+    photos — code already handles those."""
+
+    type: Literal["complete_task", "link_plant"] = Field(
+        description=(
+            "'complete_task' when the gardener says they finished one of the current tasks; "
+            "'link_plant' when they tell you which numbered plant a photo or this goal is about."
+        )
+    )
+    task_title: str | None = Field(
+        default=None, description="For complete_task: the exact title of the pending task."
+    )
+    stake_no: int | None = Field(
+        default=None, description="For link_plant: the plant's stake number, e.g. 12."
+    )
+
+
 class ChatTurnResult(BaseModel):
     reply: str = Field(
         description=(
@@ -141,6 +161,7 @@ class ChatTurnResult(BaseModel):
         )
     )
     updated_plan: PlanProposal | None = None
+    proposed_action: ProposedAction | None = None
 
 
 ORCHESTRATOR_SYSTEM_PROMPT = (
@@ -158,7 +179,11 @@ ORCHESTRATOR_SYSTEM_PROMPT = (
     "step-by-step detail, so your reply doesn't need to repeat it — just say what you "
     "concluded and why in a sentence or two. If you genuinely need more information "
     "first, ask one specific clarifying question instead of guessing — it's fine not "
-    "to propose a plan on this turn."
+    "to propose a plan on this turn. You never change anything yourself: when the gardener "
+    "says they finished a task, or tells you which numbered plant a photo is about, set "
+    "proposed_action and tell them to tap Confirm; a typed 'yes' does not confirm anything. "
+    "When a note in the conversation says a confirmation question was already shown, don't "
+    "repeat it as done — just explain briefly."
 )
 
 FALLBACK_TASK_TITLE_MAX_CHARS = 60
@@ -331,6 +356,9 @@ def _build_tools(
             garden_context=garden_context,
         )
         for name, entry in AGENT_MANIFEST.items()
+        # ADR-0034: internal specialists (plant_identifier) are called by code, never offered
+        # to the model as tools — identification must not depend on the model's discretion.
+        if not entry.get("internal")
     ]
 
 
@@ -497,6 +525,411 @@ def _resolve_image(garden_id: str, media_ids: list[str]) -> tuple[str, str] | No
     return (photo.url, photo.image_format) if photo.url and photo.image_format else None
 
 
+# --- ADR-0034: plant identity from photos + proposed actions ------------------------------------
+
+PLANT_IDENTIFIER = "plant_identifier"
+# §5: auto-link ships only once wrong high-confidence reads are < 1% on the archive evals. Until
+# the owner flips this, every confident read is still a proposal the gardener confirms.
+AUTO_LINK_ENABLED = os.getenv("AUTO_LINK_ENABLED", "false").strip().lower() == "true"
+ACTION_TYPES = ("complete_task", "set_plant", "set_goal_plant", "create_plant")
+
+
+class IdentityOutcome(BaseModel):
+    note: str = ""  # appended to the model's prompt for this turn
+    action_id: str | None = None  # a proposal shown with the reply
+
+
+def _key(garden_id: str, sk: str) -> dict[str, str]:
+    return {"pk": f"GARDEN#{garden_id}", "sk": sk}
+
+
+def _get(garden_id: str, sk: str) -> dict[str, Any] | None:
+    return _get_table().get_item(Key=_key(garden_id, sk)).get("Item")
+
+
+def _plant_for_stake(garden_id: str):
+    def lookup(stake_no: int) -> str | None:
+        item = _get(garden_id, f"STAKE#{stake_no:05d}")
+        return item.get("plant_id") if item else None
+
+    return lookup
+
+
+def _plant_stake_no(garden_id: str, plant_id: str | None) -> int | None:
+    if not plant_id:
+        return None
+    item = _get(garden_id, f"PLANT#{plant_id}")
+    return int(item["stake_no"]) if item and item.get("stake_no") is not None else None
+
+
+def _stake_range(garden_id: str) -> tuple[int, int] | None:
+    item = _get(garden_id, "METADATA") or {}
+    rng = (item.get("context") or {}).get("stake_range")
+    return (int(rng["min"]), int(rng["max"])) if rng else None
+
+
+def _read_stake(garden_id: str, media_id: str, photo: PhotoResolution) -> pid.StakeRead | None:
+    """Runs the internal plant_identifier on the photo's analysis copy (ADR-0034 §1) and records
+    the read on the Media item. None when there's nothing to read or the call failed — identity
+    then stays unknown; it never blocks the turn."""
+    entry = AGENT_MANIFEST.get(PLANT_IDENTIFIER) or {}
+    if not entry.get("arn") or not entry.get("internal") or not photo.url:
+        return None
+    payload = {
+        "prompt": "Read the number on the plant's stake in this photo.",
+        "gardenId": garden_id,
+        "imageUrl": photo.url,
+        "imageFormat": photo.image_format,
+    }
+    started = time.monotonic()
+    try:
+        resp = _get_agentcore_client().invoke_agent_runtime(
+            agentRuntimeArn=entry["arn"],
+            runtimeSessionId=uuid.uuid4().hex + uuid.uuid4().hex,
+            payload=json.dumps(payload).encode("utf-8"),
+        )
+        read = pid.parse_stake_read(json.loads(resp["response"].read()).get("result", ""))
+    except Exception:
+        logger.exception("stake_read_failed garden_id=%s media_id=%s", garden_id, media_id)
+        return None
+    logger.info(
+        "stake_read garden_id=%s media_id=%s visible=%s stake_no=%s confidence=%s alts=%s ms=%d",
+        garden_id,
+        media_id,
+        read.stake_visible,
+        read.stake_no,
+        read.confidence,
+        list(read.alternatives),
+        int((time.monotonic() - started) * 1000),
+    )
+    try:
+        _get_table().update_item(
+            Key=_key(garden_id, f"MEDIA#{media_id}"),
+            UpdateExpression="SET stake_read = :r",
+            ExpressionAttributeValues={":r": read.as_record()},
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except Exception:
+        logger.exception("stake_read_record_failed garden_id=%s media_id=%s", garden_id, media_id)
+    return read
+
+
+def _validate_action(garden_id: str, goal_id: str, kind: str, params: dict[str, Any]) -> str | None:
+    """Deterministic check before a proposal is ever shown (ADR-0034 §3). Returns why it's
+    invalid, or None. A model can't get an impossible action in front of the gardener."""
+    if kind not in ACTION_TYPES:
+        return f"unknown action type {kind!r}"
+    media_id = params.get("media_id")
+    if media_id and not _get(garden_id, f"MEDIA#{media_id}"):
+        return "media not in this garden"
+    if kind == "complete_task":
+        task = _get(garden_id, f"TASK#{goal_id}#{params.get('task_id')}")
+        if not task:
+            return "task not in this goal"
+        if task.get("status") != "pending":
+            return "task is not pending"
+    if kind in ("set_plant", "set_goal_plant"):
+        if not params.get("plant_id") or not _get(garden_id, f"PLANT#{params['plant_id']}"):
+            return "plant not in this garden"
+        if kind == "set_plant" and not media_id:
+            return "set_plant needs a photo"
+    if kind == "create_plant":
+        stake_no = params.get("stake_no")
+        if not isinstance(stake_no, int) or stake_no < 1:
+            return "invalid stake number"
+        if _plant_for_stake(garden_id)(stake_no):
+            return "stake number already used"
+    return None
+
+
+def _supersede_open_actions(garden_id: str, goal_id: str) -> None:
+    resp = _get_table().query(
+        KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with(f"ACTION#{goal_id}#")
+    )
+    for item in resp.get("Items", []):
+        if item.get("status") != "proposed":
+            continue
+        try:
+            _get_table().update_item(
+                Key=_key(garden_id, item["sk"]),
+                UpdateExpression="SET #s = :sup, resolved_at = :now",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":sup": "superseded",
+                    ":now": datetime.now(UTC).isoformat(),
+                    ":prop": "proposed",
+                },
+                ConditionExpression="#s = :prop",
+            )
+        except Exception:
+            logger.warning("supersede_failed sk=%s", item["sk"])
+
+
+def _propose_action(
+    garden_id: str, goal_id: str, kind: str, params: dict[str, Any], summary: str
+) -> str | None:
+    """Validates and stores a proposal (`ACTION#{goal_id}#{action_id}`, status `proposed`),
+    superseding older open ones on this goal. Only the Client API's confirm endpoint applies it."""
+    params = {k: v for k, v in params.items() if v is not None}
+    error = _validate_action(garden_id, goal_id, kind, params)
+    if error:
+        logger.warning("action_rejected goal_id=%s type=%s reason=%s", goal_id, kind, error)
+        return None
+    _supersede_open_actions(garden_id, goal_id)
+    action_id = uuid.uuid4().hex
+    _get_table().put_item(
+        Item={
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"ACTION#{goal_id}#{action_id}",
+            "action_id": action_id,
+            "goal_id": goal_id,
+            "type": kind,
+            "params": params,
+            "summary": summary,
+            "status": "proposed",
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    logger.info("action_proposed goal_id=%s action_id=%s type=%s", goal_id, action_id, kind)
+    return action_id
+
+
+def _set_action_feedback(garden_id: str, goal_id: str, action_id: str, feedback: str) -> None:
+    """The model's reply to a check-in becomes the task's feedback once the check-in is confirmed.
+    Only for `complete_task` proposals — an identity question carries no task feedback."""
+    item = _get(garden_id, f"ACTION#{goal_id}#{action_id}")
+    if not item or item.get("type") != "complete_task":
+        return
+    try:
+        _get_table().update_item(
+            Key=_key(garden_id, f"ACTION#{goal_id}#{action_id}"),
+            UpdateExpression="SET params.feedback = :f",
+            ExpressionAttributeValues={":f": feedback[:2000]},
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except Exception:
+        logger.exception("action_feedback_failed action_id=%s", action_id)
+
+
+def _link_media_to_plant(garden_id: str, media_id: str, plant_id: str, source: str) -> None:
+    try:
+        _get_table().update_item(
+            Key=_key(garden_id, f"MEDIA#{media_id}"),
+            UpdateExpression="SET plant_id = :p, plant_link_source = :s",
+            ExpressionAttributeValues={":p": plant_id, ":s": source},
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except Exception:
+        logger.exception("media_link_failed media_id=%s", media_id)
+
+
+def _label(stake_no: int | None) -> str:
+    return f"#{stake_no}" if stake_no is not None else "this plant"
+
+
+def _identify_photo(
+    garden_id: str,
+    goal: dict[str, Any],
+    media_id: str,
+    photo: PhotoResolution,
+    *,
+    task: dict[str, Any] | None = None,
+    user_note: str = "",
+) -> IdentityOutcome:
+    """Reads the stake, applies the identity policy, and turns the decision into a proposal and/or
+    a note for the model (ADR-0034 §2–4). Never changes identity on its own, except linking a
+    photo to the plant the gardener already chose when nothing contradicts it."""
+    goal_id = goal["goal_id"]
+    read = _read_stake(garden_id, media_id, photo) or pid.NO_READ
+    expected_plant = (task or {}).get("plant_id") or goal.get("plant_id")
+    expected_stake = _plant_stake_no(garden_id, expected_plant)
+    decision = pid.decide(
+        read,
+        _plant_for_stake(garden_id),
+        expected_plant_id=expected_plant,
+        expected_stake_no=expected_stake,
+        stake_range=_stake_range(garden_id),
+    )
+    logger.info(
+        "identity_decision goal_id=%s media_id=%s kind=%s read=%s expected=%s",
+        goal_id,
+        media_id,
+        decision.kind,
+        decision.stake_no,
+        expected_stake,
+    )
+    n, exp = decision.stake_no, expected_stake
+    subject = f"'{task.get('title', '')}'" if task else "this goal"
+
+    if decision.kind in ("match", "no_stake"):
+        if expected_plant:
+            _link_media_to_plant(garden_id, media_id, expected_plant, "user")
+        if task:
+            action_id = _propose_action(
+                garden_id,
+                goal_id,
+                "complete_task",
+                {"task_id": task["task_id"], "media_id": media_id, "note": user_note or None},
+                f"Mark '{task.get('title', '')}' done{f' for #{exp}' if exp else ''}?",
+            )
+            return IdentityOutcome(
+                action_id=action_id,
+                note=(
+                    f"(Check-in received for task '{task.get('title', '')}' with a photo. A "
+                    "Confirm button to mark it done has been shown to the gardener — give brief "
+                    "feedback on the photo, and don't say the task is done yet.)"
+                ),
+            )
+        if decision.kind == "no_stake" and not expected_plant:
+            return IdentityOutcome(
+                note="(No plant stake number is visible in this photo. If it matters which "
+                "numbered plant this is, ask the gardener.)"
+            )
+        return IdentityOutcome()
+
+    if decision.kind == "mismatch" and decision.plant_id:
+        action_id = _propose_action(
+            garden_id,
+            goal_id,
+            "set_plant",
+            {"media_id": media_id, "plant_id": decision.plant_id},
+            f"This photo shows {_label(n)}, but {subject} is for {_label(exp)}. "
+            f"Is it {_label(n)}'s photo?",
+        )
+        return IdentityOutcome(
+            action_id=action_id,
+            note=(
+                f"(Identity check: the stake in this photo reads {_label(n)}, but {subject} is "
+                f"for {_label(exp)}. A question asking whether it is {_label(n)}'s photo has been "
+                f"shown with a Confirm button. Don't treat the photo as {_label(exp)} and don't "
+                "mark anything done until they answer.)"
+            ),
+        )
+
+    if decision.kind in ("mismatch", "out_of_range"):
+        return IdentityOutcome(
+            note=(
+                f"(Identity check: the stake in this photo seems to read {_label(n)}, which isn't "
+                f"a plant in this garden{f' (expected {_label(exp)})' if exp else ''}. It may be a "
+                "misread — ask the gardener which plant this is before relying on the photo.)"
+            )
+        )
+
+    if decision.kind == "confident":
+        if AUTO_LINK_ENABLED:
+            _get_table().update_item(
+                Key=_key(garden_id, f"GOAL#{goal_id}"),
+                UpdateExpression="SET plant_id = :p",
+                ExpressionAttributeValues={":p": decision.plant_id},
+            )
+            _link_media_to_plant(garden_id, media_id, decision.plant_id, "auto")
+            return IdentityOutcome(
+                note=f"(Filed this photo and goal under {_label(n)} from its stake number. "
+                "Mention it briefly; the gardener can tell you if it's a different plant.)"
+            )
+        action_id = _propose_action(
+            garden_id,
+            goal_id,
+            "set_goal_plant",
+            {"plant_id": decision.plant_id, "media_id": media_id},
+            f"This looks like {_label(n)}. Link this goal and photo to {_label(n)}?",
+        )
+        return IdentityOutcome(
+            action_id=action_id,
+            note=f"(The stake in this photo reads {_label(n)}. A Confirm button to link this goal "
+            f"to {_label(n)} has been shown. Treat it as {_label(n)} provisionally.)",
+        )
+
+    if decision.kind == "ask":
+        options = [c for c in decision.candidates if c.plant_id]
+        if not options:
+            return IdentityOutcome()
+        first = options[0]
+        listed = " or ".join(_label(c.stake_no) for c in options)
+        action_id = _propose_action(
+            garden_id,
+            goal_id,
+            "set_goal_plant",
+            {
+                "plant_id": first.plant_id,
+                "media_id": media_id,
+                "candidates": [{"stake_no": c.stake_no, "plant_id": c.plant_id} for c in options],
+            },
+            f"Is this {listed}? Confirm for {_label(first.stake_no)}, or tell me the number.",
+        )
+        return IdentityOutcome(
+            action_id=action_id,
+            note=f"(The stake number is hard to read — it could be {listed}. A question has been "
+            "shown; don't assume which plant this is.)",
+        )
+
+    if decision.kind == "missing_plant":
+        action_id = _propose_action(
+            garden_id,
+            goal_id,
+            "create_plant",
+            {"stake_no": n, "media_id": media_id},
+            f"There's no plant {_label(n)} in this garden yet. Add {_label(n)} as a new plant?",
+        )
+        return IdentityOutcome(
+            action_id=action_id,
+            note=f"(The stake reads {_label(n)}, which isn't in this garden yet — a numbered "
+            "plant may be missing, or it's a misread. A question has been shown.)",
+        )
+    return IdentityOutcome()
+
+
+def _propose_from_model(
+    garden_id: str,
+    goal: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    proposed: ProposedAction,
+    recent_media_id: str | None = None,
+) -> str | None:
+    """Turns a model-proposed action into a validated proposal (ADR-0034 §3), or nothing."""
+    goal_id = goal["goal_id"]
+    if proposed.type == "complete_task" and proposed.task_title:
+        wanted = proposed.task_title.strip().lower()
+        task = next(
+            (
+                t
+                for t in tasks
+                if t.get("status") == "pending" and t.get("title", "").strip().lower() == wanted
+            ),
+            None,
+        )
+        if task:
+            return _propose_action(
+                garden_id,
+                goal_id,
+                "complete_task",
+                {"task_id": task["task_id"]},
+                f"Mark '{task.get('title', '')}' done?",
+            )
+    if proposed.type == "link_plant" and proposed.stake_no:
+        plant_id = _plant_for_stake(garden_id)(proposed.stake_no)
+        if plant_id:
+            media_ids = goal.get("media_ids") or []
+            media_id = recent_media_id or (media_ids[0] if media_ids else None)
+            if goal.get("plant_id") and media_id:
+                return _propose_action(
+                    garden_id,
+                    goal_id,
+                    "set_plant",
+                    {"media_id": media_id, "plant_id": plant_id},
+                    f"Move this goal's photo to {_label(proposed.stake_no)}?",
+                )
+            return _propose_action(
+                garden_id,
+                goal_id,
+                "set_goal_plant",
+                {"plant_id": plant_id, "media_id": media_id},
+                f"Link this goal to {_label(proposed.stake_no)}?",
+            )
+    return None
+
+
 def _update_goal(garden_id: str, goal_id: str, **fields: Any) -> None:
     _get_table().update_item(
         Key={"pk": f"GARDEN#{garden_id}", "sk": f"GOAL#{goal_id}"},
@@ -525,20 +958,26 @@ def _write_event(garden_id: str, event_type: str, payload: dict[str, Any]) -> No
     )
 
 
-def _write_message(garden_id: str, goal_id: str, *, role: str, content: str) -> None:
+def _write_message(
+    garden_id: str, goal_id: str, *, role: str, content: str, action_id: str | None = None
+) -> str:
+    """Writes a chat Message and returns its id. `action_id` (ADR-0034) links an assistant reply
+    to the proposed action it asks the gardener to confirm."""
     message_id = uuid.uuid4().hex
     created_at = datetime.now(UTC).isoformat()
-    _get_table().put_item(
-        Item={
-            "pk": f"GARDEN#{garden_id}",
-            "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
-            "message_id": message_id,
-            "goal_id": goal_id,
-            "role": role,
-            "content": content,
-            "created_at": created_at,
-        }
-    )
+    item = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"GOALMSG#{goal_id}#{created_at}#{message_id}",
+        "message_id": message_id,
+        "goal_id": goal_id,
+        "role": role,
+        "content": content,
+        "created_at": created_at,
+    }
+    if action_id:
+        item["action_id"] = action_id
+    _get_table().put_item(Item=item)
+    return message_id
 
 
 def _write_plan_and_tasks(
@@ -621,8 +1060,9 @@ def _apply_turn_result(
     turn: ChatTurnResult,
     plant_id: str | None = None,
     trace: list[dict[str, Any]] | None = None,
+    action_id: str | None = None,
 ) -> None:
-    _write_message(garden_id, goal_id, role="assistant", content=turn.reply)
+    _write_message(garden_id, goal_id, role="assistant", content=turn.reply, action_id=action_id)
     now = datetime.now(UTC).isoformat()
     if turn.updated_plan is not None:
         _write_plan_and_tasks(garden_id, goal_id, turn.updated_plan, plant_id, trace)
@@ -784,9 +1224,18 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
 
     _update_goal(garden_id, goal_id, status="Decomposing")
     _write_message(garden_id, goal_id, role="user", content=goal["description"])
+    goal.setdefault("goal_id", goal_id)
 
-    photo = _resolve_photo(garden_id, goal.get("media_ids") or [])
+    media_ids = goal.get("media_ids") or []
+    photo = _resolve_photo(garden_id, media_ids)
     image_url, image_format = photo.url, photo.image_format
+
+    # ADR-0034 §4: which plant does the goal's photo show? Runs before the model turn, by rule.
+    identity = (
+        _identify_photo(garden_id, goal, media_ids[0], photo)
+        if image_url and media_ids
+        else IdentityOutcome()
+    )
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
@@ -798,6 +1247,8 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         message += "\n\n(A photo of the affected plant is attached to this goal.)"
     elif photo.unreadable:
         message += f"\n\n{UNREADABLE_PHOTO_NOTE}"
+    if identity.note:
+        message += f"\n\n{identity.note}"
 
     try:
         turn_started = time.monotonic()
@@ -814,7 +1265,12 @@ def handle_goal_submitted(detail: dict[str, Any]) -> None:
         )
         if turn.updated_plan is not None:
             _finalize_trace(trace, turn, int((time.monotonic() - turn_started) * 1000))
-        _apply_turn_result(garden_id, goal_id, turn, goal.get("plant_id"), trace)
+        action_id = identity.action_id
+        if action_id is None and turn.proposed_action is not None:
+            action_id = _propose_from_model(garden_id, goal, [], turn.proposed_action)
+        _apply_turn_result(
+            garden_id, goal_id, turn, goal.get("plant_id"), trace, action_id=action_id
+        )
     except Exception as e:
         logger.exception("orchestration_failed garden_id=%s goal_id=%s", garden_id, goal_id)
         _update_goal(
@@ -841,14 +1297,53 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
     # event, the same ordering create_goal already relies on for goal.submitted.
     messages = _load_messages(garden_id, goal_id)
 
-    photo = _resolve_photo(garden_id, goal.get("media_ids") or [])
+    goal.setdefault("goal_id", goal_id)
+    # ADR-0034 §3: the newest user message may carry photos and/or a task (a check-in).
+    latest = next((m for m in reversed(messages) if m.get("role") == "user"), {})
+    message_media = latest.get("media_ids") or []
+    checkin_task = (
+        next((t for t in tasks if t.get("task_id") == latest.get("task_id")), None)
+        if latest.get("task_id")
+        else None
+    )
+
+    photo = _resolve_photo(garden_id, message_media or goal.get("media_ids") or [])
     image_url, image_format = photo.url, photo.image_format
+
+    identity = IdentityOutcome()
+    if message_media and image_url:
+        identity = _identify_photo(
+            garden_id,
+            goal,
+            message_media[0],
+            photo,
+            task=checkin_task,
+            user_note=latest.get("content", ""),
+        )
+    elif checkin_task and not message_media:
+        # A text-only check-in ("mulching done today"): no photo, still confirmed with a tap.
+        title = checkin_task.get("title", "")
+        identity = IdentityOutcome(
+            action_id=_propose_action(
+                garden_id,
+                goal_id,
+                "complete_task",
+                {"task_id": checkin_task["task_id"], "note": latest.get("content") or None},
+                f"Mark '{title}' done?",
+            ),
+            note=f"(Check-in received for task '{title}' without a photo. A Confirm button to mark "
+            "it done has been shown — acknowledge briefly; don't say it's done yet.)",
+        )
 
     trace: list[dict[str, Any]] = []
     agent = _build_orchestrator_agent(garden_id, goal_id, image_url, image_format, trace)
     transcript = _format_transcript(goal, plan, tasks, messages)
+    if message_media and image_url:
+        transcript += "\n\n(The gardener's latest message has a photo attached.)"
     if photo.unreadable:
         transcript += f"\n\n{UNREADABLE_PHOTO_NOTE}"
+    if identity.note:
+        transcript += f"\n\n{identity.note}"
 
     try:
         turn_started = time.monotonic()
@@ -862,7 +1357,20 @@ def handle_goal_message_received(detail: dict[str, Any]) -> None:
         )
         if turn.updated_plan is not None:
             _finalize_trace(trace, turn, int((time.monotonic() - turn_started) * 1000))
-        _apply_turn_result(garden_id, goal_id, turn, goal.get("plant_id"), trace)
+        action_id = identity.action_id
+        if action_id is None and turn.proposed_action is not None:
+            action_id = _propose_from_model(
+                garden_id,
+                goal,
+                tasks,
+                turn.proposed_action,
+                recent_media_id=message_media[0] if message_media else None,
+            )
+        elif action_id and checkin_task:
+            _set_action_feedback(garden_id, goal_id, action_id, turn.reply)
+        _apply_turn_result(
+            garden_id, goal_id, turn, goal.get("plant_id"), trace, action_id=action_id
+        )
     except Exception as e:
         logger.exception("chat_turn_failed garden_id=%s goal_id=%s", garden_id, goal_id)
         _write_message(

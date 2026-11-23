@@ -71,8 +71,27 @@
       <div class="messages">
         @for (m of d.messages; track $index) {
           <div class="message" [class.assistant]="m.role === 'assistant'">
-            <span class="content" [innerHTML]="m.content | markdown"></span>
+            @if (m.taskId) {
+              <span class="checkin-tag"><td-icon name="task_alt" size="14px" />Check-in: {{ taskTitle(m.taskId) }}</span>
+            }
+            @for (photo of m.media ?? []; track photo.mediaId) {
+              <img class="message-photo" [src]="photo.downloadUrl" alt="Photo sent in the chat" (error)="onImageError($event)" />
+            }
+            @if (m.content) {
+              <span class="content" [innerHTML]="m.content | markdown"></span>
+            }
+            @if (actionFor(m); as action) {
+              <td-action-proposal
+                [action]="action"
+                [busy]="actionBusy() === action.actionId"
+                (confirm)="confirmAction($event)"
+                (reject)="rejectAction($event)"
+              />
+            }
           </div>
+        }
+        @if (actionError()) {
+          <p class="chat-error" role="alert">{{ actionError() }}</p>
         }
         @if (waitingForReply()) {
           <div class="message assistant typing">
@@ -83,16 +102,45 @@
           <p class="empty">No messages yet.</p>
         }
       </div>
-      <form [formGroup]="replyForm" (ngSubmit)="sendMessage()" class="reply">
-        <input
-          type="text"
-          formControlName="content"
-          placeholder="Ask a question or request a change…"
-          autocomplete="off"
-        />
-        <button type="submit" class="btn-primary" [disabled]="sending()">
-          {{ sending() ? 'Sending…' : 'Send' }}
-        </button>
+      <form [formGroup]="replyForm" (ngSubmit)="sendMessage()" class="reply-box">
+        @if (pendingTasks().length > 0) {
+          <label class="task-pick">
+            <span>Check in on</span>
+            <select formControlName="taskId" aria-label="Check in on a task (optional)">
+              <option value="">— no task —</option>
+              @for (t of pendingTasks(); track t.taskId) {
+                <option [value]="t.taskId">{{ t.title }}</option>
+              }
+            </select>
+          </label>
+        }
+        @if (chatPhoto(); as photo) {
+          <div class="attached">
+            <td-icon name="image" size="16px" />
+            <span>{{ photo.name }}</span>
+            <button type="button" class="icon-btn" (click)="removeChatPhoto()" aria-label="Remove photo">
+              <td-icon name="close" size="16px" />
+            </button>
+          </div>
+        }
+        <div class="reply">
+          <label class="attach" aria-label="Attach a photo">
+            <input type="file" accept="image/*" (change)="onChatPhoto($event)" />
+            <td-icon name="add_a_photo" size="20px" />
+          </label>
+          <input
+            type="text"
+            formControlName="content"
+            placeholder="Ask a question, or say what you did…"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn-primary" [disabled]="sending() || !canSend">
+            {{ sending() ? 'Sending…' : 'Send' }}
+          </button>
+        </div>
+        @if (chatError()) {
+          <p class="chat-error" role="alert">{{ chatError() }}</p>
+        }
       </form>
     </section>
   </div>

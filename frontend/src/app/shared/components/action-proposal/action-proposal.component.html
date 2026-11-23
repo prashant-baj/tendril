@@ -1,0 +1,25 @@
+<div class="proposal" [class.resolved]="action.status !== 'proposed'">
+  <p class="summary">{{ action.summary }}</p>
+  @switch (action.status) {
+    @case ('proposed') {
+      <div class="buttons">
+        <button type="button" class="confirm" [disabled]="busy" (click)="confirm.emit(action)">
+          {{ busy ? 'Saving…' : 'Confirm' }}
+        </button>
+        <button type="button" class="dismiss" [disabled]="busy" (click)="reject.emit(action)">Not now</button>
+      </div>
+      @if (alternative !== undefined) {
+        <p class="hint">A different number? Just tell me, e.g. "it's #{{ alternative }}".</p>
+      }
+    }
+    @case ('confirmed') {
+      <p class="state"><td-icon name="check_circle" size="16px" />Confirmed</p>
+    }
+    @case ('rejected') {
+      <p class="state">Dismissed</p>
+    }
+    @default {
+      <p class="state">Replaced by a newer question</p>
+    }
+  }
+</div>

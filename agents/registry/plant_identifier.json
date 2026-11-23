@@ -1,0 +1,11 @@
+{
+  "name": "plant_identifier",
+  "template": "hello_agent",
+  "model_id": "qwen.qwen3-vl-235b-a22b",
+  "prompt_name": "plant-identifier-system",
+  "guardrail_name": "plant-identifier-guardrail",
+  "internal": true,
+  "description": "ADR-0034: reads the number on a plant's stake/tag from a photo and returns strict JSON. Internal: called by orchestrator code on every photo, never offered to the orchestrator's model as a tool.",
+  "tools": [],
+  "memory": { "enabled": false }
+}

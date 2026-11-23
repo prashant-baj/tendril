@@ -7,6 +7,6 @@ FROM public.ecr.aws/lambda/python:3.13
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
 
-COPY orchestrator.py ${LAMBDA_TASK_ROOT}/
+COPY orchestrator.py plant_identity.py ${LAMBDA_TASK_ROOT}/
 
 CMD ["orchestrator.handler"]

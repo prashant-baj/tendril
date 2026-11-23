@@ -1547,94 +1547,6 @@ def test_approve_plan_revision_then_reapprove_stamps_only_current_tasks(monkeypa
 # --- post_task_checkin (images-completion: Plant/Goal/Task/Media traceability) -------------
 
 
-def test_post_task_checkin_happy_path_no_plant(monkeypatch):
-    fake_table = FakeTable(
-        get_item_responses={
-            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1", "goal_id": "goal-1"}},
-            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
-        }
-    )
-    fake_client = FakeClient()
-    fake_events = FakeEvents()
-    monkeypatch.setattr(handler, "_table", fake_table)
-    monkeypatch.setattr(handler, "_client", fake_client)
-    monkeypatch.setattr(handler, "_events", fake_events)
-
-    event = _event(
-        "POST",
-        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
-        body={"mediaId": "media-1"},
-        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
-    )
-    resp = handler.post_task_checkin(event)
-
-    assert resp["statusCode"] == 200
-    assert json.loads(resp["body"]) == {"taskId": "task-1", "status": "done"}
-
-    assert len(fake_events.put_calls) == 1
-    published = fake_events.put_calls[0][0]
-    assert published["DetailType"] == "task.checkin.received"
-    assert json.loads(published["Detail"]) == {
-        "gardenId": "g1",
-        "goalId": "goal-1",
-        "taskId": "task-1",
-    }
-
-    # Phase 6: a best-effort task.checkin Event is written too (a separate concern from the
-    # EventBridge publish above — one's an audit-log item, the other an async trigger).
-    assert len(fake_table.put_calls) == 1
-    event_item = fake_table.put_calls[0]
-    assert event_item["type"] == "task.checkin"
-    assert event_item["payload"] == {"goalId": "goal-1", "taskId": "task-1", "taskTitle": ""}
-
-    assert len(fake_client.calls) == 1
-    items = fake_client.calls[0]
-    task_update = next(
-        i["Update"] for i in items if i["Update"]["Key"]["sk"]["S"] == "TASK#goal-1#task-1"
-    )
-    media_update = next(
-        i["Update"] for i in items if i["Update"]["Key"]["sk"]["S"] == "MEDIA#media-1"
-    )
-    assert task_update["ExpressionAttributeValues"][":status"]["S"] == "done"
-    assert task_update["ExpressionAttributeValues"][":mid"]["S"] == "media-1"
-    # Phase 7.5+: clears TasksDueIndex attributes so a checked-in task drops out of "overdue".
-    assert "REMOVE gsi1pk, gsi1sk, due_date" in task_update["UpdateExpression"]
-    assert media_update["ExpressionAttributeValues"][":tid"]["S"] == "task-1"
-    assert media_update["ExpressionAttributeValues"][":gid"]["S"] == "goal-1"
-    assert ":pid" not in media_update["ExpressionAttributeValues"]
-
-
-def test_post_task_checkin_propagates_plant_id_to_media(monkeypatch):
-    fake_table = FakeTable(
-        get_item_responses={
-            "TASK#goal-1#task-1": {
-                "Item": {"task_id": "task-1", "goal_id": "goal-1", "plant_id": "plant-1"}
-            },
-            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
-        }
-    )
-    fake_client = FakeClient()
-    monkeypatch.setattr(handler, "_table", fake_table)
-    monkeypatch.setattr(handler, "_client", fake_client)
-    monkeypatch.setattr(handler, "_events", FakeEvents())
-
-    event = _event(
-        "POST",
-        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
-        body={"mediaId": "media-1"},
-        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
-    )
-    resp = handler.post_task_checkin(event)
-
-    assert resp["statusCode"] == 200
-    media_update = next(
-        i["Update"]
-        for i in fake_client.calls[0]
-        if i["Update"]["Key"]["sk"]["S"] == "MEDIA#media-1"
-    )
-    assert media_update["ExpressionAttributeValues"][":pid"]["S"] == "plant-1"
-
-
 def test_post_task_checkin_task_not_found(monkeypatch):
     monkeypatch.setattr(handler, "_table", FakeTable(get_item_response={}))
     event = _event(
@@ -1683,55 +1595,6 @@ def test_post_task_checkin_missing_path_params():
     )
     resp = handler.post_task_checkin(event)
     assert resp["statusCode"] == 400
-
-
-def test_post_task_checkin_event_publish_failure_still_returns_200(monkeypatch):
-    # Deliberately NOT folded into the transaction's try/except (PA-05): the check-in's core
-    # contract (done + photo linked) already committed by the time the event publish runs, so
-    # losing just the bonus agent-feedback event shouldn't turn a successful check-in into a 500.
-    fake_table = FakeTable(
-        get_item_responses={
-            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1", "goal_id": "goal-1"}},
-            "MEDIA#media-1": {"Item": {"s3_key": "g1/media-1/photo.jpg"}},
-        }
-    )
-    monkeypatch.setattr(handler, "_table", fake_table)
-    monkeypatch.setattr(handler, "_client", FakeClient())
-    monkeypatch.setattr(handler, "_events", FakeEvents(raise_on_put=RuntimeError("boom")))
-
-    event = _event(
-        "POST",
-        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
-        body={"mediaId": "media-1"},
-        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
-    )
-    resp = handler.post_task_checkin(event)
-
-    assert resp["statusCode"] == 200
-    assert json.loads(resp["body"]) == {"taskId": "task-1", "status": "done"}
-
-
-def test_handler_routes_post_task_checkin(monkeypatch):
-    fake_table = FakeTable(
-        get_item_responses={
-            "TASK#goal-1#task-1": {"Item": {"task_id": "task-1"}},
-            "MEDIA#media-1": {"Item": {"s3_key": "k"}},
-        }
-    )
-    monkeypatch.setattr(handler, "_table", fake_table)
-    monkeypatch.setattr(handler, "_client", FakeClient())
-    monkeypatch.setattr(handler, "_events", FakeEvents())
-    event = _event(
-        "POST",
-        "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins",
-        body={"mediaId": "media-1"},
-        path_params={"gardenId": "g1", "goalId": "goal-1", "taskId": "task-1"},
-    )
-    resp = handler.handler(event, None)
-    assert resp["statusCode"] == 200
-
-
-# --- get_goal_detail: task media/plantId resolution (images completion) --------------------
 
 
 def test_get_goal_detail_resolves_task_media_and_plant_id(monkeypatch):
@@ -2896,3 +2759,324 @@ def test_list_plants_uses_the_thumbnail_when_processed(monkeypatch):
     monkeypatch.setattr(handler, "_s3", FakeS3())
     body = json.loads(handler.list_plants(_event("GET", PLANTS, path_params=G1))["body"])
     assert "derived/g1/m1/thumb.jpg" in body[0]["photoUrl"]
+
+
+# --- ADR-0034: chat messages with photos/tasks, check-in proposals, confirm/reject -------------
+
+GOAL_PATH = {"gardenId": "g1", "goalId": "goal-1"}
+TASK_ITEM = {
+    "task_id": "t1",
+    "goal_id": "goal-1",
+    "title": "Check drip irrigation",
+    "status": "pending",
+    "plant_id": "p1",
+}
+MEDIA_ITEM = {"media_id": "m10", "s3_key": "uploads/g1/m10/p.jpg"}
+CHECKIN = "/gardens/{gardenId}/goals/{goalId}/tasks/{taskId}/checkins"
+ACTION_CONFIRM = "/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/confirm"
+ACTION_REJECT = "/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject"
+ACTION_PATH = {**GOAL_PATH, "actionId": "a1"}
+
+
+def _msg_event(body):
+    return _event(
+        "POST", "/gardens/{gardenId}/goals/{goalId}/messages", body=body, path_params=GOAL_PATH
+    )
+
+
+def _api_tables(monkeypatch, responses):
+    table, events = FakeTable(get_item_responses=responses), FakeEvents()
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_events", events)
+    return table, events
+
+
+def test_message_with_photo_and_task_is_a_checkin(monkeypatch):
+    table, events = _api_tables(
+        monkeypatch, {"MEDIA#m10": {"Item": MEDIA_ITEM}, "TASK#goal-1#t1": {"Item": TASK_ITEM}}
+    )
+    resp = handler.post_goal_message(_msg_event({"mediaIds": ["m10"], "taskId": "t1"}))
+    assert resp["statusCode"] == 202
+    (msg,) = table.put_calls
+    assert msg["media_ids"] == ["m10"] and msg["task_id"] == "t1" and msg["content"] == ""
+    assert json.loads(resp["body"]) == {"messageId": msg["message_id"]}
+    assert events.put_calls[0][0]["DetailType"] == "goal.message.received"
+    # The photo is linked to this goal/message for traceability.
+    assert table.update_calls[0]["ExpressionAttributeValues"][":g"] == "goal-1"
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ({}, 400),
+        ({"content": "   "}, 400),
+        ({"mediaIds": "m10"}, 400),
+        ({"mediaIds": ["a", "b", "c", "d", "e"]}, 400),
+        ({"content": "hi", "taskId": 5}, 400),
+        ({"mediaIds": ["missing"]}, 404),
+        ({"taskId": "missing"}, 404),
+    ],
+)
+def test_message_validation(monkeypatch, body, status):
+    _api_tables(monkeypatch, {"MEDIA#m10": {"Item": MEDIA_ITEM}})
+    assert handler.post_goal_message(_msg_event(body))["statusCode"] == status
+
+
+def test_message_checkin_on_a_done_task_is_409(monkeypatch):
+    _api_tables(monkeypatch, {"TASK#goal-1#t1": {"Item": dict(TASK_ITEM, status="done")}})
+    assert handler.post_goal_message(_msg_event({"taskId": "t1"}))["statusCode"] == 409
+
+
+def test_task_checkin_button_now_proposes_instead_of_completing(monkeypatch):
+    table, events = _api_tables(
+        monkeypatch, {"MEDIA#m10": {"Item": MEDIA_ITEM}, "TASK#goal-1#t1": {"Item": TASK_ITEM}}
+    )
+    fake_client = FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    event = _event(
+        "POST", CHECKIN, body={"mediaId": "m10"}, path_params={**GOAL_PATH, "taskId": "t1"}
+    )
+    resp = handler.handler(event, None)
+    assert resp["statusCode"] == 202
+    body = json.loads(resp["body"])
+    assert body["status"] == "pending_confirmation" and body["taskId"] == "t1"
+    (msg,) = table.put_calls
+    assert msg["task_id"] == "t1" and msg["media_ids"] == ["m10"]
+    assert msg["content"] == "Check-in: Check drip irrigation"
+    assert fake_client.calls == []  # the task is NOT marked done here
+    assert events.put_calls[0][0]["DetailType"] == "goal.message.received"
+
+
+def test_task_checkin_on_a_done_task_is_409(monkeypatch):
+    _api_tables(
+        monkeypatch,
+        {
+            "MEDIA#m10": {"Item": MEDIA_ITEM},
+            "TASK#goal-1#t1": {"Item": dict(TASK_ITEM, status="done")},
+        },
+    )
+    event = _event(
+        "POST", CHECKIN, body={"mediaId": "m10"}, path_params={**GOAL_PATH, "taskId": "t1"}
+    )
+    assert handler.post_task_checkin(event)["statusCode"] == 409
+
+
+def _action(kind, params, status="proposed"):
+    return {
+        "Item": {
+            "action_id": "a1",
+            "goal_id": "goal-1",
+            "type": kind,
+            "params": params,
+            "status": status,
+        }
+    }
+
+
+def _confirm(monkeypatch, responses, client=None, resource=ACTION_CONFIRM):
+    table, _ = _api_tables(monkeypatch, responses)
+    fake_client = client or FakeClient()
+    monkeypatch.setattr(handler, "_client", fake_client)
+    resp = handler.handler(_event("POST", resource, path_params=ACTION_PATH), None)
+    return resp, table, fake_client
+
+
+def _ops_by_sk(transact_call):
+    out = {}
+    for item in transact_call:
+        ((op, body),) = item.items()
+        key = body["Key"]["sk"]["S"] if "Key" in body else body["Item"]["sk"]["S"]
+        out[(op, key)] = body
+    return out
+
+
+def test_confirm_complete_task_marks_done_links_photo_and_records_event(monkeypatch):
+    params = {"task_id": "t1", "media_id": "m10", "feedback": "Looks good"}
+    resp, table, client = _confirm(
+        monkeypatch,
+        {
+            "ACTION#goal-1#a1": _action("complete_task", params),
+            "TASK#goal-1#t1": {"Item": TASK_ITEM},
+        },
+    )
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"]) == {
+        "actionId": "a1",
+        "status": "confirmed",
+        "type": "complete_task",
+    }
+    ops = _ops_by_sk(client.calls[0])
+    assert ops[("Update", "ACTION#goal-1#a1")]["ConditionExpression"] == "#s = :proposed"
+    task = ops[("Update", "TASK#goal-1#t1")]
+    assert "REMOVE gsi1pk, gsi1sk, due_date" in task["UpdateExpression"]
+    assert task["ExpressionAttributeValues"][":done"] == {"S": "done"}
+    assert task["ExpressionAttributeValues"][":fb"] == {"S": "Looks good"}
+    assert task["ConditionExpression"] == "#status = :pending"
+    media = ops[("Update", "MEDIA#m10")]
+    assert media["ExpressionAttributeValues"][":plant_id"] == {"S": "p1"}
+    assert media["ExpressionAttributeValues"][":plant_link_source"] == {"S": "confirmed"}
+    assert table.put_calls[0]["type"] == "task.checkin"
+
+
+def test_confirm_set_plant_moves_the_photo_after_checking_the_plant_exists(monkeypatch):
+    resp, _, client = _confirm(
+        monkeypatch,
+        {"ACTION#goal-1#a1": _action("set_plant", {"media_id": "m10", "plant_id": "p10"})},
+    )
+    assert resp["statusCode"] == 200
+    ops = _ops_by_sk(client.calls[0])
+    assert ("ConditionCheck", "PLANT#p10") in ops
+    assert ops[("Update", "MEDIA#m10")]["ExpressionAttributeValues"][":plant_id"] == {"S": "p10"}
+
+
+def test_confirm_set_goal_plant_updates_goal_media_and_unlinked_tasks(monkeypatch):
+    table, _ = _api_tables(
+        monkeypatch,
+        {"ACTION#goal-1#a1": _action("set_goal_plant", {"plant_id": "p10", "media_id": "m10"})},
+    )
+    table._query_response = {
+        "Items": [{"pk": "GARDEN#g1", "sk": "TASK#goal-1#t1", "task_id": "t1"}]
+    }
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.confirm_action(_event("POST", ACTION_CONFIRM, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
+    ops = _ops_by_sk(client.calls[0])
+    assert ops[("Update", "GOAL#goal-1")]["ExpressionAttributeValues"][":p"] == {"S": "p10"}
+    assert ("Update", "MEDIA#m10") in ops
+    assert table.update_calls[0]["ExpressionAttributeValues"][":p"] == "p10"  # task inherits
+
+
+def test_confirm_create_plant_copies_species_from_the_plantation(monkeypatch):
+    table, _ = _api_tables(
+        monkeypatch, {"ACTION#goal-1#a1": _action("create_plant", {"stake_no": 59})}
+    )
+    table._query_response = {
+        "Items": [
+            {
+                "sk": "PLANT#p1",
+                "plant_id": "p1",
+                "stake_no": 1,
+                "species": "Coconut",
+                "variety": "Kalpa Samrudhi",
+                "stage": "young",
+            }
+        ]
+    }
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.confirm_action(_event("POST", ACTION_CONFIRM, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
+    plant_put = client.calls[0][0]["Put"]["Item"]
+    assert plant_put["species"]["S"] == "Coconut" and plant_put["stake_no"]["N"] == "59"
+
+
+def test_confirm_is_idempotent_and_refuses_resolved_actions(monkeypatch):
+    confirmed = {"ACTION#goal-1#a1": _action("set_plant", {}, status="confirmed")}
+    resp, _, client = _confirm(monkeypatch, confirmed)
+    assert resp["statusCode"] == 200 and client.calls == []
+    superseded = {"ACTION#goal-1#a1": _action("set_plant", {}, status="superseded")}
+    assert _confirm(monkeypatch, superseded)[0]["statusCode"] == 409
+    assert _confirm(monkeypatch, {})[0]["statusCode"] == 404
+
+
+def test_confirm_when_the_task_was_already_done_is_409(monkeypatch):
+    cancelled = FakeClient(
+        raise_on_transact=FakeClientError(
+            "TransactionCanceledException", ["None", "ConditionalCheckFailed"]
+        )
+    )
+    resp, _, _ = _confirm(
+        monkeypatch,
+        {
+            "ACTION#goal-1#a1": _action("complete_task", {"task_id": "t1"}),
+            "TASK#goal-1#t1": {"Item": TASK_ITEM},
+        },
+        client=cancelled,
+    )
+    assert resp["statusCode"] == 409
+    assert "no longer applies" in json.loads(resp["body"])["message"]
+
+
+def test_reject_dismisses_and_is_idempotent(monkeypatch):
+    resp, table, client = _confirm(
+        monkeypatch, {"ACTION#goal-1#a1": _action("set_plant", {})}, resource=ACTION_REJECT
+    )
+    assert resp["statusCode"] == 200
+    assert table.update_calls[0]["ExpressionAttributeValues"][":rejected"] == "rejected"
+    assert client.calls == []
+
+    already = FakeTable(
+        get_item_responses={"ACTION#goal-1#a1": _action("set_plant", {}, status="rejected")},
+        raise_on_update=FakeClientError("ConditionalCheckFailedException"),
+    )
+    monkeypatch.setattr(handler, "_table", already)
+    resp = handler.reject_action(_event("POST", ACTION_REJECT, path_params=ACTION_PATH))
+    assert resp["statusCode"] == 200
+
+
+def test_goal_detail_returns_actions_and_message_photos_conforming_to_schema(monkeypatch):
+    goal = {
+        "goal_id": "goal-1",
+        "description": "track",
+        "type": "general",
+        "status": "PlanProposed",
+    }
+    msg = {
+        "sk": "GOALMSG#goal-1#2026-11-23T10:00#u1",
+        "message_id": "u1",
+        "role": "user",
+        "content": "",
+        "created_at": "2026-11-23T10:00",
+        "media_ids": ["m10"],
+        "task_id": "t1",
+    }
+    reply = {
+        "sk": "GOALMSG#goal-1#2026-11-23T10:01#a",
+        "message_id": "a",
+        "role": "assistant",
+        "content": "ok",
+        "created_at": "2026-11-23T10:01",
+        "action_id": "a1",
+    }
+    action = {
+        "sk": "ACTION#goal-1#a1",
+        "action_id": "a1",
+        "type": "set_goal_plant",
+        "summary": "Is this #71 or #17?",
+        "status": "proposed",
+        "created_at": "2026-11-23T10:01",
+        "params": {
+            "plant_id": "p71",
+            "candidates": [
+                {"stake_no": 71, "plant_id": "p71"},
+                {"stake_no": 17, "plant_id": "p17"},
+            ],
+        },
+    }
+    ready_media = dict(
+        MEDIA_ITEM, processing_status="ready", thumb_s3_key="derived/g1/m10/thumb.jpg"
+    )
+    table = FakeTable(
+        get_item_responses={"GOAL#goal-1": {"Item": goal}, "MEDIA#m10": {"Item": ready_media}},
+        query_responses=[{"Items": []}, {"Items": [msg, reply]}, {"Items": [action]}],
+    )
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    event = _event("GET", "/gardens/{gardenId}/goals/{goalId}", path_params=GOAL_PATH)
+    body = json.loads(handler.get_goal_detail(event)["body"])
+    user, assistant = body["messages"]
+    assert user["taskId"] == "t1"
+    assert "derived/g1/m10/thumb.jpg" in user["media"][0]["downloadUrl"]
+    assert assistant["actionId"] == "a1"
+    assert body["actions"] == [
+        {
+            "actionId": "a1",
+            "type": "set_goal_plant",
+            "summary": "Is this #71 or #17?",
+            "status": "proposed",
+            "createdAt": "2026-11-23T10:01",
+            "candidates": [71, 17],
+        }
+    ]
+    _validate_against("GoalDetail", body)
