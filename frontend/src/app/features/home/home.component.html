@@ -15,6 +15,24 @@
     </div>
   </section>
 
+  <!-- ADR-0038: farm work that's due -->
+  @if (workDue().length > 0) {
+    <section>
+      <div class="section-head">
+        <h2>Farm work due</h2>
+        <a routerLink="/farm-work" class="link">All farm work</a>
+      </div>
+      <div class="card list">
+        @for (a of workDue(); track a.activityId) {
+          <a class="work-due" routerLink="/farm-work">
+            <span class="work-title">{{ a.title }}</span>
+            <span class="work-when" [class.overdue]="a.dueState === 'overdue'">{{ dueText(a) }}</span>
+          </a>
+        }
+      </div>
+    </section>
+  }
+
   <!-- goals needing your attention -->
   @if (goalsNeedingAttention().length > 0) {
     <section>

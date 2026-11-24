@@ -8,7 +8,11 @@ import { PlantCardComponent } from '../../shared/components/plant-card/plant-car
 import { TaskApi } from '../../core/services/task.service';
 import { GoalApi } from '../../core/services/goal.service';
 import { INFORMATION_SAVED, IN_PROGRESS_STATUSES, goalNeedsAttention } from '../../shared/components/goal-status.util';
-import { GardenApi } from '../../core/services/garden.service';
+import { GardenApi, formatObservedOn } from '../../core/services/garden.service';
+import { FarmWorkApi } from '../../core/services/farm-work.service';
+import { Activity } from '../../core/models/farm-work.model';
+import { of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
 import { CurrentGardenService } from '../../core/services/current-garden.service';
 
 // A goal further along than PlanProposed is "in progress"; Intake/Decomposing/PlanProposed
@@ -27,6 +31,7 @@ export class HomeComponent {
   private readonly taskApi = inject(TaskApi);
   private readonly goalApi = inject(GoalApi);
   private readonly gardenApi = inject(GardenApi);
+  private readonly farmWork = inject(FarmWorkApi);
   private readonly currentGarden = inject(CurrentGardenService);
   private readonly router = inject(Router);
 
@@ -65,6 +70,29 @@ export class HomeComponent {
       .filter((g) => g.status === INFORMATION_SAVED)
       .slice(0, 5),
   );
+
+  // ADR-0038 §3: overdue and due farm work, computed on read by the API.
+  private readonly activities = toSignal(
+    toObservable(this.currentGarden.gardenId).pipe(
+      switchMap((gardenId) =>
+        gardenId
+          ? this.farmWork.listActivities(gardenId).pipe(catchError(() => of([] as Activity[])))
+          : of([] as Activity[]),
+      ),
+    ),
+    { initialValue: [] as Activity[] },
+  );
+  readonly workDue = computed(() =>
+    this.activities()
+      .filter((a) => a.dueState === 'overdue' || a.dueState === 'due')
+      .slice(0, 5),
+  );
+
+  dueText(a: Activity): string {
+    return a.dueState === 'overdue'
+      ? `Overdue since ${formatObservedOn(a.overdueOn ?? a.nextDueOn ?? '')}`
+      : 'Due now';
+  }
 
   readonly plants = toSignal(
     toObservable(this.currentGarden.gardenId).pipe(

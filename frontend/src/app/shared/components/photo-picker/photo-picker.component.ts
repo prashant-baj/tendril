@@ -3,6 +3,8 @@ import { IconComponent } from '../icon/icon.component';
 
 /** ADR-0033: the upload limit, mirrored from the Client API's `sizeBytes` check. */
 export const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+/** ADR-0038 §7: short phone videos (MP4/MOV), up to 100 MB and 60 seconds. */
+export const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 
 /**
  * Photo capture-or-pick input, shared across every photo-involving story (OB-02 first; WS-05's

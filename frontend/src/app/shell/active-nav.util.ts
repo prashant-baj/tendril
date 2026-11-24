@@ -5,7 +5,8 @@
  */
 export function activeNavId(url: string): string {
   if (url.startsWith('/capture') || url.startsWith('/goals')) return 'home';
-  if (url.startsWith('/garden')) return 'garden';
+  if (url.startsWith('/garden') || url.startsWith('/plants')) return 'garden';
+  if (url.startsWith('/farm-work')) return 'farm';
   if (url.startsWith('/tasks')) return 'tasks';
   if (url.startsWith('/activity')) return 'activity';
   return 'home';

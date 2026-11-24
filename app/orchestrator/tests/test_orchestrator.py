@@ -1546,3 +1546,28 @@ def test_run_turn_asks_for_turn_output_and_converts_it(monkeypatch):
     result = handler._run_turn(FakeAgent(), "help")
     assert isinstance(result, handler.ChatTurnResult)
     assert result.updated_plan.tasks[0].title == "Check drip line"
+
+
+def test_garden_context_includes_recent_farm_work_and_what_is_due():
+    """ADR-0038 §6: advice accounts for work already done."""
+    garden = {"name": "Coconut Plot", "context": {"irrigation": "16 mm drip"}}
+    logs = [
+        {
+            "done_on": "2026-11-15",
+            "title": "Foliar spray",
+            "dose": "neem 40 ml",
+            "assessment": {"verdict": "caution"},
+        },
+        {"done_on": "2026-10-23", "title": "Humic acid drench"},
+    ]
+    activities = [
+        {"title": "Humic acid drench", "status": "active", "next_due_on": "2026-11-13"},
+        {"title": "Weeding", "status": "active", "next_due_on": "2999-01-01"},
+        {"title": "Paused thing", "status": "paused", "next_due_on": "2026-01-01"},
+    ]
+    text = handler._render_garden_context(garden, logs, activities)
+    assert "- 2026-11-15: Foliar spray, neem 40 ml [caution]" in text
+    assert text.index("2026-11-15") < text.index("2026-10-23")  # newest first
+    assert "Farm work due now: Humic acid drench (from 2026-11-13)" in text
+    assert "Weeding" not in text and "Paused thing" not in text
+    assert handler._render_garden_context(garden) == handler._render_garden_context(garden, [], [])

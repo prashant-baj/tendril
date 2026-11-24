@@ -1,0 +1,4 @@
+# Supervisor (ADR-0039): same pins as the orchestrator (one Strands version across agents).
+strands-agents==1.55.1
+boto3
+pydantic==2.13.5

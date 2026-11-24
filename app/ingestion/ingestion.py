@@ -10,6 +10,10 @@ Triggered by S3 `ObjectCreated` on the media bucket, prefix `uploads/` only (pro
 3. records the result on the `Media` item: `processing_status` (`ready` | `failed`),
    `detected_format`, dimensions, size, `analysis_s3_key`, `thumb_s3_key`, or `processing_error`.
 
+**Videos (ADR-0038 §7):** an upload ending in `.mp4`/`.mov`/`.m4v` goes to the Media Tool's `poster`
+instead: the same two outputs, made from one frame, plus the duration. Videos may be up to 100 MB
+and 60 seconds.
+
 Permanent problems (not an image, over 10 MB, corrupt, unsupported) mark the photo `failed` and
 return normally. Transient problems (the tool unreachable, 5xx, throttling) raise, so S3's
 asynchronous-invoke retries and the SQS failure destination take over.
@@ -36,10 +40,14 @@ logger = logging.getLogger("tendril.ingestion")
 APP_TABLE_NAME = os.getenv("APP_TABLE_NAME")  # injected by AgentCoreStack; never hardcoded
 MEDIA_BUCKET_NAME = os.getenv("MEDIA_BUCKET_NAME")
 IMAGE_TOOL_FUNCTION_NAME = os.getenv("IMAGE_TOOL_FUNCTION_NAME")
+MEDIA_TOOL_FUNCTION_NAME = os.getenv("MEDIA_TOOL_FUNCTION_NAME")  # ADR-0038: video posters
 
 UPLOADS_PREFIX = "uploads/"
 DERIVED_PREFIX = "derived/"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # ADR-0033 owner decision
+MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024  # ADR-0038 §7 owner decision
+MAX_VIDEO_SECONDS = 60
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".m4v")
 PRESIGN_SECONDS = 300
 ANALYSIS = {"name": "analysis", "maxLongEdge": 2048, "maxBytes": 1_500_000}
 THUMB = {"name": "thumb", "maxLongEdge": 512, "maxBytes": 200_000}
@@ -102,16 +110,24 @@ def _presign(method: str, key: str) -> str:
     return _get_s3().generate_presigned_url(method, Params=params, ExpiresIn=PRESIGN_SECONDS)
 
 
-def _call_tool(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """Invoke the Image Tool directly with the Function-URL-shaped event it parses."""
+def is_video(key: str) -> bool:
+    return key.lower().endswith(VIDEO_EXTENSIONS)
+
+
+def _call_tool(
+    body: dict[str, Any], *, path: str = "/resize", function_name: str | None = None
+) -> tuple[int, dict[str, Any]]:
+    """Invoke a tool (the Image Tool by default) directly with the Function-URL-shaped event it
+    parses."""
     event = {
-        "rawPath": "/resize",
+        "rawPath": path,
         "requestContext": {"http": {"method": "POST"}},
         "body": json.dumps(body),
     }
     try:
         resp = _get_lambda().invoke(
-            FunctionName=IMAGE_TOOL_FUNCTION_NAME, Payload=json.dumps(event).encode("utf-8")
+            FunctionName=function_name or IMAGE_TOOL_FUNCTION_NAME,
+            Payload=json.dumps(event).encode("utf-8"),
         )
     except Exception as e:  # throttling, network, permissions
         raise TransientError(f"image tool invoke failed: {e.__class__.__name__}") from e
@@ -168,25 +184,31 @@ def process_object(key: str, size: int | None) -> str:
         logger.info("ingestion_skip_key reason=unrecognised_layout")
         return "skipped"
     garden_id, media_id = ids
-    if size is not None and size > MAX_UPLOAD_BYTES:
-        _mark_failed(garden_id, media_id, "larger than 10 MB")
+    video = is_video(key)
+    limit = MAX_VIDEO_UPLOAD_BYTES if video else MAX_UPLOAD_BYTES
+    if size is not None and size > limit:
+        _mark_failed(garden_id, media_id, "larger than 100 MB" if video else "larger than 10 MB")
         return "failed"
 
     analysis_key, thumb_key = derived_keys(garden_id, media_id)
-    status, result = _call_tool(
-        {
-            "source": {"url": _presign("get_object", key)},
-            "outputs": [
-                dict(ANALYSIS, destinationUrl=_presign("put_object", analysis_key)),
-                dict(THUMB, destinationUrl=_presign("put_object", thumb_key)),
-            ],
-        }
-    )
+    body: dict[str, Any] = {
+        "source": {"url": _presign("get_object", key)},
+        "outputs": [
+            dict(ANALYSIS, destinationUrl=_presign("put_object", analysis_key)),
+            dict(THUMB, destinationUrl=_presign("put_object", thumb_key)),
+        ],
+    }
+    if video:
+        # ADR-0038 §7: a poster frame (analysis copy + thumbnail) from the Media Tool.
+        body["maxDurationSeconds"] = MAX_VIDEO_SECONDS
+        status, result = _call_tool(body, path="/poster", function_name=MEDIA_TOOL_FUNCTION_NAME)
+    else:
+        status, result = _call_tool(body)
     if status in PERMANENT_TOOL_STATUSES:
         _mark_failed(garden_id, media_id, result.get("message") or f"rejected ({status})")
         return "failed"
     if status != 200:
-        raise TransientError(f"image tool returned {status}")
+        raise TransientError(f"{'media' if video else 'image'} tool returned {status}")
 
     analysis = next((o for o in result.get("outputs", []) if o.get("name") == "analysis"), {})
     written = _record(
@@ -203,6 +225,12 @@ def process_object(key: str, size: int | None) -> str:
             "analysis_bytes": analysis.get("bytes"),
             # ADR-0035 §5: the photo's own capture time dates its plant-history entry.
             **({"taken_at": result["takenAt"]} if result.get("takenAt") else {}),
+            # ADR-0038 §7: a video's facts (its poster frame is the analysis copy/thumbnail).
+            **(
+                {"media_kind": "video", "duration_seconds": result.get("durationSeconds")}
+                if video
+                else {}
+            ),
         },
         remove=["processing_error"],
     )

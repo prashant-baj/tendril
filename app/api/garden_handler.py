@@ -100,9 +100,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import activities as act
 import boto3
 import plant_history as ph
 from boto3.dynamodb.conditions import Key
@@ -152,6 +153,9 @@ STAKE_NO_MAX = 99999  # matches the zero-padded 5-digit STAKE# sort key
 # ADR-0033: originals go under `uploads/` (the Ingestion Lambda's trigger prefix), limited to 10 MB.
 MEDIA_UPLOADS_PREFIX = "uploads/"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# ADR-0038 §7: short phone videos (MP4/MOV), up to 100 MB; the Media Tool makes a poster frame.
+VIDEO_CONTENT_TYPES = {"video/mp4", "video/quicktime"}
+MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024
 
 _table = None  # lazy-initialized so import-time never requires AWS credentials/network
 _client = None
@@ -495,7 +499,12 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
     # declared size is checked here and the Ingestion Lambda / Image Tool are the backstop.
     if not _is_positive_int(size_bytes):
         return _error(400, "sizeBytes is required (the file size in bytes)")
-    if size_bytes > MAX_UPLOAD_BYTES:
+    is_video = content_type.strip().lower().startswith("video/")
+    if is_video and content_type.strip().lower() not in VIDEO_CONTENT_TYPES:
+        return _error(400, "videos must be MP4 or MOV")
+    if is_video and size_bytes > MAX_VIDEO_UPLOAD_BYTES:
+        return _error(400, "video is larger than 100 MB")
+    if not is_video and size_bytes > MAX_UPLOAD_BYTES:
         return _error(400, "photo is larger than 10 MB")
 
     media_id = str(uuid.uuid4())
@@ -524,6 +533,7 @@ def create_media_upload(event: dict[str, Any]) -> dict[str, Any]:
                 # records the real `detected_format` (ADR-0033).
                 "content_type": content_type,
                 "size_bytes": size_bytes,
+                "media_kind": "video" if is_video else "photo",
                 "processing_status": "pending",
                 "uploaded_at": datetime.now(UTC).isoformat(),
             }
@@ -808,13 +818,7 @@ def get_plant(event: dict[str, Any]) -> dict[str, Any]:
         for mid in entry.get("media_ids") or []:
             item = media.get(mid)
             if item:
-                out.append(
-                    {
-                        "mediaId": mid,
-                        "thumbUrl": _generate_download_url(_display_key(item, "thumb")),
-                        "url": _generate_download_url(_display_key(item)),
-                    }
-                )
+                out.append(_media_view(mid, item))  # photo or video (ADR-0038 §7)
         return out
 
     hero = media.get(plant_item.get("media_id") or "")
@@ -943,13 +947,7 @@ def post_plant_history(event: dict[str, Any]) -> dict[str, Any]:
     if not written:
         return _error(404, "plant not found")
     photos = [
-        {
-            "mediaId": mid,
-            "thumbUrl": _generate_download_url(_display_key(item, "thumb")),
-            "url": _generate_download_url(_display_key(item)),
-        }
-        for mid, item in zip(media_ids, media_items, strict=True)
-        if item
+        _media_view(mid, item) for mid, item in zip(media_ids, media_items, strict=True) if item
     ]
     return _response(201, ph.entry_to_api(entry, photos))
 
@@ -997,7 +995,8 @@ def _batch_get_media(garden_id: str, media_ids: list[str]) -> dict[str, dict[str
                     _to_dynamo({"pk": f"GARDEN#{garden_id}", "sk": f"MEDIA#{mid}"}) for mid in chunk
                 ],
                 "ProjectionExpression": (
-                    "media_id, s3_key, processing_status, thumb_s3_key, analysis_s3_key"
+                    "media_id, s3_key, processing_status, thumb_s3_key, analysis_s3_key, "
+                    "media_kind, content_type"
                 ),
             }
         }
@@ -2619,6 +2618,649 @@ def get_garden_weather(event: dict[str, Any]) -> dict[str, Any]:
     return _response(200, forecast)
 
 
+# --- Garden activities (ADR-0038) + garden-level proposals (ADR-0039) -------------------------
+
+ACTIVITY_PLANNED_DETAIL_TYPE = "activity.planned"
+ACTIVITY_LOGGED_DETAIL_TYPE = "activity.logged"
+GARDEN_ACTION_PREFIX = "ACTION#garden#"
+
+
+def _media_view(media_id: str, item: dict[str, Any]) -> dict[str, str]:
+    """A photo or video as the API shows it: `thumbUrl` (thumbnail / video poster frame) and
+    `url` (analysis copy for a photo; the playable original for a video). A video still being
+    processed has no poster yet, so its `thumbUrl` is the video itself."""
+    kind = item.get("media_kind") or (
+        "video" if str(item.get("content_type", "")).startswith("video/") else "photo"
+    )
+    if kind == "video":
+        url = _generate_download_url(item["s3_key"])
+        poster = item.get("thumb_s3_key") if item.get("processing_status") == "ready" else None
+        return {
+            "mediaId": media_id,
+            "kind": "video",
+            "thumbUrl": _generate_download_url(poster) if poster else url,
+            "url": url,
+        }
+    return {
+        "mediaId": media_id,
+        "kind": "photo",
+        "thumbUrl": _generate_download_url(_display_key(item, "thumb")),
+        "url": _generate_download_url(_display_key(item)),
+    }
+
+
+def _publish(detail_type: str, detail: dict[str, Any]) -> None:
+    """Best-effort: the write already succeeded; a missed assessment shows as "not assessed"."""
+    try:
+        _get_events().put_events(
+            Entries=[
+                {
+                    "Source": GOAL_EVENT_SOURCE,
+                    "DetailType": detail_type,
+                    "Detail": json.dumps(detail),
+                }
+            ]
+        )
+    except Exception:
+        logger.exception("Failed to publish %s %s", detail_type, detail)
+
+
+def _json_body(event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    try:
+        payload = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return None, _error(400, "body must be valid JSON")
+    if not isinstance(payload, dict):
+        return None, _error(400, "body must be a JSON object")
+    return payload, None
+
+
+def _activity_fields(
+    payload: dict[str, Any], *, partial: bool
+) -> tuple[dict[str, Any], str | None]:
+    """Validated, stored-shape fields from an activity create/update body."""
+    fields: dict[str, Any] = {}
+    if not partial or "title" in payload:
+        title, err = act.parse_text(payload.get("title"), "title", act.TITLE_MAX, required=True)
+        if err:
+            return {}, err
+        fields["title"] = title
+    if not partial or "kind" in payload:
+        kind = payload.get("kind", "operation")
+        if kind not in act.KINDS:
+            return {}, "kind must be input or operation"
+        fields["kind"] = kind
+    for key, limit in (
+        ("details", act.DETAILS_MAX),
+        ("product", act.FIELD_MAX),
+        ("dose", act.FIELD_MAX),
+    ):
+        if key in payload:
+            value, err = act.parse_text(payload.get(key), key, limit)
+            if err:
+                return {}, err
+            fields[key] = value
+    if not partial or "targets" in payload:
+        targets, err = act.parse_targets(payload.get("targets"))
+        if err:
+            return {}, err
+        fields["targets"] = targets
+    if not partial or "schedule" in payload:
+        schedule, err = act.parse_schedule(payload.get("schedule"))
+        if err:
+            return {}, err
+        fields["schedule"] = schedule
+    if "startOn" in payload:
+        start_on, err = act.parse_date(payload.get("startOn"), "startOn", allow_future=True)
+        if err:
+            return {}, err
+        fields["start_on"] = start_on
+    return fields, None
+
+
+def _check_targets(garden_id: str, targets: Any) -> str | None:
+    if targets == "all":
+        return None
+    for plant_id in targets:
+        item = (
+            _get_table()
+            .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"PLANT#{plant_id}"})
+            .get("Item")
+        )
+        if not item:
+            return f"unknown plant {plant_id}"
+    return None
+
+
+def _new_activity_item(
+    garden_id: str, fields: dict[str, Any], source: str = "user"
+) -> dict[str, Any]:
+    activity_id = uuid.uuid4().hex
+    start_on = fields.get("start_on") or act.today()
+    next_due, overdue = act.due_window(fields.get("schedule"), None, start_on)
+    item = {
+        "pk": f"GARDEN#{garden_id}",
+        "sk": f"ACTIVITY#{activity_id}",
+        "activity_id": activity_id,
+        "status": "active",
+        "start_on": start_on,
+        "next_due_on": next_due,
+        "overdue_on": overdue,
+        "version": 1,
+        "source": source,
+        "created_at": datetime.now(UTC).isoformat(),
+        **{k: v for k, v in fields.items() if k != "start_on"},
+    }
+    return {k: v for k, v in item.items() if v is not None}
+
+
+def create_activity(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST /gardens/{gardenId}/activities` (ADR-0038): plan farm work, one-off or recurring.
+    The owner's own information, so no confirm step; the Supervisor assesses it (ADR-0039)."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+    payload, err_resp = _json_body(event)
+    if err_resp:
+        return err_resp
+    fields, err = _activity_fields(payload, partial=False)
+    if err:
+        return _error(400, err)
+    try:
+        err = _check_targets(garden_id, fields["targets"])
+        if err:
+            return _error(400, err)
+        item = _new_activity_item(garden_id, fields)
+        _get_table().put_item(Item=item)
+    except Exception:
+        logger.exception("Failed to create activity for garden %s", garden_id)
+        return _error(500, "could not create activity")
+    _publish(
+        ACTIVITY_PLANNED_DETAIL_TYPE, {"gardenId": garden_id, "activityId": item["activity_id"]}
+    )
+    return _response(201, act.activity_to_api(item))
+
+
+def list_activities(event: dict[str, Any]) -> dict[str, Any]:
+    """`GET /gardens/{gardenId}/activities`: overdue first, then due, upcoming, unscheduled,
+    paused and done. Archived ones only with `?includeArchived=true`. Due state is computed on read
+    (ADR-0038 §3) — a garden has tens of activities, one partition query."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+    include_archived = (event.get("queryStringParameters") or {}).get("includeArchived") == "true"
+    try:
+        items = _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with("ACTIVITY#")
+        )
+    except Exception:
+        logger.exception("Failed to list activities for garden %s", garden_id)
+        return _error(500, "could not list activities")
+    today = act.today()
+    shown = [
+        act.activity_to_api(i, today)
+        for i in items
+        if include_archived or i.get("status") != "archived"
+    ]
+    shown.sort(key=lambda a: (act.DUE_ORDER[a["dueState"]], a.get("nextDueOn") or "9999"))
+    return _response(200, shown)
+
+
+SUBSTANTIVE_FIELDS = {"title", "kind", "details", "product", "dose", "targets", "schedule"}
+
+
+def update_activity(event: dict[str, Any]) -> dict[str, Any]:
+    """`PATCH /gardens/{gardenId}/activities/{activityId}`: edit, pause, resume or archive. A change
+    to what the work is (or its schedule) bumps `version`, so the old assessment shows as stale and
+    the Supervisor reassesses it."""
+    p = event.get("pathParameters") or {}
+    garden_id, activity_id = p.get("gardenId"), p.get("activityId")
+    if not garden_id or not activity_id:
+        return _error(400, "gardenId and activityId are required")
+    payload, err_resp = _json_body(event)
+    if err_resp:
+        return err_resp
+    fields, err = _activity_fields(payload, partial=True)
+    if err:
+        return _error(400, err)
+    if "status" in payload:
+        if payload["status"] not in ("active", "paused", "archived"):
+            return _error(400, "status must be active, paused or archived")
+        fields["status"] = payload["status"]
+    if not fields:
+        return _error(400, "nothing to update")
+    key = {"pk": f"GARDEN#{garden_id}", "sk": f"ACTIVITY#{activity_id}"}
+    try:
+        item = _get_table().get_item(Key=key).get("Item")
+        if not item:
+            return _error(404, "activity not found")
+        if "targets" in fields:
+            err = _check_targets(garden_id, fields["targets"])
+            if err:
+                return _error(400, err)
+        updated = {**item, **fields}
+        if {"schedule", "start_on", "status"} & fields.keys() and updated.get("status") == "active":
+            next_due, overdue = act.due_window(
+                updated.get("schedule"), updated.get("last_done_on"), updated.get("start_on")
+            )
+            updated["next_due_on"], updated["overdue_on"] = next_due, overdue
+        substantive = bool(SUBSTANTIVE_FIELDS & fields.keys())
+        if substantive:
+            updated["version"] = int(item.get("version") or 1) + 1
+        updated = {k: v for k, v in updated.items() if v is not None}
+        _get_table().put_item(Item=updated)
+    except Exception:
+        logger.exception("Failed to update activity %s", activity_id)
+        return _error(500, "could not update activity")
+    if substantive:
+        _publish(ACTIVITY_PLANNED_DETAIL_TYPE, {"gardenId": garden_id, "activityId": activity_id})
+    return _response(200, act.activity_to_api(updated))
+
+
+def create_activity_log(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST /gardens/{gardenId}/activity-logs` (ADR-0038 §1): farm work was done — ad-hoc, or a
+    planned activity (`activityId`). Writes the log, moves the activity's next due date, records an
+    Event, and for a subset of palms adds a note to each palm's history. The Supervisor assesses it
+    asynchronously (ADR-0039)."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+    payload, err_resp = _json_body(event)
+    if err_resp:
+        return err_resp
+    activity = None
+    activity_id = payload.get("activityId")
+    if activity_id is not None and not isinstance(activity_id, str):
+        return _error(400, "activityId must be a string")
+    try:
+        if activity_id:
+            activity = (
+                _get_table()
+                .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"ACTIVITY#{activity_id}"})
+                .get("Item")
+            )
+            if not activity:
+                return _error(404, "activity not found")
+    except Exception:
+        logger.exception("Failed to read activity %s", activity_id)
+        return _error(500, "could not save")
+    # A log of a planned activity starts from what was planned; the body can override any of it.
+    work_keys = ("title", "kind", "details", "product", "dose", "targets")
+    merged = {k: activity[k] for k in work_keys if activity and k in activity}
+    merged.update({k: v for k, v in payload.items() if k in work_keys})
+    fields, err = _activity_fields(merged, partial=False)
+    if err:
+        return _error(400, err)
+    fields.pop("schedule", None)
+    done_on, err = act.parse_date(payload.get("doneOn"), "doneOn", allow_future=False)
+    if err:
+        return _error(400, err)
+    done_on = done_on or act.today()
+    note, err = act.parse_text(payload.get("note"), "note", act.DETAILS_MAX)
+    if err:
+        return _error(400, err)
+    media_ids = payload.get("mediaIds") or []
+    if (
+        not isinstance(media_ids, list)
+        or len(media_ids) > act.MAX_MEDIA
+        or not all(isinstance(m, str) and m for m in media_ids)
+    ):
+        return _error(400, f"mediaIds must be at most {act.MAX_MEDIA} ids")
+    media_ids = list(dict.fromkeys(media_ids))
+
+    try:
+        err = _check_targets(garden_id, fields["targets"])
+        if err:
+            return _error(400, err)
+        media_items = {m: _get_media(garden_id, m) for m in media_ids}
+        missing = [m for m, item in media_items.items() if not item]
+        if missing:
+            return _error(400, f"unknown mediaId {missing[0]}")
+        log_id = uuid.uuid4().hex
+        log_item = {
+            "pk": f"GARDEN#{garden_id}",
+            "sk": f"ACTLOG#{done_on}#{log_id}",
+            "log_id": log_id,
+            "done_on": done_on,
+            "created_at": datetime.now(UTC).isoformat(),
+            **{k: v for k, v in fields.items() if v is not None},
+        }
+        if activity_id:
+            log_item["activity_id"] = activity_id
+        if note:
+            log_item["note"] = note
+        if media_ids:
+            log_item["media_ids"] = media_ids
+        items: list[dict[str, Any]] = [
+            {
+                "Put": {
+                    "TableName": APP_TABLE_NAME,
+                    "Item": _to_dynamo(log_item),
+                    "ConditionExpression": "attribute_not_exists(pk)",
+                }
+            }
+        ]
+        changes = act.after_logging(activity, done_on) if activity else {}
+        if changes:
+            sets = {k: v for k, v in changes.items() if v is not None}
+            removes = [k for k, v in changes.items() if v is None]
+            expr = "SET " + ", ".join(f"#{k} = :{k}" for k in sets)
+            if removes:
+                expr += " REMOVE " + ", ".join(f"#{k}" for k in removes)
+            items.append(
+                {
+                    "Update": {
+                        "TableName": APP_TABLE_NAME,
+                        "Key": _to_dynamo(
+                            {"pk": f"GARDEN#{garden_id}", "sk": f"ACTIVITY#{activity_id}"}
+                        ),
+                        "UpdateExpression": expr,
+                        "ExpressionAttributeNames": {f"#{k}": k for k in [*sets, *removes]},
+                        "ExpressionAttributeValues": _to_dynamo(
+                            {f":{k}": v for k, v in sets.items()}
+                        ),
+                        "ConditionExpression": "attribute_exists(pk)",
+                    }
+                }
+            )
+        _get_client().transact_write_items(TransactItems=items)
+    except Exception:
+        logger.exception("Failed to log activity for garden %s", garden_id)
+        return _error(500, "could not save")
+
+    try:
+        _write_event(
+            garden_id,
+            "input.applied" if log_item.get("kind") == "input" else "activity.done",
+            {
+                "input" if log_item.get("kind") == "input" else "activity": log_item["title"],
+                "logId": log_id,
+                "doneOn": done_on,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to write activity event for log %s", log_id)
+    if fields["targets"] != "all":
+        # ADR-0038 §1: work on a few palms shows on each palm's page.
+        text = log_item["title"] + (f": {note}" if note else "")
+        for plant_id in fields["targets"]:
+            try:
+                _append_entry(
+                    garden_id,
+                    ph.new_entry(
+                        garden_id,
+                        plant_id,
+                        kind="log",
+                        source="user",
+                        observed_on=done_on,
+                        entry_id=f"{log_id}-{plant_id}"[:96],
+                        media_ids=media_ids[: ph.MAX_MEDIA_PER_ENTRY] or None,
+                        note=text[: ph.NOTE_MAX_CHARS],
+                    ),
+                    media_id=media_ids[0] if media_ids else None,
+                )
+            except Exception:
+                logger.exception("Failed to add activity %s to plant %s history", log_id, plant_id)
+    _publish(
+        ACTIVITY_LOGGED_DETAIL_TYPE, {"gardenId": garden_id, "logId": log_id, "doneOn": done_on}
+    )
+    views = [_media_view(m, media_items[m]) for m in media_ids]
+    return _response(201, act.log_to_api(log_item, views))
+
+
+def list_activity_logs(event: dict[str, Any]) -> dict[str, Any]:
+    """`GET /gardens/{gardenId}/activity-logs`: farm work done, newest first, paged by `cursor`."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+    qs = event.get("queryStringParameters") or {}
+    limit, err = ph.parse_limit(qs.get("limit"))
+    if err:
+        return _error(400, err)
+    query: dict[str, Any] = {
+        "KeyConditionExpression": Key("pk").eq(f"GARDEN#{garden_id}")
+        & Key("sk").begins_with("ACTLOG#"),
+        "ScanIndexForward": False,
+        "Limit": limit,
+    }
+    if qs.get("cursor"):
+        start_sk, err = _decode_sk_cursor(qs["cursor"], "ACTLOG#")
+        if err:
+            return _error(400, err)
+        query["ExclusiveStartKey"] = {"pk": f"GARDEN#{garden_id}", "sk": start_sk}
+    try:
+        page = _get_table().query(**query)
+        items = page.get("Items", [])
+        media = _batch_get_media(garden_id, [m for i in items for m in i.get("media_ids") or []])
+    except Exception:
+        logger.exception("Failed to list activity logs for garden %s", garden_id)
+        return _error(500, "could not list activity logs")
+    logs = [
+        act.log_to_api(
+            i, [_media_view(m, media[m]) for m in i.get("media_ids") or [] if m in media]
+        )
+        for i in items
+    ]
+    out: dict[str, Any] = {"logs": logs}
+    cursor = ph.encode_cursor(page.get("LastEvaluatedKey"))
+    if cursor:
+        out["nextCursor"] = cursor
+    return _response(200, out)
+
+
+def _decode_sk_cursor(cursor: str, prefix: str) -> tuple[str | None, str | None]:
+    import base64
+
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        sk = decoded["sk"]
+    except (ValueError, KeyError, TypeError, UnicodeError):
+        return None, "cursor is not valid"
+    if not isinstance(sk, str) or not sk.startswith(prefix):
+        return None, "cursor is not valid"
+    return sk, None
+
+
+def _garden_action_to_api(item: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        "actionId": item["action_id"],
+        "type": item["type"],
+        "summary": item.get("summary", ""),
+        "status": item.get("status", "proposed"),
+        "createdAt": item.get("created_at", ""),
+    }
+    if item.get("activity_id"):
+        out["activityId"] = item["activity_id"]
+    if item.get("reason"):
+        out["reason"] = item["reason"]
+    return out
+
+
+def list_garden_actions(event: dict[str, Any]) -> dict[str, Any]:
+    """`GET /gardens/{gardenId}/actions`: the Supervisor's open proposals (ADR-0039 §5)."""
+    garden_id = (event.get("pathParameters") or {}).get("gardenId")
+    if not garden_id:
+        return _error(400, "gardenId is required")
+    try:
+        items = _query_all(
+            KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+            & Key("sk").begins_with(GARDEN_ACTION_PREFIX)
+        )
+    except Exception:
+        logger.exception("Failed to list garden actions for %s", garden_id)
+        return _error(500, "could not list suggestions")
+    open_items = sorted(
+        (i for i in items if i.get("status") == "proposed"),
+        key=lambda i: i.get("created_at", ""),
+        reverse=True,
+    )
+    return _response(200, [_garden_action_to_api(i) for i in open_items])
+
+
+def _garden_action_flip(garden_id: str, action_id: str) -> dict[str, Any]:
+    return {
+        "Update": {
+            "TableName": APP_TABLE_NAME,
+            "Key": _to_dynamo(
+                {"pk": f"GARDEN#{garden_id}", "sk": f"{GARDEN_ACTION_PREFIX}{action_id}"}
+            ),
+            "UpdateExpression": "SET #s = :confirmed, resolved_at = :now",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": _to_dynamo(
+                {
+                    ":confirmed": "confirmed",
+                    ":proposed": "proposed",
+                    ":now": datetime.now(UTC).isoformat(),
+                }
+            ),
+            "ConditionExpression": "#s = :proposed",
+        }
+    }
+
+
+def _activity_put(item: dict[str, Any], *, must_exist: bool) -> dict[str, Any]:
+    return {
+        "Put": {
+            "TableName": APP_TABLE_NAME,
+            "Item": _to_dynamo(item),
+            "ConditionExpression": "attribute_exists(pk)"
+            if must_exist
+            else "attribute_not_exists(pk)",
+        }
+    }
+
+
+def _apply_garden_action(garden_id: str, action: dict[str, Any]) -> str | None:
+    """Applies a confirmed Supervisor proposal in one transaction with its own status flip.
+    Returns the activity id to (re)assess, if any."""
+    kind, params = action["type"], action.get("params") or {}
+    flip = _garden_action_flip(garden_id, action["action_id"])
+    if kind == "create_activity":
+        fields, err = _activity_fields(params, partial=False)
+        if err:
+            raise ActionNotApplicable()
+        item = _new_activity_item(garden_id, fields, source="confirmed")
+        _transact([flip, _activity_put(item, must_exist=False)])
+        return item["activity_id"]
+    activity_id = params.get("activity_id") or action.get("activity_id")
+    item = (
+        _get_table()
+        .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"ACTIVITY#{activity_id}"})
+        .get("Item")
+    )
+    if not item:
+        raise ActionNotApplicable()
+    updated = dict(item)
+    if kind == "set_schedule":
+        schedule, err = act.parse_schedule(params.get("schedule"))
+        if err:
+            raise ActionNotApplicable()
+        updated["schedule"] = schedule
+        updated["version"] = int(item.get("version") or 1) + 1
+        next_due, overdue = act.due_window(schedule, item.get("last_done_on"), item.get("start_on"))
+        updated["next_due_on"], updated["overdue_on"] = next_due, overdue
+    elif kind == "move_due":
+        due_on, err = act.parse_date(params.get("due_on"), "due_on", allow_future=True)
+        if err or not due_on or due_on < act.today():
+            raise ActionNotApplicable()
+        grace = 0
+        if item.get("next_due_on") and item.get("overdue_on"):
+            grace = (
+                date.fromisoformat(item["overdue_on"]) - date.fromisoformat(item["next_due_on"])
+            ).days
+        updated["next_due_on"] = due_on
+        updated["overdue_on"] = (
+            date.fromisoformat(due_on) + timedelta(days=max(grace, 0))
+        ).isoformat()
+    elif kind == "pause_activity":
+        updated["status"] = "paused"
+    elif kind == "resume_activity":
+        updated["status"] = "active"
+        next_due, overdue = act.due_window(
+            item.get("schedule"), item.get("last_done_on"), item.get("start_on")
+        )
+        updated["next_due_on"], updated["overdue_on"] = next_due, overdue
+    else:
+        raise ActionNotApplicable()
+    updated = {k: v for k, v in updated.items() if v is not None}
+    _transact([flip, _activity_put(updated, must_exist=True)])
+    return activity_id if kind == "set_schedule" else None
+
+
+def confirm_garden_action(event: dict[str, Any]) -> dict[str, Any]:
+    """`POST /gardens/{gardenId}/actions/{actionId}/confirm` (ADR-0039 §5): the only way a
+    Supervisor proposal changes a schedule. Synchronous, no model call, idempotent."""
+    p = event.get("pathParameters") or {}
+    garden_id, action_id = p.get("gardenId"), p.get("actionId")
+    if not garden_id or not action_id:
+        return _error(400, "gardenId and actionId are required")
+    try:
+        action = (
+            _get_table()
+            .get_item(Key={"pk": f"GARDEN#{garden_id}", "sk": f"{GARDEN_ACTION_PREFIX}{action_id}"})
+            .get("Item")
+        )
+    except Exception:
+        logger.exception("Failed to read garden action %s", action_id)
+        return _error(500, "could not confirm")
+    if not action:
+        return _error(404, "suggestion not found")
+    if action.get("status") == "confirmed":
+        return _response(
+            200, {"actionId": action_id, "status": "confirmed", "type": action["type"]}
+        )
+    if action.get("status") != "proposed":
+        return _error(409, f"this suggestion is {action.get('status')}")
+    try:
+        reassess = _apply_garden_action(garden_id, action)
+    except ActionNotApplicable:
+        return _error(409, "this suggestion no longer applies")
+    except Exception:
+        logger.exception("Failed to confirm garden action %s", action_id)
+        return _error(500, "could not confirm")
+    if reassess:
+        _publish(ACTIVITY_PLANNED_DETAIL_TYPE, {"gardenId": garden_id, "activityId": reassess})
+    return _response(200, {"actionId": action_id, "status": "confirmed", "type": action["type"]})
+
+
+def reject_garden_action(event: dict[str, Any]) -> dict[str, Any]:
+    p = event.get("pathParameters") or {}
+    garden_id, action_id = p.get("gardenId"), p.get("actionId")
+    if not garden_id or not action_id:
+        return _error(400, "gardenId and actionId are required")
+    try:
+        _get_table().update_item(
+            Key={"pk": f"GARDEN#{garden_id}", "sk": f"{GARDEN_ACTION_PREFIX}{action_id}"},
+            UpdateExpression="SET #s = :rejected, resolved_at = :now",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":rejected": "rejected",
+                ":proposed": "proposed",
+                ":now": datetime.now(UTC).isoformat(),
+            },
+            ConditionExpression="#s = :proposed",
+        )
+    except Exception as e:
+        code = (getattr(e, "response", None) or {}).get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            item = (
+                _get_table()
+                .get_item(
+                    Key={"pk": f"GARDEN#{garden_id}", "sk": f"{GARDEN_ACTION_PREFIX}{action_id}"}
+                )
+                .get("Item")
+            )
+            if not item:
+                return _error(404, "suggestion not found")
+            if item.get("status") == "rejected":
+                return _response(200, {"actionId": action_id, "status": "rejected"})
+            return _error(409, f"this suggestion is {item.get('status')}")
+        logger.exception("Failed to reject garden action %s", action_id)
+        return _error(500, "could not dismiss")
+    return _response(200, {"actionId": action_id, "status": "rejected"})
+
+
 def _to_dynamo(item: dict[str, Any]) -> dict[str, Any]:
     """The plain low-level client (_get_client()) needs raw AttributeValue dicts — it has none
     of the resource layer's automatic Python<->DynamoDB marshalling. Delegate to boto3's own
@@ -2684,6 +3326,22 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             and resource == "/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject"
         ):
             return reject_action(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/activities":
+            return create_activity(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/activities":
+            return list_activities(event)
+        if method == "PATCH" and resource == "/gardens/{gardenId}/activities/{activityId}":
+            return update_activity(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/activity-logs":
+            return create_activity_log(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/activity-logs":
+            return list_activity_logs(event)
+        if method == "GET" and resource == "/gardens/{gardenId}/actions":
+            return list_garden_actions(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/actions/{actionId}/confirm":
+            return confirm_garden_action(event)
+        if method == "POST" and resource == "/gardens/{gardenId}/actions/{actionId}/reject":
+            return reject_garden_action(event)
         if method == "GET" and resource == "/gardens/{gardenId}/tasks":
             return list_tasks(event)
         if method == "GET" and resource == "/gardens/{gardenId}/activity":

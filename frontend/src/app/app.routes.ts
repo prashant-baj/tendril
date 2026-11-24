@@ -34,6 +34,12 @@ export const routes: Routes = [
     loadComponent: () => import('./features/garden/garden.component').then((m) => m.GardenComponent),
   },
   {
+    path: 'farm-work',
+    data: { title: 'Farm work' },
+    loadComponent: () =>
+      import('./features/farm-work/farm-work.component').then((m) => m.FarmWorkComponent),
+  },
+  {
     path: 'plants/:plantId',
     data: { title: 'Plant' },
     loadComponent: () =>

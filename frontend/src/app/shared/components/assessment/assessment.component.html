@@ -1,0 +1,25 @@
+<div class="assessment" [class]="'v-' + verdict">
+  <button type="button" class="badge" (click)="toggle()" [attr.aria-expanded]="open" [disabled]="!assessment">
+    <td-icon [name]="icon" size="15px" />{{ label }}
+    @if (assessment?.stale) {
+      <span class="stale">· updating</span>
+    }
+  </button>
+  @if (open && assessment; as a) {
+    <div class="details">
+      <p class="summary">{{ a.summary }}</p>
+      @if (a.risks.length) {
+        <p><strong>Risks:</strong> {{ a.risks.join('; ') }}</p>
+      }
+      @for (c of a.conflicts; track c.with) {
+        <p><strong>Clashes with {{ c.with }}:</strong> {{ c.reason }}</p>
+      }
+      @if (a.benefits.length) {
+        <p><strong>Benefits:</strong> {{ a.benefits.join('; ') }}</p>
+      }
+      @if (a.suggestion) {
+        <p><strong>Suggestion:</strong> {{ a.suggestion }}</p>
+      }
+    </div>
+  }
+</div>

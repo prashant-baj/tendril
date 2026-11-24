@@ -1,0 +1,4 @@
+# Media Tool (ADR-0038 §7). Pinned: imageio-ffmpeg bundles a static ffmpeg binary (manylinux
+# aarch64 wheel for the ARM64 Lambda image); Pillow encodes the poster frame as JPEG.
+imageio-ffmpeg==0.6.0
+Pillow==11.3.0

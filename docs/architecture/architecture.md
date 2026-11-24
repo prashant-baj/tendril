@@ -182,7 +182,13 @@ erDiagram
 | **Tool APIs** | Weather and **Image** (ADR-0033: stateless `inspect`/`resize`, presigned URLs in and out, no data permissions), each a Lambda behind an IAM-authenticated Function URL, discovered from `app/tools/<name>/` (optional `tool.json` sizing) | Lambda | Lambda |
 | **Memory / Knowledge** | Real per-garden memory — a Bedrock Knowledge Base (S3 Vectors backend) each specialist retrieves/ingests against, wired into the shared agent template, not the orchestrator | Bedrock Knowledge Bases | Managed |
 | **Persistence** | Structured domain state + event/message log, single table | DynamoDB | Managed |
-| **Supervisor** *(candidate — CP-07, pending ADR; not built)* | New agent **above** the orchestrator: owns a garden's standing goals and its own agenda of scheduled checks, consumes a deterministic garden-state rollup (plant history + activity log + garden context), and when it decides to act **submits a garden-scoped goal into the existing orchestrator** — it does not replace it or call specialists directly. Model choice and whether assessment reasoning lives here or in a new garden-level specialist are decided in its ADR (`docs/stories/coconut-plantation.md` CP-07) | Strands | Lambda (EventBridge Scheduler-triggered), to be confirmed by ADR |
+| **Supervisor** *(ADR-0039, built 2026-11-24; first slice)* | Garden-level agent **above** the orchestrator. This slice **assesses farm activities** (ADR-0038) for benefit and harm, and keeps schedules sensible:
+- **Triggers:** `activity.planned` / `activity.logged` events, plus a daily 06:00 IST agenda.
+- **What it reads:** a deterministic garden-state rollup built by code (context, plant status, watch list, recent work, schedules, forecast).
+- **What it writes:** `assessment` attributes directly (information only), and garden-level **proposals** (`ACTION#garden#`) that only the confirm endpoint applies.
+- **Specialists:** consulted read-only, at most 2 per run.
+- **Gate:** daily-agenda proposals are written only with CDK context `supervisor_proposals_enabled` (after `scripts/eval_supervisor.py` passes).
+- **Later slices:** standing goals and submitting goals to the orchestrator. | Strands | Lambda `app/supervisor/` (EventBridge rules + daily schedule) |
 | **Frontend** | Angular PWA — 10 routed screens behind a responsive shell ([ADR-0003](./ADRs/0003-frontend-angular-and-design-system.md), §8 below) | Angular | S3 static website ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)) |
 
 **Not built yet** (documented gaps, not oversights): a Notification service and any push channel
@@ -224,6 +230,12 @@ pointing back to the `openapi.yaml` operation it mirrors (e.g. `garden.model.ts`
 | `/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/confirm` | POST | Apply a proposed action (task done, photo/goal linked to a plant, plant created) — sync, no model call |
 | `/gardens/{gardenId}/goals/{goalId}/actions/{actionId}/reject` | POST | Dismiss a proposed action |
 | `/gardens/{gardenId}/plans/{planId}/approve` | POST | Human-in-the-loop plan approval (sync, no model call) |
+| `/gardens/{gardenId}/activities` | POST / GET | Plan farm work (one-off or recurring) / list it, overdue first (ADR-0038) |
+| `/gardens/{gardenId}/activities/{activityId}` | PATCH | Edit, pause, resume or archive; edits are reassessed |
+| `/gardens/{gardenId}/activity-logs` | POST / GET | Log work done (ad-hoc or a planned activity, with photos/videos) / list it, paged |
+| `/gardens/{gardenId}/actions` | GET | The Supervisor's open suggestions (ADR-0039) |
+| `/gardens/{gardenId}/actions/{actionId}/confirm` | POST | Apply a Supervisor suggestion: sync, no model call |
+| `/gardens/{gardenId}/actions/{actionId}/reject` | POST | Dismiss a Supervisor suggestion |
 | `/gardens/{gardenId}/tasks` | GET | All tasks across every goal in the garden |
 | `/gardens/{gardenId}/activity` | GET | The garden's event timeline, newest first |
 
@@ -468,6 +480,7 @@ site ([ADR-0010](./ADRs/0010-frontend-hosting-s3-static-website.md)).
 | Add numbered plants | `/add-plants` | Bulk-create one plant per stake number in a range (`POST /plants/bulk`), pre-filled from the garden's stake range; shows created/skipped (CP-02) |
 | Check a plant | `/capture` | Photo + description → real goal submission against the Client API |
 | Goal detail | `/goals/:goalId` | Plan approval (HITL), collapsible specialist trace, plan tasks, full reasoning thread, check-in |
+| Farm work | `/farm-work` | Planned and recurring work with due state, a log of work done (photos/videos), the Supervisor's verdict on each, its suggestions to confirm, and an "Are you sure?" before logging work flagged harmful (ADR-0038/0039). Home shows "Farm work due" |
 | Tasks | `/tasks` | Grouped Today / This week / Later task lists |
 | Garden | `/garden` | Garden hero photo/facts + full plant list (ordered by stake number, with latest status and date); a plant opens its page; entry point to Add plant, Add numbered, Garden settings |
 | Plant | `/plants/:plantId` | A plant's details, dated photo/note timeline (paged), first vs latest photo, add a note/status/photo, "Check this plant", mark as removed (CP-05, ADR-0035) |

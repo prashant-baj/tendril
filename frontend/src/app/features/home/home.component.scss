@@ -144,3 +144,17 @@ h2 { font-size: 18px; font-weight: 600; margin: 0; color: var(--td-color-ink); }
   overflow-x: auto;
   padding-bottom: 4px;
 }
+
+// ADR-0038: "Farm work due" rows.
+.work-due {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  color: var(--td-color-ink);
+  border-top: 1px solid var(--td-color-line-soft);
+  &:first-child { border-top: 0; }
+}
+.work-title { font-weight: 600; font-size: 14px; }
+.work-when { font-size: 13px; color: var(--td-color-amber-ink); }
+.work-when.overdue { color: var(--td-color-red-ink); }

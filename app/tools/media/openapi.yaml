@@ -1,0 +1,74 @@
+openapi: 3.0.3
+info:
+  title: Tendril Media Tool
+  version: 1.0.0
+  description: >
+    ADR-0038 §7: poster frames for short videos (MP4/MOV, up to 100 MB and maxDurationSeconds).
+    Stateless; the caller passes the source as a presigned GET URL and each output is PUT to a
+    presigned URL or returned inline as base64. Invoked by the Ingestion Lambda.
+paths:
+  /poster:
+    post:
+      operationId: poster
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PosterRequest"
+      responses:
+        "200":
+          description: Video facts and the stored (or inline) poster outputs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PosterResult"
+        "400": {description: Invalid request}
+        "413": {description: Video larger than 100 MB}
+        "422": {description: Not an MP4/MOV video, unreadable, or longer than maxDurationSeconds}
+components:
+  schemas:
+    PosterRequest:
+      type: object
+      required: [source, outputs]
+      properties:
+        source:
+          type: object
+          required: [url]
+          properties:
+            url: {type: string, description: Presigned https GET URL of the video}
+        maxDurationSeconds: {type: number, default: 60}
+        outputs:
+          type: array
+          minItems: 1
+          maxItems: 4
+          items:
+            type: object
+            required: [maxLongEdge, maxBytes]
+            properties:
+              name: {type: string}
+              maxLongEdge: {type: integer, minimum: 16, maximum: 8000}
+              maxBytes: {type: integer, minimum: 20000}
+              destinationUrl: {type: string, description: Presigned https PUT URL (image/jpeg)}
+    PosterResult:
+      type: object
+      required: [detectedFormat, bytes, durationSeconds, width, height, outputs]
+      properties:
+        detectedFormat: {type: string, enum: [mp4, mov]}
+        bytes: {type: integer}
+        durationSeconds: {type: number}
+        width: {type: integer}
+        height: {type: integer}
+        outputs:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              format: {type: string, enum: [jpeg]}
+              width: {type: integer}
+              height: {type: integer}
+              bytes: {type: integer}
+              quality: {type: integer}
+              stored: {type: boolean}
+              base64: {type: string}

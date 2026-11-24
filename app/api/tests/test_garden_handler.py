@@ -3427,3 +3427,291 @@ def test_confirming_the_plant_of_a_saved_goal_files_tendrils_note_with_the_photo
     assert note["note"]["S"].startswith("Plant #8 is underwatered")
     assert note["media_ids"] == {"L": [{"S": "m10"}]} and "status" not in note
     assert not any(k[1].startswith("PLANTLOG#p8#") and k[1].endswith("#a1") for k in ops)
+
+
+# --- Garden activities (ADR-0038) + garden-level proposals (ADR-0039) -------------------------
+
+ACT_PATH = {"gardenId": "g1"}
+
+
+def _act_event(method, resource, body=None, path=None, qs=None):
+    event = _event(method, resource, body=body, path_params=path or ACT_PATH)
+    event["queryStringParameters"] = qs
+    return event
+
+
+def test_planning_a_recurring_activity_is_saved_and_sent_for_assessment(monkeypatch):
+    table, events = _api_tables(monkeypatch, {})
+    body = {
+        "title": "Humic acid drench",
+        "kind": "input",
+        "dose": "via drip",
+        "schedule": {"minDays": 21, "maxDays": 28},
+        "startOn": "2026-11-25",
+    }
+    resp = handler.handler(_act_event("POST", "/gardens/{gardenId}/activities", body), None)
+    assert resp["statusCode"] == 201
+    out = json.loads(resp["body"])
+    assert out["schedule"] == {"minDays": 21, "maxDays": 28}
+    assert out["nextDueOn"] == "2026-11-25" and out["overdueOn"] == "2026-12-02"
+    assert out["targets"] == "all" and out["source"] == "user"
+    (item,) = table.put_calls
+    assert item["sk"].startswith("ACTIVITY#") and item["version"] == 1
+    (entry,) = events.put_calls[0]
+    assert entry["DetailType"] == "activity.planned"
+    assert json.loads(entry["Detail"])["activityId"] == item["activity_id"]
+    _validate_against("Activity", out)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"title": "x", "kind": "spray"},
+        {"title": "x", "schedule": {"everyDays": 0}},
+        {"title": "x", "targets": ["missing-plant"]},
+    ],
+)
+def test_activity_validation(monkeypatch, body):
+    _api_tables(monkeypatch, {})
+    resp = handler.create_activity(_act_event("POST", "/gardens/{gardenId}/activities", body))
+    assert resp["statusCode"] == 400
+
+
+def test_activities_list_overdue_first(monkeypatch):
+    items = [
+        {"activity_id": "a", "title": "Weeding", "status": "active", "next_due_on": "2999-01-01"},
+        {
+            "activity_id": "b",
+            "title": "Humic",
+            "status": "active",
+            "next_due_on": "2000-01-01",
+            "overdue_on": "2000-01-02",
+        },
+        {"activity_id": "c", "title": "Old", "status": "archived"},
+    ]
+    table = FakeTable(query_response={"Items": items})
+    monkeypatch.setattr(handler, "_table", table)
+    resp = handler.handler(_act_event("GET", "/gardens/{gardenId}/activities"), None)
+    out = json.loads(resp["body"])
+    assert [a["activityId"] for a in out] == ["b", "a"]
+    assert [a["dueState"] for a in out] == ["overdue", "upcoming"]
+
+
+def test_logging_a_planned_activity_moves_its_due_date_and_records_an_event(monkeypatch):
+    activity = {
+        "activity_id": "a1",
+        "title": "Humic acid drench",
+        "kind": "input",
+        "targets": "all",
+        "status": "active",
+        "schedule": {"every_days_min": 21, "every_days_max": 28},
+        "start_on": "2026-10-01",
+        "version": 1,
+    }
+    table, events = _api_tables(monkeypatch, {"ACTIVITY#a1": {"Item": activity}})
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.handler(
+        _act_event(
+            "POST",
+            "/gardens/{gardenId}/activity-logs",
+            {"activityId": "a1", "doneOn": "2026-10-23", "note": "Via drip, all basins."},
+        ),
+        None,
+    )
+    assert resp["statusCode"] == 201
+    out = json.loads(resp["body"])
+    assert out["title"] == "Humic acid drench" and out["kind"] == "input"  # from the activity
+    ops = _ops_by_sk(client.calls[0])
+    log_put = next(
+        v for (op, sk), v in ops.items() if op == "Put" and sk.startswith("ACTLOG#2026-10-23#")
+    )
+    assert log_put["Item"]["activity_id"] == {"S": "a1"}
+    upd = ops[("Update", "ACTIVITY#a1")]["ExpressionAttributeValues"]
+    assert upd[":next_due_on"] == {"S": "2026-11-13"} and upd[":overdue_on"] == {"S": "2026-11-20"}
+    assert table.put_calls[0]["type"] == "input.applied"  # Activity screen event
+    assert events.put_calls[0][0]["DetailType"] == "activity.logged"
+    _validate_against("ActivityLog", out)
+
+
+def test_ad_hoc_work_on_a_few_palms_goes_into_each_palms_history(monkeypatch):
+    table, _ = _api_tables(
+        monkeypatch,
+        {"PLANT#p94": {"Item": {"plant_id": "p94"}}, "PLANT#p95": {"Item": {"plant_id": "p95"}}},
+    )
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.create_activity_log(
+        _act_event(
+            "POST",
+            "/gardens/{gardenId}/activity-logs",
+            {"title": "Mulched basins", "targets": ["p94", "p95"], "doneOn": "2026-11-24"},
+        )
+    )
+    assert resp["statusCode"] == 201
+    history_puts = [i["Put"]["Item"] for call in client.calls[1:] for i in call if "Put" in i]
+    assert sorted(p["plant_id"]["S"] for p in history_puts) == ["p94", "p95"]
+    assert all(p["note"]["S"] == "Mulched basins" for p in history_puts)
+    assert table.put_calls[0]["type"] == "activity.done"
+
+
+def test_logging_validation(monkeypatch):
+    _api_tables(monkeypatch, {})
+    for body, status in (
+        ({}, 400),  # ad-hoc needs a title
+        ({"title": "x", "doneOn": "2999-01-01"}, 400),
+        ({"title": "x", "mediaIds": ["a", "b", "c", "d", "e", "f", "g"]}, 400),
+        ({"activityId": "missing"}, 404),
+        ({"title": "x", "mediaIds": ["missing"]}, 400),
+    ):
+        resp = handler.create_activity_log(
+            _act_event("POST", "/gardens/{gardenId}/activity-logs", body)
+        )
+        assert resp["statusCode"] == status, body
+
+
+def test_activity_logs_page_with_photos_and_videos(monkeypatch):
+    log = {
+        "sk": "ACTLOG#2026-11-15#l1",
+        "log_id": "l1",
+        "title": "Foliar spray",
+        "kind": "input",
+        "targets": "all",
+        "done_on": "2026-11-15",
+        "media_ids": ["v1"],
+        "assessment": {
+            "verdict": "caution",
+            "summary": "Close to the drench.",
+            "benefits": [],
+            "risks": ["leaf burn in heat"],
+            "conflicts": [{"with": "Humic acid drench", "reason": "within a week"}],
+        },
+    }
+    table = FakeTable(query_response={"Items": [log]})
+    raw_video = {
+        "media_id": {"S": "v1"},
+        "s3_key": {"S": "uploads/g1/v1/spray.mp4"},
+        "media_kind": {"S": "video"},
+        "processing_status": {"S": "ready"},
+        "thumb_s3_key": {"S": "derived/g1/v1/thumb.jpg"},
+    }
+    client = FakeClient(batch_get_responses=[{"Responses": {handler.APP_TABLE_NAME: [raw_video]}}])
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_client", client)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+    resp = handler.handler(_act_event("GET", "/gardens/{gardenId}/activity-logs"), None)
+    out = json.loads(resp["body"])
+    (entry,) = out["logs"]
+    (media,) = entry["media"]
+    assert media["kind"] == "video"
+    assert "thumb.jpg" in media["thumbUrl"] and "spray.mp4" in media["url"]
+    assert entry["assessment"]["verdict"] == "caution"
+    _validate_against("ActivityLogPage", out)
+
+
+def test_video_uploads_are_mp4_or_mov_up_to_100_mb(monkeypatch):
+    table = FakeTable()
+    monkeypatch.setattr(handler, "_table", table)
+    monkeypatch.setattr(handler, "_s3", FakeS3())
+
+    def upload(content_type, size):
+        return handler.create_media_upload(
+            _event(
+                "POST",
+                "/gardens/{gardenId}/media",
+                body={"contentType": content_type, "fileName": "a.mp4", "sizeBytes": size},
+                headers={"X-User-Id": "u1"},
+                path_params={"gardenId": "g1"},
+            )
+        )["statusCode"]
+
+    assert upload("video/mp4", 90 * 1024 * 1024) == 201
+    assert table.put_calls[-1]["media_kind"] == "video"
+    assert upload("video/quicktime", 101 * 1024 * 1024) == 400
+    assert upload("video/x-msvideo", 1000) == 400
+    assert upload("image/jpeg", 11 * 1024 * 1024) == 400  # photos keep 10 MB
+
+
+def _garden_action(kind, params, status="proposed", activity_id=None):
+    item = {"action_id": "s1", "type": kind, "params": params, "status": status, "summary": "x"}
+    if activity_id:
+        item["activity_id"] = activity_id
+    return {"Item": item}
+
+
+GA_PATH = {"gardenId": "g1", "actionId": "s1"}
+GA_CONFIRM = "/gardens/{gardenId}/actions/{actionId}/confirm"
+
+
+def test_confirming_a_supervisor_schedule_updates_the_activity_in_one_transaction(monkeypatch):
+    activity = {
+        "pk": "GARDEN#g1",
+        "sk": "ACTIVITY#a1",
+        "activity_id": "a1",
+        "title": "Leaching",
+        "status": "active",
+        "last_done_on": "2026-11-20",
+        "version": 3,
+    }
+    _api_tables(
+        monkeypatch,
+        {
+            "ACTION#garden#s1": _garden_action(
+                "set_schedule", {"activity_id": "a1", "schedule": {"everyDays": 7}}
+            ),
+            "ACTIVITY#a1": {"Item": activity},
+        },
+    )
+    client = FakeClient()
+    monkeypatch.setattr(handler, "_client", client)
+    resp = handler.handler(_act_event("POST", GA_CONFIRM, path=GA_PATH), None)
+    assert resp["statusCode"] == 200
+    ops = _ops_by_sk(client.calls[0])
+    assert ops[("Update", "ACTION#garden#s1")]["ConditionExpression"] == "#s = :proposed"
+    put = ops[("Put", "ACTIVITY#a1")]["Item"]
+    assert put["schedule"]["M"]["every_days"] == {"N": "7"}
+    assert put["next_due_on"] == {"S": "2026-11-27"} and put["version"] == {"N": "4"}
+
+
+def test_supervisor_can_propose_but_not_move_a_due_date_into_the_past(monkeypatch):
+    _api_tables(
+        monkeypatch,
+        {
+            "ACTION#garden#s1": _garden_action(
+                "move_due", {"activity_id": "a1", "due_on": "2000-01-01"}
+            ),
+            "ACTIVITY#a1": {"Item": {"activity_id": "a1", "title": "Spray", "status": "active"}},
+        },
+    )
+    monkeypatch.setattr(handler, "_client", FakeClient())
+    resp = handler.confirm_garden_action(_act_event("POST", GA_CONFIRM, path=GA_PATH))
+    assert resp["statusCode"] == 409
+
+
+def test_garden_actions_list_only_open_ones_and_reject_is_idempotent(monkeypatch):
+    items = [
+        dict(
+            _garden_action("pause_activity", {}, activity_id="a1")["Item"], created_at="2026-11-24"
+        ),
+        dict(_garden_action("pause_activity", {}, status="rejected")["Item"], action_id="s2"),
+    ]
+    table = FakeTable(query_response={"Items": items})
+    monkeypatch.setattr(handler, "_table", table)
+    resp = handler.handler(_act_event("GET", "/gardens/{gardenId}/actions"), None)
+    out = json.loads(resp["body"])
+    assert [a["actionId"] for a in out] == ["s1"]
+    for a in out:
+        _validate_against("GardenAction", a)
+
+    already = FakeTable(
+        get_item_responses={
+            "ACTION#garden#s1": _garden_action("pause_activity", {}, status="rejected")
+        },
+        raise_on_update=FakeClientError("ConditionalCheckFailedException"),
+    )
+    monkeypatch.setattr(handler, "_table", already)
+    resp = handler.reject_garden_action(
+        _act_event("POST", "/gardens/{gardenId}/actions/{actionId}/reject", path=GA_PATH)
+    )
+    assert resp["statusCode"] == 200

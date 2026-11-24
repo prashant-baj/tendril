@@ -1,0 +1,139 @@
+<div class="screen">
+  <div class="head">
+    <button type="button" class="btn primary" (click)="startLog()"><td-icon name="add_task" size="18px" />Log work</button>
+    <button type="button" class="btn" (click)="startPlan()"><td-icon name="event_repeat" size="18px" />Plan work</button>
+  </div>
+
+  @if (mode() !== 'none') {
+    <section class="card pad">
+      <h2>{{ mode() === 'plan' ? 'Plan work' : logging() ? 'Log: ' + logging()!.title : 'Log work done' }}</h2>
+      <form [formGroup]="form" (ngSubmit)="save()" class="form">
+        <input formControlName="title" maxlength="120" placeholder="What? e.g. Humic acid drench" aria-label="Title" />
+        <div class="row">
+          <select formControlName="kind" aria-label="Kind">
+            <option value="input">Input (fertilizer, drench, spray)</option>
+            <option value="operation">Operation (watering, mulching, weeding)</option>
+          </select>
+          <input formControlName="targets" placeholder="all, or plant numbers: 94, 95" aria-label="Plants" />
+        </div>
+        <div class="row">
+          <input formControlName="product" maxlength="200" placeholder="Product (optional)" aria-label="Product" />
+          <input formControlName="dose" maxlength="200" placeholder="Dose (optional)" aria-label="Dose" />
+        </div>
+        <textarea formControlName="details" rows="2" maxlength="1000" placeholder="How (optional)" aria-label="Details"></textarea>
+        <label class="row">
+          <span>{{ mode() === 'plan' ? 'First due' : 'Done on' }}</span>
+          <input type="date" formControlName="date" [max]="mode() === 'plan' ? null : today" />
+        </label>
+        @if (mode() === 'plan') {
+          <div class="row">
+            <select formControlName="repeat" aria-label="Repeat">
+              <option value="none">One-off</option>
+              <option value="every">Every N days</option>
+              <option value="window">Every N–M days</option>
+            </select>
+            @if (form.controls.repeat.value === 'every') {
+              <input type="number" min="1" max="365" formControlName="everyDays" aria-label="Every days" />
+            }
+            @if (form.controls.repeat.value === 'window') {
+              <input type="number" min="1" max="365" formControlName="minDays" aria-label="From days" />
+              <input type="number" min="1" max="365" formControlName="maxDays" aria-label="To days" />
+            }
+          </div>
+        } @else {
+          <textarea formControlName="note" rows="2" maxlength="1000" placeholder="Note (optional)" aria-label="Note"></textarea>
+          <label class="btn file">
+            <td-icon name="add_a_photo" size="18px" />Photos / videos
+            <input type="file" accept="image/*,video/mp4,video/quicktime" multiple hidden (change)="onFiles($event)" />
+          </label>
+          @for (f of files(); track $index) {
+            <p class="muted">{{ f.name }} <button type="button" class="link" (click)="removeFile($index)">remove</button></p>
+          }
+        }
+        <div class="row">
+          <button type="submit" class="btn primary" [disabled]="saving()">{{ saving() ? 'Saving…' : 'Save' }}</button>
+          <button type="button" class="btn" (click)="cancel()">Cancel</button>
+        </div>
+      </form>
+    </section>
+  }
+  @if (error()) {
+    <p class="error" role="alert">{{ error() }}</p>
+  }
+
+  @if (suggestions().length) {
+    <section class="card pad">
+      <h2>Tendril suggests</h2>
+      @for (s of suggestions(); track s.actionId) {
+        <div class="item">
+          <p class="title">{{ s.summary }}</p>
+          @if (s.reason) {
+            <p class="muted">{{ s.reason }}</p>
+          }
+          <div class="row">
+            <button type="button" class="btn primary" [disabled]="busyId() === s.actionId" (click)="resolve(s, true)">Confirm</button>
+            <button type="button" class="btn" [disabled]="busyId() === s.actionId" (click)="resolve(s, false)">Not now</button>
+          </div>
+        </div>
+      }
+    </section>
+  }
+
+  <section class="card pad">
+    <h2>Planned</h2>
+    @for (a of open(); track a.activityId) {
+      <div class="item" [class.overdue]="a.dueState === 'overdue'">
+        <div class="row between">
+          <p class="title">{{ a.title }}</p>
+          <span class="due" [class]="'d-' + a.dueState">{{ dueLabel(a) }}</span>
+        </div>
+        <p class="muted">{{ scheduleLabel(a.schedule) }} · {{ targetsLabel(a.targets) }}@if (a.dose) { · {{ a.dose }}}</p>
+        <td-assessment [assessment]="a.assessment" />
+        <div class="row">
+          <button type="button" class="btn small primary" (click)="startLog(a)">Log it</button>
+          @if (a.status === 'paused') {
+            <button type="button" class="btn small" [disabled]="busyId() === a.activityId" (click)="setStatus(a, 'active')">Resume</button>
+          } @else {
+            <button type="button" class="btn small" [disabled]="busyId() === a.activityId" (click)="setStatus(a, 'paused')">Pause</button>
+          }
+          <button type="button" class="btn small" [disabled]="busyId() === a.activityId" (click)="setStatus(a, 'archived')">Archive</button>
+        </div>
+      </div>
+    } @empty {
+      <p class="muted">Nothing planned. Plan recurring work like a humic drench every 3–4 weeks.</p>
+    }
+  </section>
+
+  <section class="card pad">
+    <h2>Done</h2>
+    @for (log of logs(); track log.logId) {
+      <div class="item">
+        <div class="row between">
+          <p class="title">{{ log.title }}</p>
+          <span class="muted">{{ date(log.doneOn) }}</span>
+        </div>
+        <p class="muted">{{ targetsLabel(log.targets) }}@if (log.dose) { · {{ log.dose }}}</p>
+        @if (log.note) {
+          <p>{{ log.note }}</p>
+        }
+        @if (log.media.length) {
+          <div class="media">
+            @for (m of log.media; track m.mediaId) {
+              @if (m.kind === 'video') {
+                <video controls preload="none" [src]="m.url" [attr.poster]="m.thumbUrl !== m.url ? m.thumbUrl : null"></video>
+              } @else {
+                <a [href]="m.url" target="_blank" rel="noopener"><img [src]="m.thumbUrl" alt="Work photo" /></a>
+              }
+            }
+          </div>
+        }
+        <td-assessment [assessment]="log.assessment" />
+      </div>
+    } @empty {
+      <p class="muted">No work logged yet.</p>
+    }
+    @if (nextCursor()) {
+      <button type="button" class="btn" (click)="loadOlder()">Show older</button>
+    }
+  </section>
+</div>

@@ -50,6 +50,14 @@ export function activityPresentation(event: ActivityEvent): ActivityPresentation
         icon: 'water_drop',
         tone: 'neutral',
       };
+    case 'activity.done':
+      // Farm work done (ADR-0038): mulching, weeding, leaching…
+      return {
+        title: 'Work done',
+        detail: event.payload['activity'] ?? '',
+        icon: 'agriculture',
+        tone: 'neutral',
+      };
     default:
       return { title: event.type, detail: '', icon: 'info', tone: 'neutral' };
   }

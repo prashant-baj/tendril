@@ -808,6 +808,271 @@ paths:
         passthroughBehavior: when_no_match
     options: *cors-preflight
 
+  /gardens/{gardenId}/activities:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: createActivity
+      security:
+        - api_key: []
+      summary: Plan farm work, one-off or recurring (ADR-0038)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivityCreateRequest"
+      responses:
+        "201":
+          description: The planned activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    get:
+      operationId: listActivities
+      security:
+        - api_key: []
+      summary: Farm work, overdue first, then due, upcoming, unscheduled, paused, done (ADR-0038)
+      parameters:
+        - name: includeArchived
+          in: query
+          required: false
+          schema: {type: string, enum: ["true", "false"], default: "false"}
+      responses:
+        "200":
+          description: The garden's activities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Activity"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/activities/{activityId}:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/ActivityId"
+    patch:
+      operationId: updateActivity
+      security:
+        - api_key: []
+      summary: Edit, pause, resume or archive an activity; edits are reassessed by the Supervisor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivityUpdateRequest"
+      responses:
+        "200":
+          description: The updated activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/activity-logs:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    post:
+      operationId: logActivity
+      security:
+        - api_key: []
+      summary: "Record farm work done: ad-hoc, or a log of a planned activity (ADR-0038)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivityLogCreateRequest"
+      responses:
+        "201":
+          description: The new log entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityLog"
+        "400":
+          description: Missing/invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    get:
+      operationId: listActivityLogs
+      security:
+        - api_key: []
+      summary: Farm work done, newest first, paged
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+        - name: cursor
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of activity logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityLogPage"
+        "400":
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/actions:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+    get:
+      operationId: listGardenActions
+      security:
+        - api_key: []
+      summary: The Supervisor's open suggestions for this garden (ADR-0039)
+      responses:
+        "200":
+          description: Open suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GardenAction"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/actions/{actionId}/confirm:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/ActionId"
+    post:
+      operationId: confirmGardenAction
+      security:
+        - api_key: []
+      summary: "Apply a Supervisor suggestion: sync, no model call (ADR-0039)"
+      responses:
+        "200":
+          description: Done (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+        "404":
+          description: No such suggestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The suggestion is no longer open or no longer applies
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
+  /gardens/{gardenId}/actions/{actionId}/reject:
+    parameters:
+      - $ref: "#/components/parameters/GardenId"
+      - $ref: "#/components/parameters/ActionId"
+    post:
+      operationId: rejectGardenAction
+      security:
+        - api_key: []
+      summary: Dismiss a Supervisor suggestion
+      responses:
+        "200":
+          description: Done (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+        "404":
+          description: No such suggestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The suggestion is no longer open or no longer applies
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "__LAMBDA_INTEGRATION_URI__"
+        passthroughBehavior: when_no_match
+    options: *cors-preflight
+
   /gardens/{gardenId}/tasks:
     parameters:
       - $ref: "#/components/parameters/GardenId"
@@ -873,6 +1138,13 @@ components:
 
     PlantId:
       name: plantId
+      in: path
+      required: true
+      schema:
+        type: string
+
+    ActivityId:
+      name: activityId
       in: path
       required: true
       schema:
@@ -1238,11 +1510,187 @@ components:
           minLength: 1
           description: e.g. "young", "bearing", or "removed" for a plant that died.
 
+    Schedule:
+      type: object
+      description: >
+        Counted from the last time the work was done (ADR-0038 §2). `everyDays`, or a window
+        `minDays`..`maxDays` ("every 3-4 weeks" = 21..28). Absent or null = one-off.
+      properties:
+        everyDays: {type: integer, minimum: 1, maximum: 365}
+        minDays: {type: integer, minimum: 1, maximum: 365}
+        maxDays: {type: integer, minimum: 1, maximum: 365}
+
+    Targets:
+      description: '"all" (garden-wide) or the plant ids the work is for.'
+      oneOf:
+        - type: string
+          enum: [all]
+        - type: array
+          minItems: 1
+          items: {type: string}
+
+    Assessment:
+      type: object
+      description: >
+        The Supervisor's view of an activity (ADR-0038 §4, ADR-0039): advisory only, never blocks.
+        `stale` when the activity changed after it was assessed.
+      required: [verdict, summary, benefits, risks, conflicts]
+      properties:
+        verdict: {type: string, enum: [beneficial, caution, harmful, unknown]}
+        summary: {type: string}
+        benefits: {type: array, items: {type: string}}
+        risks: {type: array, items: {type: string}}
+        conflicts:
+          type: array
+          items:
+            type: object
+            required: [with, reason]
+            properties:
+              with: {type: string}
+              reason: {type: string}
+        suggestion: {type: string}
+        assessedAt: {type: string}
+        stale: {type: boolean}
+
+    Activity:
+      type: object
+      required: [activityId, title, kind, targets, status, dueState, source]
+      properties:
+        activityId: {type: string}
+        title: {type: string}
+        kind: {type: string, enum: [input, operation]}
+        details: {type: string}
+        product: {type: string}
+        dose: {type: string}
+        targets:
+          $ref: "#/components/schemas/Targets"
+        schedule:
+          $ref: "#/components/schemas/Schedule"
+        status: {type: string, enum: [active, paused, done, archived]}
+        dueState: {type: string, enum: [overdue, due, upcoming, none, paused, done]}
+        startOn: {type: string, format: date}
+        nextDueOn: {type: string, format: date}
+        overdueOn: {type: string, format: date}
+        lastDoneOn: {type: string, format: date}
+        source: {type: string, enum: [user, confirmed]}
+        assessment:
+          $ref: "#/components/schemas/Assessment"
+
+    ActivityCreateRequest:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 120}
+        kind: {type: string, enum: [input, operation], default: operation}
+        details: {type: string, maxLength: 1000}
+        product: {type: string, maxLength: 200}
+        dose: {type: string, maxLength: 200}
+        targets:
+          $ref: "#/components/schemas/Targets"
+        schedule:
+          $ref: "#/components/schemas/Schedule"
+        startOn:
+          type: string
+          format: date
+          description: When it's first due (default today).
+
+    ActivityUpdateRequest:
+      type: object
+      properties:
+        title: {type: string, minLength: 1, maxLength: 120}
+        kind: {type: string, enum: [input, operation]}
+        details: {type: string, maxLength: 1000}
+        product: {type: string, maxLength: 200}
+        dose: {type: string, maxLength: 200}
+        targets:
+          $ref: "#/components/schemas/Targets"
+        schedule:
+          $ref: "#/components/schemas/Schedule"
+        startOn: {type: string, format: date}
+        status: {type: string, enum: [active, paused, archived]}
+
+    ActivityLogCreateRequest:
+      type: object
+      description: >
+        With `activityId`, the log starts from that activity's title/kind/details/targets (any can
+        be overridden) and moves its next due date. Without it, an ad-hoc log; `title` is required.
+      properties:
+        activityId: {type: string}
+        title: {type: string, minLength: 1, maxLength: 120}
+        kind: {type: string, enum: [input, operation]}
+        details: {type: string, maxLength: 1000}
+        product: {type: string, maxLength: 200}
+        dose: {type: string, maxLength: 200}
+        targets:
+          $ref: "#/components/schemas/Targets"
+        doneOn:
+          type: string
+          format: date
+          description: When it was done (not in the future; default today).
+        note: {type: string, maxLength: 1000}
+        mediaIds:
+          type: array
+          maxItems: 6
+          items: {type: string}
+
+    ActivityLog:
+      type: object
+      required: [logId, title, kind, targets, doneOn, media]
+      properties:
+        logId: {type: string}
+        activityId: {type: string}
+        title: {type: string}
+        kind: {type: string, enum: [input, operation]}
+        details: {type: string}
+        product: {type: string}
+        dose: {type: string}
+        targets:
+          $ref: "#/components/schemas/Targets"
+        doneOn: {type: string, format: date}
+        note: {type: string}
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlantPhoto"
+        assessment:
+          $ref: "#/components/schemas/Assessment"
+
+    ActivityLogPage:
+      type: object
+      required: [logs]
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityLog"
+        nextCursor: {type: string}
+
+    GardenAction:
+      type: object
+      description: A Supervisor suggestion; only the confirm endpoint applies it (ADR-0039 §5).
+      required: [actionId, type, summary, status, createdAt]
+      properties:
+        actionId: {type: string}
+        type:
+          type: string
+          enum: [create_activity, set_schedule, move_due, pause_activity, resume_activity]
+        summary: {type: string}
+        reason: {type: string}
+        status: {type: string, enum: [proposed, confirmed, rejected, superseded]}
+        activityId: {type: string}
+        createdAt: {type: string}
+
     PlantPhoto:
       type: object
       required: [mediaId, thumbUrl, url]
       properties:
         mediaId: {type: string}
+        kind:
+          type: string
+          enum: [photo, video]
+          description: >
+            A video's `thumbUrl` is its poster frame once processed, and `url` is the playable
+            original (ADR-0038 §7).
         thumbUrl:
           type: string
           description: Presigned GET url of the 512 px thumbnail (or the original if unprocessed).

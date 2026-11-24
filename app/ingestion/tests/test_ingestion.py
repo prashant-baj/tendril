@@ -207,3 +207,54 @@ def test_no_capture_time_means_no_taken_at_field(fakes):
     ingestion.handler(_s3_event(UPLOAD_KEY), None)
     (update,) = table.updates
     assert ":taken_at" not in _values(update)
+
+
+VIDEO_KEY = f"uploads/{G}/{M}/spray.MP4"
+POSTER_OK = {
+    "detectedFormat": "mp4",
+    "bytes": 40_000_000,
+    "durationSeconds": 14.2,
+    "width": 1080,
+    "height": 1920,
+    "outputs": [
+        {"name": "analysis", "format": "jpeg", "width": 1152, "height": 2048, "bytes": 380_000},
+        {"name": "thumb", "format": "jpeg", "width": 288, "height": 512, "bytes": 30_000},
+    ],
+}
+
+
+def test_videos_go_to_the_media_tool_for_a_poster_frame(fakes, monkeypatch):
+    _, _, table = fakes
+    lam = FakeLambda(body=POSTER_OK)
+    monkeypatch.setattr(ingestion, "_lambda", lam)
+    monkeypatch.setattr(ingestion, "MEDIA_TOOL_FUNCTION_NAME", "tendril-dev-tool-media")
+    assert ingestion.handler(_s3_event(VIDEO_KEY, size=40_000_000), None) == {
+        "outcomes": {"ready": 1}
+    }
+    ((fn, event),) = lam.events
+    assert fn == "tendril-dev-tool-media" and event["rawPath"] == "/poster"
+    assert json.loads(event["body"])["maxDurationSeconds"] == 60
+    (update,) = table.updates
+    v = _values(update)
+    assert v[":media_kind"] == "video" and v[":duration_seconds"] == 14.2
+    assert v[":thumb_s3_key"] == f"derived/{G}/{M}/thumb.jpg"
+
+
+def test_videos_may_be_up_to_100_mb(fakes):
+    _, lam, table = fakes
+    assert ingestion.handler(_s3_event(VIDEO_KEY, size=101 * 1024 * 1024), None) == {
+        "outcomes": {"failed": 1}
+    }
+    assert lam.events == []
+    assert _values(table.updates[0])[":processing_error"] == "larger than 100 MB"
+
+
+def test_a_video_over_60_seconds_is_marked_failed(fakes, monkeypatch):
+    _, _, table = fakes
+    monkeypatch.setattr(
+        ingestion,
+        "_lambda",
+        FakeLambda(status=422, body={"message": "video is longer than 60 seconds"}),
+    )
+    assert ingestion.handler(_s3_event(VIDEO_KEY, size=1000), None) == {"outcomes": {"failed": 1}}
+    assert "longer than 60 seconds" in _values(table.updates[0])[":processing_error"]

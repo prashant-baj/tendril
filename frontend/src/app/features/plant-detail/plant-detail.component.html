@@ -94,7 +94,11 @@
               @if (e.photos.length) {
                 <div class="photos">
                   @for (ph of e.photos; track ph.mediaId) {
-                    <a [href]="ph.url" target="_blank" rel="noopener"><img [src]="ph.thumbUrl" alt="Plant photo" /></a>
+                    @if (ph.kind === 'video') {
+                      <video controls preload="none" [src]="ph.url" [attr.poster]="ph.thumbUrl !== ph.url ? ph.thumbUrl : null"></video>
+                    } @else {
+                      <a [href]="ph.url" target="_blank" rel="noopener"><img [src]="ph.thumbUrl" alt="Plant photo" /></a>
+                    }
                   }
                 </div>
               }

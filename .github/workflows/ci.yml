@@ -33,6 +33,8 @@ jobs:
           -r app/tools/weather/requirements.txt
           -r app/tools/image/requirements.txt
           -r app/ingestion/requirements.txt
+          -r app/tools/media/requirements.txt
+          -r app/supervisor/requirements.txt
       - name: Lint
         run: ruff check .
       - name: Format check

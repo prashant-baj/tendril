@@ -1,0 +1,35 @@
+.screen { display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--td-color-bg-surface); border: 1px solid var(--td-color-line); border-radius: var(--td-radius-lg); box-shadow: var(--td-shadow-card); }
+.pad { padding: 16px; }
+h2 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+p { margin: 4px 0 0; font-size: 14px; line-height: 20px; }
+.muted { color: var(--td-color-ink-secondary); font-size: 13px; }
+.error { color: var(--td-color-red-ink); }
+.title { font-weight: 600; margin: 0; }
+.head, .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.between { justify-content: space-between; }
+.item { padding: 12px 0; border-top: 1px solid var(--td-color-line-soft); display: flex; flex-direction: column; gap: 6px; }
+.item:first-of-type { border-top: 0; }
+.overdue .title { color: var(--td-color-red-ink); }
+.due { font-size: 12px; font-weight: 600; color: var(--td-color-ink-secondary); }
+.d-overdue { color: var(--td-color-red-ink); }
+.d-due { color: var(--td-color-amber-ink); }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 14px;
+  border-radius: var(--td-radius-md); border: 1px solid var(--td-color-line);
+  background: var(--td-color-bg-surface); color: var(--td-color-ink);
+  font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  &.primary { background: var(--td-color-primary); border-color: var(--td-color-primary); color: #fff; }
+  &.small { height: 32px; padding: 0 10px; font-size: 13px; }
+  &:disabled { opacity: .5; cursor: default; }
+}
+.file { align-self: flex-start; }
+.link { background: none; border: 0; color: var(--td-color-primary); font: inherit; font-size: 13px; cursor: pointer; }
+.form { display: flex; flex-direction: column; gap: 8px; }
+.form input, .form select, .form textarea {
+  font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--td-color-line);
+  border-radius: var(--td-radius-md); background: var(--td-color-bg-surface); min-width: 0; flex: 1;
+}
+.form input[type='number'] { max-width: 90px; }
+.media { display: flex; gap: 8px; flex-wrap: wrap; }
+.media img, .media video { width: 120px; height: 120px; object-fit: cover; border-radius: var(--td-radius-md); background: #000; }

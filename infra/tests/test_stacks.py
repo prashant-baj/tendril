@@ -39,6 +39,8 @@ def _app(**extra_context) -> App:
             "weather_tool_image_repo": "tendril-dev-tool-weather",
             "image_tool_image_repo": "tendril-dev-tool-image",
             "ingestion_image_repo": "tendril-dev-ingestion",
+            "media_tool_image_repo": "tendril-dev-tool-media",
+            "supervisor_image_repo": "tendril-dev-supervisor",
             **extra_context,
         }
     )
@@ -55,9 +57,10 @@ def test_guardrail_resource_and_policies():
     tpl = Template.from_stack(GuardrailsStack(app, "gr", env_name="dev", env=ENV))
     # One per guardrails/*.json: vision (WS-04) + agronomy/irrigation/pest-disease/pruning
     # (configured 2026-09-13, ahead of PA-01's structured plan proposal).
-    # + plant_identifier (ADR-0034). Counted from the folder so a new specialist needs no edit.
+    # + plant_identifier (ADR-0034) + supervisor (ADR-0039). Counted from the folder so a new
+    # specialist needs no edit.
     n_policies = len(list((Path(__file__).resolve().parents[2] / "guardrails").glob("*.json")))
-    assert n_policies == 6
+    assert n_policies == 7
     tpl.resource_count_is("AWS::Bedrock::Guardrail", n_policies)
     tpl.resource_count_is("AWS::Bedrock::GuardrailVersion", n_policies)
     tpl.has_resource_properties(
@@ -1238,3 +1241,76 @@ def test_plant_identifier_is_deployed_but_marked_internal_in_the_manifest():
     # The manifest is a CDK token join; the flags appear as literal JSON fragments.
     assert '\\"internal\\":true' in manifest_json.replace(" ", "")
     assert '\\"internal\\":false' in manifest_json.replace(" ", "")
+
+
+# --- Supervisor (ADR-0039) + Media Tool (ADR-0038 §7) ---------------------------------------
+
+
+def test_supervisor_is_woken_by_activity_events_and_a_daily_0600_ist_agenda():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "acs", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "FunctionName": "tendril-dev-supervisor",
+            "Environment": {
+                "Variables": Match.object_like(
+                    {
+                        "PROMPT_NAME": "tendril-dev-supervisor-system",
+                        "GUARDRAIL_NAME": "tendril-dev-supervisor-guardrail",
+                        "SUPERVISOR_PROPOSALS_ENABLED": "false",
+                        "MODEL_ID": "global.amazon.nova-2-lite-v1:0",
+                    }
+                )
+            },
+        },
+    )
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        {
+            "Name": "tendril-dev-activity-events",
+            "EventPattern": {
+                "source": ["tendril.client-api"],
+                "detail-type": ["activity.planned", "activity.logged"],
+            },
+        },
+    )
+    tpl.has_resource_properties(
+        "AWS::Events::Rule",
+        {"Name": "tendril-dev-supervisor-daily", "ScheduleExpression": "cron(30 0 * * ? *)"},
+    )
+
+
+def test_supervisor_daily_proposals_follow_the_context_flag():
+    app = _app(supervisor_proposals_enabled="true", supervisor_model_id="some-other-model")
+    tpl = Template.from_stack(AgentCoreStack(app, "acs2", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "FunctionName": "tendril-dev-supervisor",
+            "Environment": {
+                "Variables": Match.object_like(
+                    {"SUPERVISOR_PROPOSALS_ENABLED": "true", "MODEL_ID": "some-other-model"}
+                )
+            },
+        },
+    )
+
+
+def test_media_tool_is_sized_for_video_and_ingestion_can_call_it():
+    app = _app()
+    tpl = Template.from_stack(AgentCoreStack(app, "acm", env_name="dev", env=ENV))
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        {"FunctionName": "tendril-dev-tool-media", "MemorySize": 1536, "Timeout": 60},
+    )
+    tpl.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "FunctionName": "tendril-dev-ingestion",
+            "Timeout": 90,
+            "Environment": {
+                "Variables": Match.object_like({"MEDIA_TOOL_FUNCTION_NAME": Match.any_value()})
+            },
+        },
+    )

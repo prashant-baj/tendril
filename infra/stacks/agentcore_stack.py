@@ -73,6 +73,7 @@ ORCHESTRATOR_DIR = Path(__file__).resolve().parents[2] / "app" / "orchestrator"
 TOOLS_DIR = Path(__file__).resolve().parents[2] / "app" / "tools"
 TRACKER_DIR = Path(__file__).resolve().parents[2] / "app" / "tracker"
 INGESTION_DIR = Path(__file__).resolve().parents[2] / "app" / "ingestion"
+SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "app" / "supervisor"
 
 # ADR-0033: only originals under this prefix trigger ingestion; processed files go under
 # `derived/`, which never matches, so the function cannot trigger itself.
@@ -107,6 +108,14 @@ TASK_CHECKIN_RECEIVED_DETAIL_TYPE = "task.checkin.received"
 # GOAL_EVENT_SOURCE) since the Client API never publishes it — a scheduled tick, not a user action.
 FOLLOWUP_DUE_EVENT_SOURCE = "tendril.tracker"
 FOLLOWUP_DUE_DETAIL_TYPE = "followup.due"
+
+# ADR-0038/0039: the Client API publishes these (same source) when farm work is planned or done;
+# the Supervisor assesses each one. The daily agenda is a scheduled rule with this detail-type.
+ACTIVITY_PLANNED_DETAIL_TYPE = "activity.planned"
+ACTIVITY_LOGGED_DETAIL_TYPE = "activity.logged"
+SUPERVISOR_DAILY_DETAIL_TYPE = "supervisor.daily"
+# 06:00 IST = 00:30 UTC (ADR-0039 §2, owner-confirmed).
+SUPERVISOR_DAILY_CRON = {"minute": "30", "hour": "0"}
 
 
 class AgentCoreStack(Stack):
@@ -320,7 +329,16 @@ class AgentCoreStack(Stack):
 
         # --- Ingestion Lambda (ADR-0033): process every uploaded photo once ---
         if "image" in self.tools:
-            self._add_ingestion(prefix, app_table, media_bucket, self.tools["image"]["function"])
+            self._add_ingestion(
+                prefix,
+                app_table,
+                media_bucket,
+                self.tools["image"]["function"],
+                (self.tools.get("media") or {}).get("function"),
+            )
+
+        # --- Supervisor Lambda (ADR-0039): assesses farm activities, keeps schedules sensible ---
+        self._add_supervisor(prefix, app_table, media_bucket, agent_manifest, context_model_id)
 
         # --- Tracker/Scheduler Lambda (Phase 7.5+: due-date follow-ups) ---
         tracker_image_repo = self.node.try_get_context("tracker_image_repo")
@@ -388,8 +406,10 @@ class AgentCoreStack(Stack):
         app_table: ddb.ITable,
         media_bucket: s3.IBucket,
         image_tool: lambda_.IFunction,
+        media_tool: lambda_.IFunction | None = None,
     ) -> None:
         """S3 `uploads/` -> Ingestion Lambda -> Image Tool -> `derived/` + Media record (ADR-0033).
+        Videos go to the Media Tool for a poster frame instead (ADR-0038 §7).
 
         Least privilege: GetObject only on `uploads/*` and PutObject only on `derived/*` (both used
         solely to sign the URLs handed to the stateless tool), UpdateItem on the app table, and
@@ -419,8 +439,9 @@ class AgentCoreStack(Stack):
             function_name=f"{prefix}-ingestion",
             code=code,
             architecture=lambda_.Architecture.ARM_64,
-            # The tool call dominates: up to 30s (image tool timeout) plus signing/DynamoDB.
-            timeout=Duration.seconds(60),
+            # The tool call dominates: up to 60s (media tool timeout, a 100 MB video) plus
+            # signing/DynamoDB.
+            timeout=Duration.seconds(90),
             memory_size=256,
             retry_attempts=2,
             on_failure=lambda_destinations.SqsDestination(failures),
@@ -428,6 +449,7 @@ class AgentCoreStack(Stack):
                 "APP_TABLE_NAME": app_table.table_name,
                 "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
                 "IMAGE_TOOL_FUNCTION_NAME": image_tool.function_name,
+                "MEDIA_TOOL_FUNCTION_NAME": media_tool.function_name if media_tool else "",
                 "LOG_LEVEL": "INFO",
             },
         )
@@ -447,6 +469,8 @@ class AgentCoreStack(Stack):
             iam.PolicyStatement(actions=["dynamodb:UpdateItem"], resources=[app_table.table_arn])
         )
         image_tool.grant_invoke(self.ingestion)
+        if media_tool:
+            media_tool.grant_invoke(self.ingestion)
 
         media_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
@@ -455,6 +479,111 @@ class AgentCoreStack(Stack):
         )
         CfnOutput(self, "IngestionArn", value=self.ingestion.function_arn)
         CfnOutput(self, "IngestionFailuresQueueUrl", value=failures.queue_url)
+
+    def _add_supervisor(
+        self,
+        prefix: str,
+        app_table: ddb.ITable,
+        media_bucket: s3.IBucket,
+        agent_manifest: dict,
+        context_model_id: str,
+    ) -> None:
+        """The Supervisor agent (ADR-0039): a Lambda-hosted Strands agent like the orchestrator,
+        woken by `activity.planned` / `activity.logged` and a daily 06:00 IST agenda.
+
+        It writes only `assessment` attributes and `ACTION#garden#` proposals (enforced in its
+        code; DynamoDB IAM can't scope attributes on these items); it reads the garden partition
+        and media (presigned for the vision specialist), consults the registry's specialists, and
+        resolves its externalized prompt and guardrail by name."""
+        image_repo = self.node.try_get_context("supervisor_image_repo")
+        if image_repo:
+            repo = ecr.Repository.from_repository_name(self, "SupervisorRepo", image_repo)
+            image_tag = self.node.try_get_context("supervisor_image_tag") or "latest"
+            code = lambda_.DockerImageCode.from_ecr(repo, tag=image_tag)
+        else:
+            code = lambda_.DockerImageCode.from_image_asset(
+                str(SUPERVISOR_DIR), platform=ecr_assets.Platform.LINUX_ARM64
+            )
+        proposals_enabled = (
+            str(self.node.try_get_context("supervisor_proposals_enabled")).strip().lower() == "true"
+        )
+        self.supervisor = lambda_.DockerImageFunction(
+            self,
+            "Supervisor",
+            function_name=f"{prefix}-supervisor",
+            code=code,
+            architecture=lambda_.Architecture.ARM_64,
+            timeout=Duration.minutes(5),
+            memory_size=512,
+            environment={
+                "APP_TABLE_NAME": app_table.table_name,
+                "MEDIA_BUCKET_NAME": media_bucket.bucket_name,
+                "MODEL_ID": self.node.try_get_context("supervisor_model_id") or context_model_id,
+                "PROMPT_NAME": f"{prefix}-supervisor-system",  # owned by PromptsStack
+                "GUARDRAIL_NAME": f"{prefix}-supervisor-guardrail",  # owned by GuardrailsStack
+                "AGENT_MANIFEST": self.to_json_string(agent_manifest),
+                # ADR-0039 §6: daily-agenda proposals only after the scheduling evals pass.
+                "SUPERVISOR_PROPOSALS_ENABLED": "true" if proposals_enabled else "false",
+                "LOG_LEVEL": "INFO",
+            },
+        )
+        app_table.grant_read_write_data(self.supervisor)
+        media_bucket.grant_read(self.supervisor)
+        self.supervisor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:ApplyGuardrail",
+                    "bedrock:ListGuardrails",
+                    "bedrock:ListPrompts",
+                ],
+                resources=["*"],
+            )
+        )
+        self.supervisor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:GetPrompt"],
+                resources=[f"arn:aws:bedrock:{self.region}:{self.account}:prompt/*"],
+            )
+        )
+        # Read-only consultation of the registered specialists (ADR-0039 §4); never a wildcard.
+        self.supervisor.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[
+                    resource
+                    for runtime in self.runtimes.values()
+                    for resource in (
+                        runtime.agent_runtime_arn,
+                        f"{runtime.agent_runtime_arn}/runtime-endpoint/*",
+                    )
+                ],
+            )
+        )
+        events.Rule(
+            self,
+            "ActivityEventsRule",
+            rule_name=f"{prefix}-activity-events",
+            event_pattern=events.EventPattern(
+                source=[GOAL_EVENT_SOURCE],
+                detail_type=[ACTIVITY_PLANNED_DETAIL_TYPE, ACTIVITY_LOGGED_DETAIL_TYPE],
+            ),
+        ).add_target(targets.LambdaFunction(self.supervisor))
+        events.Rule(
+            self,
+            "SupervisorDailyRule",
+            rule_name=f"{prefix}-supervisor-daily",
+            schedule=events.Schedule.cron(**SUPERVISOR_DAILY_CRON),
+        ).add_target(
+            targets.LambdaFunction(
+                self.supervisor,
+                event=events.RuleTargetInput.from_object(
+                    {"detail-type": SUPERVISOR_DAILY_DETAIL_TYPE, "detail": {}}
+                ),
+            )
+        )
+        CfnOutput(self, "SupervisorArn", value=self.supervisor.function_arn)
 
     def _make_agent_role(
         self, name: str, tool_names: list[str], memory_config: dict | None = None

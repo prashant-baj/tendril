@@ -287,7 +287,42 @@ GARDEN_CONTEXT_FIELDS = (
 )
 
 
-def _render_garden_context(garden: dict[str, Any] | None) -> str:
+RECENT_WORK_LINES = 10
+
+
+def _render_farm_work(logs: list[dict[str, Any]], activities: list[dict[str, Any]]) -> list[str]:
+    """ADR-0038 §6: the last few pieces of farm work (with the Supervisor's verdict) and what's due,
+    so advice accounts for work already done ("you sprayed 4 days ago")."""
+    lines: list[str] = []
+    recent = sorted(logs, key=lambda log: log.get("done_on", ""), reverse=True)[:RECENT_WORK_LINES]
+    if recent:
+        lines.append("Recent farm work (newest first):")
+        for log in recent:
+            verdict = (log.get("assessment") or {}).get("verdict")
+            dose = f", {log['dose']}" if log.get("dose") else ""
+            lines.append(
+                f"- {log.get('done_on')}: {log.get('title', '')}{dose}"
+                + (f" [{verdict}]" if verdict else "")
+            )
+    today = datetime.now(UTC).date().isoformat()
+    due = [
+        a
+        for a in activities
+        if a.get("status") == "active" and a.get("next_due_on") and a["next_due_on"] <= today
+    ]
+    if due:
+        lines.append(
+            "Farm work due now: "
+            + "; ".join(f"{a.get('title', '')} (from {a['next_due_on']})" for a in due[:5])
+        )
+    return lines
+
+
+def _render_garden_context(
+    garden: dict[str, Any] | None,
+    logs: list[dict[str, Any]] | None = None,
+    activities: list[dict[str, Any]] | None = None,
+) -> str:
     """Renders a Garden item as a compact `<garden_context>` block (ADR-0032), or "" when there
     is nothing to say. `notification_recipients` are deliberately never rendered: phone numbers
     are personal data no model needs to reason with."""
@@ -312,6 +347,7 @@ def _render_garden_context(garden: dict[str, Any] | None) -> str:
             f"Plants are tagged with numbered stakes #{int(stake_range['min'])}"
             f"-#{int(stake_range['max'])}"
         )
+    lines += _render_farm_work(logs or [], activities or [])
     if not lines:
         return ""
     return (
@@ -334,7 +370,30 @@ def _load_garden_context(garden_id: str) -> str:
     # Guard on the item's own sk: only a real Garden METADATA item is rendered.
     if not garden or garden.get("sk") != "METADATA":
         return ""
-    return _render_garden_context(garden)
+    logs: list[dict[str, Any]] = []
+    activities: list[dict[str, Any]] = []
+    try:
+        logs = (
+            _get_table()
+            .query(
+                KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+                & Key("sk").begins_with("ACTLOG#"),
+                ScanIndexForward=False,
+                Limit=RECENT_WORK_LINES,
+            )
+            .get("Items", [])
+        )
+        activities = (
+            _get_table()
+            .query(
+                KeyConditionExpression=Key("pk").eq(f"GARDEN#{garden_id}")
+                & Key("sk").begins_with("ACTIVITY#")
+            )
+            .get("Items", [])
+        )
+    except Exception:
+        logger.exception("farm_work_context_failed garden_id=%s", garden_id)
+    return _render_garden_context(garden, logs, activities)
 
 
 def _make_specialist_tool(

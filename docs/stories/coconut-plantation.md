@@ -285,7 +285,10 @@ ones, **so that** humic/jivamrut/spray/leaching are planned, done, and never mis
 
 **Tasks** — ADR for the activity-log view + recurring-due rule; wire recurring due onto the Tracker;
 activity-log read + UI; tests; dev smoke test.
-**Dependencies:** CP-01. **Blocking ADR:** Garden activity log. **Status:** ☐ to do.
+**Dependencies:** CP-01. **Blocking ADR:** ADR-0038 (Accepted 2026-11-24): activities and logs,
+schedules counted from the last done, photos and videos, assessment by the Supervisor (ADR-0039).
+**Status:** ◐ built + tested 2026-11-24; Coconut Plot seeded (humic every 21–28 days, 15 Nov spray).
+**Open:** deploy + dev verification.
 
 ---
 
@@ -317,7 +320,10 @@ activity on its own, **so that** I'm told what to do next instead of reading 105
 extend orchestrator); deterministic rollup; scheduled trigger; Supervisor loop + agenda entity;
 garden specialist registry entry + prompt/guardrail; eval scenarios + tracing; dev smoke test.
 **Dependencies:** CP-05 (inspections to roll up), CP-06 (activities to create). **Blocking ADR:**
-Supervisor agent + garden-state assessment. **Status:** ☐ to do.
+Supervisor agent + garden-state assessment. **Status:** ◐ first slice built 2026-11-24 under
+**ADR-0039**: the Supervisor assesses farm activities and proposes schedule changes, with a daily
+06:00 IST agenda. Proposals stay gated until the agenda evals pass. **Open:** the block-level
+garden assessment, standing goals, and submitting goals to the orchestrator.
 
 ---
 

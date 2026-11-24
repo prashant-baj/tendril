@@ -1,0 +1,91 @@
+{
+  "description": "ADR-0039 §6: Supervisor eval scenarios from the owner's practice. 'assess' scenarios score the verdict (one of `verdicts`) and, when expect_conflict is true, that a conflict is named. 'agenda' scenarios score the daily review; they gate SUPERVISOR_PROPOSALS_ENABLED. Run with scripts/eval_supervisor.py (live model, your own credentials, never in CI).",
+  "garden": {
+    "name": "Eval Plot",
+    "geolocation": "Kopargaon, Maharashtra",
+    "climate_zone": "Maharashtra North region near Nasik",
+    "vision": "105 young coconut palms (D x T hybrid) at 25 ft spacing.",
+    "context": {
+      "irrigation": "16 mm drip, two drippers per palm",
+      "soil": "Heavy black clay; white salt crust at some basins; slow drainage."
+    }
+  },
+  "plants": {"healthy": 18, "ok": 3, "watch": 6},
+  "watch_notes": [
+    "#91: paler/yellowing with brown tips; likely lime-locked nutrition.",
+    "#102: lower leaves yellowing; salt crust at base."
+  ],
+  "today": "2026-11-24",
+  "scenarios": [
+    {
+      "id": "humic-on-schedule",
+      "kind": "assess",
+      "logged": false,
+      "activity": {"title": "Humic acid drench", "kind": "input", "dose": "via drip", "schedule": {"every_days_min": 21, "every_days_max": 28}, "next_due_on": "2026-11-13", "last_done_on": "2026-10-23"},
+      "recent": [{"done_on": "2026-10-23", "title": "Humic acid drench", "dose": "via drip"}],
+      "forecast": [{"date": "2026-11-25", "tmax": 31, "rain_mm": 0, "rain_chance": 5}],
+      "verdicts": ["beneficial"],
+      "expect_conflict": false
+    },
+    {
+      "id": "spray-two-days-after-drench",
+      "kind": "assess",
+      "logged": true,
+      "activity": {"title": "Foliar spray", "kind": "input", "product": "Neem oil 40 ml + Dhartivita 10 g + sticker 5 ml", "dose": "2 pumps", "done_on": "2026-11-24"},
+      "recent": [{"done_on": "2026-11-22", "title": "Humic acid drench", "dose": "via drip"}],
+      "forecast": [{"date": "2026-11-25", "tmax": 32, "rain_mm": 0, "rain_chance": 5}],
+      "verdicts": ["caution"],
+      "expect_conflict": true
+    },
+    {
+      "id": "heavy-watering-on-salt-crusted-clay",
+      "kind": "assess",
+      "logged": false,
+      "activity": {"title": "Flood basins with extra water daily", "kind": "operation", "details": "Run drip 6 hours every day on all basins.", "schedule": {"every_days": 1}, "next_due_on": "2026-11-25"},
+      "recent": [],
+      "forecast": [{"date": "2026-11-25", "tmax": 30, "rain_mm": 0, "rain_chance": 5}],
+      "verdicts": ["caution", "harmful"],
+      "expect_conflict": false
+    },
+    {
+      "id": "spray-before-rain",
+      "kind": "assess",
+      "logged": false,
+      "activity": {"title": "Foliar spray", "kind": "input", "product": "Neem oil 40 ml + sticker 5 ml", "next_due_on": "2026-11-24"},
+      "recent": [],
+      "forecast": [{"date": "2026-11-24", "tmax": 29, "rain_mm": 18, "rain_chance": 90}, {"date": "2026-11-25", "tmax": 30, "rain_mm": 0, "rain_chance": 10}],
+      "verdicts": ["caution"],
+      "expect_conflict": false
+    },
+    {
+      "id": "jivamrut-then-copper",
+      "kind": "assess",
+      "logged": false,
+      "activity": {"title": "Copper oxychloride spray", "kind": "input", "dose": "3 g/L", "next_due_on": "2026-11-25"},
+      "recent": [{"done_on": "2026-11-23", "title": "Jivamrut drench", "dose": "200 L via drip"}],
+      "forecast": [{"date": "2026-11-25", "tmax": 31, "rain_mm": 0, "rain_chance": 5}],
+      "verdicts": ["caution", "harmful"],
+      "expect_conflict": true
+    },
+    {
+      "id": "agenda-rain-before-due-spray",
+      "kind": "agenda",
+      "activities": [
+        {"activity_id": "spray1", "title": "Foliar spray", "kind": "input", "status": "active", "schedule": {"every_days": 14}, "next_due_on": "2026-11-24", "overdue_on": "2026-11-24", "last_done_on": "2026-11-10"}
+      ],
+      "recent": [{"done_on": "2026-11-10", "title": "Foliar spray"}],
+      "forecast": [{"date": "2026-11-24", "tmax": 28, "rain_mm": 22, "rain_chance": 95}, {"date": "2026-11-25", "tmax": 29, "rain_mm": 3, "rain_chance": 40}, {"date": "2026-11-26", "tmax": 31, "rain_mm": 0, "rain_chance": 5}],
+      "expect_suggestion": {"type": "move_due", "activity_id": "spray1"}
+    },
+    {
+      "id": "agenda-nothing-to-change",
+      "kind": "agenda",
+      "activities": [
+        {"activity_id": "humic1", "title": "Humic acid drench", "kind": "input", "status": "active", "schedule": {"every_days_min": 21, "every_days_max": 28}, "next_due_on": "2026-12-05", "overdue_on": "2026-12-12", "last_done_on": "2026-11-14"}
+      ],
+      "recent": [{"done_on": "2026-11-14", "title": "Humic acid drench"}],
+      "forecast": [{"date": "2026-11-24", "tmax": 31, "rain_mm": 0, "rain_chance": 5}],
+      "expect_suggestion": null
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: var(--td-radius-pill);
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--td-color-line-soft);
+  color: var(--td-color-ink-secondary);
+  &:disabled { cursor: default; }
+}
+.stale { font-weight: 400; }
+.details { margin-top: 6px; font-size: 13px; line-height: 18px; padding: 8px 10px; border-radius: var(--td-radius-md); background: var(--td-color-line-soft); }
+.details p { margin: 2px 0; }
+.summary { font-weight: 600; }
+.v-beneficial .badge { background: var(--td-color-primary-surface); color: var(--td-color-primary); }
+.v-caution .badge, .v-caution .details { background: var(--td-color-amber-surface); color: var(--td-color-amber-ink); }
+.v-harmful .badge { background: var(--td-color-red-dot); color: #fff; }
+.v-harmful .details { background: var(--td-color-red-surface); color: var(--td-color-red-ink); border: 1px solid var(--td-color-red-dot); }

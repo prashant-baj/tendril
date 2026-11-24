@@ -65,6 +65,8 @@ export type PlantStatus = 'healthy' | 'ok' | 'watch';
 /** A photo in a plant's history: presigned thumbnail + analysis-copy urls, fresh per read. */
 export interface PlantPhoto {
   mediaId: string;
+  /** For a video (ADR-0038 §7): `thumbUrl` is its poster frame once processed, `url` plays it. */
+  kind?: 'photo' | 'video';
   thumbUrl: string;
   url: string;
 }

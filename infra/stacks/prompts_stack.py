@@ -40,6 +40,10 @@ PROMPT_CATALOG = {
         "cid": "PestDisease",
         "description": "System prompt for the pest & disease specialist: diagnosis and treatment advice.",
     },
+    "supervisor-system": {
+        "cid": "Supervisor",
+        "description": "System prompt for the Supervisor agent (ADR-0039): assesses farm activities for benefit and harm, and suggests schedule changes.",
+    },
     "plant-identifier-system": {
         "cid": "PlantIdentifier",
         "description": "System prompt for the internal plant identifier (ADR-0034): reads a plant's stake number from a photo, JSON only.",
